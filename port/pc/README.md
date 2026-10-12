@@ -59,7 +59,8 @@ rumble. Keyboard input is combined with the first controller for player one.
 
 Press **F10** in game to open the native settings overlay. It supports keyboard
 and controller navigation and exposes window mode and size, internal render
-scale, antialiasing, master volume, per-player controller assignment,
+scale, selectable original/match-window/16:9/16:10/21:9/32:9 presentation,
+antialiasing, master volume, per-player controller assignment,
 deadzones, sensitivity, inversion, rumble strength, complete keyboard and
 per-player controller rebinding (including triggers and stick directions),
 VSync and presentation frame limiting, and restore defaults. **Apply & Save**
@@ -67,6 +68,12 @@ writes the settings atomically under `%LOCALAPPDATA%\BattleTanxGA` and applies
 the supported video, audio, and input changes. Master volume scales the final
 SDL mix; the music and effects controls independently scale the two master
 buses already present in the original libmus audio engine.
+
+The aspect-ratio selector drives RT64's projection and extended-origin settings
+without changing the game's simulation. This is the renderer foundation for
+true widescreen; game-specific HUD placement, split-screen layouts, cutscenes,
+menus, and framebuffer effects still require visual validation before the
+widescreen milestone is considered complete.
 
 ### Optional gameplay mods
 

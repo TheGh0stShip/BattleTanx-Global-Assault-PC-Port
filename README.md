@@ -38,6 +38,9 @@ to play the full demonstration on YouTube.
 - Native Linux build path with Vulkan rendering.
 - Original menus and campaign gameplay are playable.
 - Keyboard and SDL game-controller input, rumble, and SDL audio are connected.
+- Original 4:3, match-window, 16:9, 16:10, 21:9, and 32:9 renderer projection
+  modes are selectable; game-specific HUD and split-screen validation remains
+  in progress.
 - Default-off gameplay mods provide extended fog-free visibility and
   independent turret aiming with dual sticks or mouse and keyboard.
 - Native Controller Pak persistence uses standard 32 KiB `.mpk` images in a

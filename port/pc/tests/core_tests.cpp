@@ -93,6 +93,7 @@ int main() {
     settings.window_mode = btga::WindowMode::Borderless;
     settings.window_width = 2560;
     settings.window_height = 1440;
+    settings.aspect_ratio = btga::AspectRatioMode::Ratio21x9;
     settings.render_scale = 2.0F;
     settings.antialiasing = 4;
     settings.master_volume = 0.625F;
@@ -113,6 +114,7 @@ int main() {
     const btga::PcSettings loaded = btga::PcSettings::load(settings_path);
     CHECK(loaded.window_mode == btga::WindowMode::Borderless);
     CHECK(loaded.window_width == 2560 && loaded.window_height == 1440);
+    CHECK(loaded.aspect_ratio == btga::AspectRatioMode::Ratio21x9);
     CHECK(loaded.render_scale == 2.0F && loaded.antialiasing == 4);
     CHECK(loaded.master_volume == 0.625F);
     CHECK(loaded.music_volume == 0.5F);
@@ -148,6 +150,11 @@ int main() {
     CHECK(validated.master_volume == 1.0F);
     CHECK(validated.music_volume == 0.5F);
     CHECK(validated.players[0].deadzone == 0.0F);
+
+    btga::PcSettings invalid_enum = btga::PcSettings::defaults();
+    invalid_enum.aspect_ratio = static_cast<btga::AspectRatioMode>(99);
+    invalid_enum.validate();
+    CHECK(invalid_enum.aspect_ratio == btga::AspectRatioMode::Original);
     std::filesystem::remove_all(settings_dir);
 
 }

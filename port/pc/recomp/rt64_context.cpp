@@ -42,6 +42,33 @@ bool environment_flag_enabled(const char* name) {
            text != "off" && text != "OFF";
 }
 
+void configure_aspect_ratio(RT64::UserConfiguration& config, btga::AspectRatioMode mode) {
+    using Ratio = RT64::UserConfiguration::AspectRatio;
+    if (mode == btga::AspectRatioMode::Original) {
+        config.aspectRatio = Ratio::Original;
+        config.extAspectRatio = Ratio::Original;
+        return;
+    }
+    if (mode == btga::AspectRatioMode::MatchWindow) {
+        config.aspectRatio = Ratio::Expand;
+        config.extAspectRatio = Ratio::Expand;
+        return;
+    }
+
+    double target = 16.0 / 9.0;
+    switch (mode) {
+    case btga::AspectRatioMode::Ratio16x10: target = 16.0 / 10.0; break;
+    case btga::AspectRatioMode::Ratio21x9: target = 21.0 / 9.0; break;
+    case btga::AspectRatioMode::Ratio32x9: target = 32.0 / 9.0; break;
+    case btga::AspectRatioMode::Ratio16x9:
+    default: break;
+    }
+    config.aspectRatio = Ratio::Manual;
+    config.aspectTarget = target;
+    config.extAspectRatio = Ratio::Manual;
+    config.extAspectTarget = target;
+}
+
 void open_external_url(const char* url) {
     if (SDL_OpenURL(url) != 0) {
         std::cerr << "Could not open " << url << ": " << SDL_GetError() << '\n';
@@ -271,8 +298,7 @@ public:
 #endif
         app_->userConfig.resolution = RT64::UserConfiguration::Resolution::Manual;
         app_->userConfig.resolutionMultiplier = pc_settings.render_scale;
-        app_->userConfig.aspectRatio = RT64::UserConfiguration::AspectRatio::Original;
-        app_->userConfig.extAspectRatio = RT64::UserConfiguration::AspectRatio::Original;
+        configure_aspect_ratio(app_->userConfig, pc_settings.aspect_ratio);
         switch (pc_settings.antialiasing) {
         case 2:
             app_->userConfig.antialiasing = RT64::UserConfiguration::Antialiasing::MSAA2X;
@@ -399,6 +425,7 @@ private:
         const auto previous_aa = app_->userConfig.msaaSampleCount();
         app_->userConfig.resolution = RT64::UserConfiguration::Resolution::Manual;
         app_->userConfig.resolutionMultiplier = draft_settings_.render_scale;
+        configure_aspect_ratio(app_->userConfig, draft_settings_.aspect_ratio);
         switch (draft_settings_.antialiasing) {
         case 2: app_->userConfig.antialiasing = RT64::UserConfiguration::Antialiasing::MSAA2X; break;
         case 4: app_->userConfig.antialiasing = RT64::UserConfiguration::Antialiasing::MSAA4X; break;
@@ -505,6 +532,13 @@ private:
                     }
                     ImGui::SliderInt("Window width", &draft_settings_.window_width, 640, 7680);
                     ImGui::SliderInt("Window height", &draft_settings_.window_height, 480, 4320);
+                    int aspect = static_cast<int>(draft_settings_.aspect_ratio);
+                    if (ImGui::Combo("Aspect ratio", &aspect,
+                                     "Original 4:3\0Match window\0" "16:9\0" "16:10\0"
+                                     "21:9\0" "32:9\0")) {
+                        draft_settings_.aspect_ratio = static_cast<btga::AspectRatioMode>(aspect);
+                    }
+                    ImGui::TextDisabled("Widescreen projection applies immediately; game-specific HUD validation is ongoing.");
                     ImGui::SliderFloat("Internal render scale", &draft_settings_.render_scale, 0.5F, 8.0F, "%.2fx");
                     int aa = draft_settings_.antialiasing == 8 ? 3 : draft_settings_.antialiasing / 2;
                     if (ImGui::Combo("Antialiasing", &aa, "Off\0MSAA 2x\0MSAA 4x\0MSAA 8x\0")) {

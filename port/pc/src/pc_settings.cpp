@@ -80,6 +80,17 @@ WindowMode parse_window_mode(std::string_view value, WindowMode fallback) {
     return fallback;
 }
 
+AspectRatioMode parse_aspect_ratio_mode(std::string_view value, AspectRatioMode fallback) {
+    value = trim(value);
+    if (value == "original") return AspectRatioMode::Original;
+    if (value == "match_window") return AspectRatioMode::MatchWindow;
+    if (value == "16:9") return AspectRatioMode::Ratio16x9;
+    if (value == "16:10") return AspectRatioMode::Ratio16x10;
+    if (value == "21:9") return AspectRatioMode::Ratio21x9;
+    if (value == "32:9") return AspectRatioMode::Ratio32x9;
+    return fallback;
+}
+
 void assign_string(std::string_view value, std::string& output) {
     value = trim(value);
     if (!value.empty()) output.assign(value);
@@ -108,6 +119,7 @@ void apply_key(PcSettings& settings, std::string_view key, std::string_view valu
     else if (key == "video.window_mode") settings.window_mode = parse_window_mode(value, settings.window_mode);
     else if (key == "video.window_width") parse_number(value, settings.window_width);
     else if (key == "video.window_height") parse_number(value, settings.window_height);
+    else if (key == "video.aspect_ratio") settings.aspect_ratio = parse_aspect_ratio_mode(value, settings.aspect_ratio);
     else if (key == "video.render_scale") parse_number(value, settings.render_scale);
     else if (key == "video.vsync") parse_bool(value, settings.vsync);
     else if (key == "video.frame_limit") parse_number(value, settings.frame_limit);
@@ -229,6 +241,7 @@ void PcSettings::save(const std::filesystem::path& path) const {
     stream << "video.window_mode=" << window_mode_name(clean.window_mode) << '\n';
     stream << "video.window_width=" << clean.window_width << '\n';
     stream << "video.window_height=" << clean.window_height << '\n';
+    stream << "video.aspect_ratio=" << aspect_ratio_mode_name(clean.aspect_ratio) << '\n';
     stream << "video.render_scale=" << clean.render_scale << '\n';
     stream << "video.vsync=" << std::boolalpha << clean.vsync << '\n';
     stream << "video.frame_limit=" << clean.frame_limit << '\n';
@@ -311,6 +324,18 @@ void PcSettings::validate() {
     version = current_version;
     window_width = std::clamp(window_width, 640, 7680);
     window_height = std::clamp(window_height, 480, 4320);
+    switch (aspect_ratio) {
+    case AspectRatioMode::Original:
+    case AspectRatioMode::MatchWindow:
+    case AspectRatioMode::Ratio16x9:
+    case AspectRatioMode::Ratio16x10:
+    case AspectRatioMode::Ratio21x9:
+    case AspectRatioMode::Ratio32x9:
+        break;
+    default:
+        aspect_ratio = AspectRatioMode::Original;
+        break;
+    }
     render_scale = std::clamp(render_scale, 0.5F, 8.0F);
     frame_limit = std::clamp(frame_limit, 0, 1000);
     if (frame_limit != 0) frame_limit = std::max(frame_limit, 20);
@@ -383,6 +408,18 @@ const char* window_mode_name(WindowMode mode) {
     case WindowMode::Fullscreen: return "fullscreen";
     }
     return "windowed";
+}
+
+const char* aspect_ratio_mode_name(AspectRatioMode mode) {
+    switch (mode) {
+    case AspectRatioMode::Original: return "original";
+    case AspectRatioMode::MatchWindow: return "match_window";
+    case AspectRatioMode::Ratio16x9: return "16:9";
+    case AspectRatioMode::Ratio16x10: return "16:10";
+    case AspectRatioMode::Ratio21x9: return "21:9";
+    case AspectRatioMode::Ratio32x9: return "32:9";
+    }
+    return "original";
 }
 
 } // namespace btga

@@ -12,6 +12,15 @@ enum class WindowMode {
     Fullscreen,
 };
 
+enum class AspectRatioMode {
+    Original,
+    MatchWindow,
+    Ratio16x9,
+    Ratio16x10,
+    Ratio21x9,
+    Ratio32x9,
+};
+
 struct PlayerSettings {
     float deadzone = 0.15F;
     float sensitivity = 1.0F;
@@ -60,13 +69,14 @@ struct ControllerBindings {
 };
 
 struct PcSettings {
-    static constexpr int current_version = 5;
+    static constexpr int current_version = 6;
     static constexpr std::size_t recent_rom_capacity = 5;
 
     int version = current_version;
     WindowMode window_mode = WindowMode::Windowed;
     int window_width = 960;
     int window_height = 720;
+    AspectRatioMode aspect_ratio = AspectRatioMode::Original;
     float render_scale = 1.0F;
     bool vsync = true;
     int frame_limit = 0;
@@ -92,5 +102,6 @@ struct PcSettings {
 
 std::filesystem::path pc_user_data_directory();
 const char* window_mode_name(WindowMode mode);
+const char* aspect_ratio_mode_name(AspectRatioMode mode);
 
 } // namespace btga
