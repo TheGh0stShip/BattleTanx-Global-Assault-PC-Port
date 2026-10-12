@@ -22,6 +22,14 @@ elif ! git -C "$nfd" apply --reverse --check "$patch" 2>/dev/null; then
     exit 1
 fi
 
+overlay_patch="$root/port/pc/recomp/patches/rt64-custom-overlay.patch"
+if git -C "$destination" apply --check "$overlay_patch" 2>/dev/null; then
+    git -C "$destination" apply "$overlay_patch"
+elif ! git -C "$destination" apply --reverse --check "$overlay_patch" 2>/dev/null; then
+    echo "RT64 custom-overlay patch does not apply cleanly" >&2
+    exit 1
+fi
+
 actual="$(git -C "$destination" rev-parse HEAD)"
 [[ "$actual" == "$revision" ]] || {
     echo "RT64 revision mismatch: expected $revision, got $actual" >&2

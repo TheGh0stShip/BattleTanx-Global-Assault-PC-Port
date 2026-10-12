@@ -1,0 +1,180 @@
+diff --git a/src/hle/rt64_application.cpp b/src/hle/rt64_application.cpp
+index 4e83f71..b088b2b 100644
+--- a/src/hle/rt64_application.cpp
++++ b/src/hle/rt64_application.cpp
+@@ -484,7 +484,7 @@ namespace RT64 {
+ 
+ #ifdef _WIN32
+     bool Application::windowMessageFilter(unsigned int message, WPARAM wParam, LPARAM lParam) {
+-        if (userConfig.developerMode && (presentQueue != nullptr) && (state != nullptr) && !FileDialog::isOpen) {
++        if ((userConfig.developerMode || customOverlayVisible) && (presentQueue != nullptr) && (state != nullptr) && !FileDialog::isOpen) {
+             const std::lock_guard lock(presentQueue->inspectorMutex);
+             if ((presentQueue->inspector != nullptr) && presentQueue->inspector->handleMessage(message, wParam, lParam)) {
+                 return true;
+@@ -493,6 +493,9 @@ namespace RT64 {
+ 
+         switch (message) {
+         case WM_KEYDOWN: {
++            if (!userConfig.developerMode) {
++                break;
++            }
+             switch (wParam) {
+             case VK_F1:
+                 processDeveloperShortcut(DeveloperShortcut::Inspector);
+@@ -518,14 +521,14 @@ namespace RT64 {
+ #endif
+ 
+     bool Application::sdlEventFilter(SDL_Event *event) {
+-        if (userConfig.developerMode && (presentQueue != nullptr) && (state != nullptr) && !FileDialog::isOpen) {
++        if ((userConfig.developerMode || customOverlayVisible) && (presentQueue != nullptr) && (state != nullptr) && !FileDialog::isOpen) {
+             const std::lock_guard lock(presentQueue->inspectorMutex);
+             if ((presentQueue->inspector != nullptr) && presentQueue->inspector->handleSdlEvent(event)) {
+                 return true;
+             }
+         }
+ 
+-        if (event->type == SDL_KEYDOWN) {
++        if (userConfig.developerMode && (event->type == SDL_KEYDOWN)) {
+             switch (event->key.keysym.scancode) {
+             case SDL_SCANCODE_F1:
+                 processDeveloperShortcut(DeveloperShortcut::Inspector);
+@@ -592,6 +595,25 @@ namespace RT64 {
+         };
+     }
+ 
++    void Application::setCustomOverlayVisible(bool visible) {
++        if ((presentQueue == nullptr) || (state == nullptr)) {
++            return;
++        }
++
++        const std::lock_guard lock(presentQueue->inspectorMutex);
++        customOverlayCloseFrames = 0;
++        customOverlayVisible = visible;
++        if (visible && (presentQueue->inspector == nullptr)) {
++            presentQueue->inspector = std::make_unique<Inspector>(device.get(), swapChain.get(), chosenGraphicsAPI, appWindow->sdlWindow);
++            if (!userPaths.isEmpty()) {
++                presentQueue->inspector->setIniPath(userPaths.imguiPath);
++            }
++        }
++        else if (!visible && !userConfig.developerMode) {
++            presentQueue->inspector.reset(nullptr);
++        }
++    }
++
+     void Application::end() {
+ #   if SCRIPT_ENABLED
+         if (currentScript != nullptr) {
+diff --git a/src/hle/rt64_application.h b/src/hle/rt64_application.h
+index 63d4089..3be591b 100644
+--- a/src/hle/rt64_application.h
++++ b/src/hle/rt64_application.h
+@@ -6,6 +6,7 @@
+ 
+ #include <sstream>
+ #include <filesystem>
++#include <functional>
+ 
+ #include "common/rt64_common.h"
+ #include "common/rt64_emulator_configuration.h"
+@@ -134,6 +135,9 @@ namespace RT64 {
+         std::unique_ptr<SharedQueueResources> sharedQueueResources;
+         std::unique_ptr<RenderInterface> renderInterface;
+         std::atomic<bool> debuggerPaused;
++        std::function<void()> customOverlayCallback;
++        std::atomic_bool customOverlayVisible = false;
++        std::atomic_int customOverlayCloseFrames = 0;
+         uint64_t frameCounter;
+         uint32_t threadsAvailable;
+         ProfilingTimer dlApiProfiler = ProfilingTimer(120);
+@@ -172,5 +176,6 @@ namespace RT64 {
+         void updateEmulatorConfig();
+         void updateEnhancementConfig();
+         void setFullScreen(bool fullscreen);
++        void setCustomOverlayVisible(bool visible);
+     };
+-};
+\ No newline at end of file
++};
+diff --git a/src/hle/rt64_application_window.cpp b/src/hle/rt64_application_window.cpp
+index 07ef521..3602751 100755
+--- a/src/hle/rt64_application_window.cpp
++++ b/src/hle/rt64_application_window.cpp
+@@ -59,15 +59,14 @@ namespace RT64 {
+         windowWrapper = std::make_unique<CocoaWindow>(window.window);
+ #   endif
+ 
+-        if (listener->usesWindowMessageFilter()) {
+-            if ((sdlWindow == nullptr) && SDL_WasInit(SDL_INIT_VIDEO)) {
+-                // We'd normally install the event filter here, but Mupen does not set its own event filter
+-                // until much later. Instead, we delegate this to the first time a screen update is sent.
+-                // FIXME: We attempt to get the first window created by SDL2. This can be improved later
+-                // by actually passing the SDL_Window handle through as a parameter.
+-                sdlWindow = SDL_GetWindowFromID(1);
+-            }
++        // Embedded runtimes can pass a native handle even though SDL owns the
++        // window. Discover it so an inspector created later uses the SDL ImGui
++        // backend and can receive events forwarded by the host event loop.
++        if ((sdlWindow == nullptr) && SDL_WasInit(SDL_INIT_VIDEO)) {
++            sdlWindow = SDL_GetWindowFromID(1);
++        }
+ 
++        if (listener->usesWindowMessageFilter()) {
+             if (sdlWindow == nullptr) {
+ #           ifdef _WIN32
+                 assert(HookedApplicationWindow == nullptr);
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index 6b0bb31..b794de1 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -1575,7 +1575,7 @@ namespace RT64 {
+ 
+         // Inspect the current workload before submission.
+         lastWorkloadIndex = ext.workloadQueue->writeCursor;
+-        if (ext.userConfig->developerMode) {
++        if (ext.userConfig->developerMode || ext.app->customOverlayVisible) {
+             inspect();
+         }
+ 
+@@ -1782,7 +1782,7 @@ namespace RT64 {
+     void State::updateScreen(const VI &newVI, bool fromEarlyPresent) {
+         // If the debugger has paused the plugin, keep submitting the last workload and screen VI for rendering and a present event.
+         if (debuggerInspector.paused && !fromEarlyPresent) {
+-            if (ext.userConfig->developerMode) {
++            if (ext.userConfig->developerMode || ext.app->customOverlayVisible) {
+                 inspect();
+             }
+             
+@@ -1948,6 +1948,12 @@ namespace RT64 {
+         InspectorMode inspectorMode = InspectorMode::None;
+         inspector->newFrame(ext.framebufferGraphicsWorker);
+ 
++        if (ext.app->customOverlayVisible && ext.app->customOverlayCallback) {
++            ext.app->customOverlayCallback();
++        }
++
++        if (ext.userConfig->developerMode) {
++
+         if (ext.app->freeCamClearQueued) {
+             debuggerInspector.camera.enabled = false;
+             ext.app->freeCamClearQueued = false;
+@@ -2565,7 +2571,13 @@ namespace RT64 {
+             ImGui::End();
+         }
+ 
++        }
++
+         inspector->endFrame();
++        const int closeFrames = ext.app->customOverlayCloseFrames.load();
++        if ((closeFrames > 0) && (ext.app->customOverlayCloseFrames.fetch_sub(1) == 1)) {
++            ext.app->customOverlayVisible.store(false);
++        }
+         ext.presentQueue->inspectorMutex.unlock();
+ 
+         // Everything must be recreated to support the new multisampling configuration, so we delegate this to the application instead.
+@@ -2736,4 +2748,4 @@ namespace RT64 {
+             break;
+         }
+     }
+-};
+\ No newline at end of file
++};

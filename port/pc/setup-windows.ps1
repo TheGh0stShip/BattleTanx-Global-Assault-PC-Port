@@ -47,6 +47,23 @@ function Checkout-Pinned {
     }
 }
 
+function Apply-CheckedPatch {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $Patch,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+    & git -C $Repository apply --check $Patch 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Invoke-Checked git @("-C", $Repository, "apply", $Patch) $Description
+        return
+    }
+    & git -C $Repository apply --reverse --check $Patch 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Description does not apply cleanly."
+    }
+}
+
 $root = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 if ($root.StartsWith("\\")) {
     throw "Use a native Windows checkout such as C:\src\BattleTanx-Global-Assault-PC-Port, not a WSL UNC path."
@@ -89,16 +106,10 @@ Checkout-Pinned "https://github.com/N64Recomp/N64ModernRuntime.git" $runtime $ru
 Checkout-Pinned "https://github.com/rt64/rt64.git" $rt64 $rt64Revision
 
 $nfd = Join-Path $rt64 "src\contrib\nativefiledialog-extended"
-$patch = Join-Path $root "port\pc\recomp\patches\rt64-nfd-stub.patch"
-& git -C $nfd apply --check $patch 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Invoke-Checked git @("-C", $nfd, "apply", $patch) "Applying the RT64 file-dialog patch"
-} else {
-    & git -C $nfd apply --reverse --check $patch 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        throw "The RT64 file-dialog patch does not apply cleanly."
-    }
-}
+Apply-CheckedPatch $nfd (Join-Path $root "port\pc\recomp\patches\rt64-nfd-stub.patch") `
+    "Applying the RT64 file-dialog patch"
+Apply-CheckedPatch $rt64 (Join-Path $root "port\pc\recomp\patches\rt64-custom-overlay.patch") `
+    "Applying the BattleTanx settings-overlay patch"
 
 $recompBuild = Join-Path $n64Recomp "build"
 Invoke-Checked $cmake @(

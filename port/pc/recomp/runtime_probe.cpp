@@ -56,6 +56,7 @@ btga::PcSettings pc_settings = btga::PcSettings::defaults();
 SDL_Window* window = nullptr;
 SDL_AudioDeviceID audio_device = 0;
 std::mutex audio_mutex;
+std::mutex input_settings_mutex;
 std::uint32_t audio_frequency = 44100;
 std::array<SDL_GameController*, max_controllers> gamepads{};
 bool interactive = false;
@@ -161,9 +162,14 @@ void queue_audio(std::int16_t* samples, std::size_t sample_count) {
         return;
     }
 
-    if (pc_settings.master_volume < 1.0F) {
+    float master_volume = 1.0F;
+    {
+        const std::lock_guard settings_lock(input_settings_mutex);
+        master_volume = pc_settings.master_volume;
+    }
+    if (master_volume < 1.0F) {
         for (std::size_t i = 0; i < sample_count; ++i) {
-            const float scaled = static_cast<float>(samples[i]) * pc_settings.master_volume;
+            const float scaled = static_cast<float>(samples[i]) * master_volume;
             samples[i] = static_cast<std::int16_t>(std::clamp(
                 scaled, static_cast<float>((std::numeric_limits<std::int16_t>::min)()),
                 static_cast<float>((std::numeric_limits<std::int16_t>::max)())));
@@ -236,6 +242,8 @@ SDL_GameController* configured_gamepad(int controller) {
 void poll_input() {
 #ifdef BTGA_HAS_RT64
     if (!interactive) return;
+    const std::lock_guard lock(input_settings_mutex);
+    if (btga::renderer::consume_settings_update(pc_settings)) configure_keyboard();
     SDL_PumpEvents();
     for (auto& gamepad : gamepads) {
         if (gamepad && !SDL_GameControllerGetAttached(gamepad)) {
@@ -269,9 +277,11 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
     }
 #ifdef BTGA_HAS_RT64
     if (interactive) {
+        const std::lock_guard lock(input_settings_mutex);
         *buttons = 0;
         *x = 0.0F;
         *y = 0.0F;
+        if (btga::renderer::settings_overlay_visible()) return true;
         if (controller == 0) {
             const auto* keys = SDL_GetKeyboardState(nullptr);
             *buttons = (keys[keyboard.button_a] ? 0x8000 : 0) | (keys[keyboard.button_b] ? 0x4000 : 0) |
@@ -322,6 +332,7 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
 }
 void set_rumble(int controller, bool enabled) {
 #ifdef BTGA_HAS_RT64
+    const std::lock_guard lock(input_settings_mutex);
     if (interactive && controller >= 0 && controller < max_controllers &&
         configured_gamepad(controller)) {
         SDL_GameController* gamepad = configured_gamepad(controller);
@@ -341,6 +352,7 @@ ultramodern::input::connected_device_info_t connected_device(int controller) {
         return {ultramodern::input::Device::Controller, ultramodern::input::Pak::RumblePak};
     }
 #ifdef BTGA_HAS_RT64
+    const std::lock_guard lock(input_settings_mutex);
     if (interactive && controller > 0 && controller < max_controllers &&
         configured_gamepad(controller)) {
         return {ultramodern::input::Device::Controller, ultramodern::input::Pak::RumblePak};
@@ -393,9 +405,14 @@ void drive_headless_runtime(void*) {
     if (interactive) {
         SDL_Event event{};
         while (SDL_PollEvent(&event)) {
+            btga::renderer::process_settings_event(&event);
             if (event.type == SDL_QUIT) {
                 ultramodern::quit();
                 return;
+            }
+            if (event.type == SDL_KEYDOWN && !event.key.repeat &&
+                event.key.keysym.scancode == SDL_SCANCODE_F10) {
+                btga::renderer::toggle_settings_overlay();
             }
         }
         if (!boot_requested) {

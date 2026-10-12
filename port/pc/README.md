@@ -49,6 +49,16 @@ Up to four SDL game controllers are assigned to N64 ports in discovery order
 and use the left stick, face and shoulder buttons, left trigger, D-pad, and
 rumble. Keyboard input is combined with the first controller for player one.
 
+Press **F10** in game to open the native settings overlay. It supports keyboard
+and controller navigation and exposes window mode and size, internal render
+scale, antialiasing, master volume, per-player controller assignment,
+deadzones, sensitivity, inversion, rumble strength, complete keyboard
+rebinding, and restore defaults. **Apply & Save** writes the settings
+atomically under `%LOCALAPPDATA%\BattleTanxGA` and applies the supported video,
+audio, and input changes. VSync/frame limiting and separate music/effects
+mixing remain forthcoming runtime integrations rather than being presented as
+working controls.
+
 ## Renderer diagnostics
 
 RT64's developer inspector can be enabled for renderer debugging without
