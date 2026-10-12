@@ -99,6 +99,10 @@ world-culling and projection distance. This exposes substantially more of each
 level at once. Some distant geometry may become visible that the original game
 never expected to draw simultaneously.
 
+![BattleTanx: Global Assault PC port with the No Fog and Increased Draw Distance mod enabled](docs/media/mods/no-fog.png)
+
+*No Fog / Increased Draw Distance enabled in the native PC port.*
+
 ### Aim-Down-Turret / Independent Turret Aiming
 
 Enable **Independent dual-stick turret aiming** to control a rotating turret
@@ -117,6 +121,12 @@ separately from the vehicle hull:
 Sensitivity and inversion options are available under **F10 → Controllers**.
 See the [complete controls guide](docs/CONTROLS.md#independent-turret-aiming-mod)
 for full details.
+
+![Aim-Down-Turret mode demonstrating independent turret aim and hull-direction movement](docs/media/mods/aim-down-turret.gif)
+
+*Aim-Down-Turret demonstration: the turret remains independently aimed while
+the vehicle moves and turns on its hull heading. [Watch the complete mod
+demonstration on YouTube](https://www.youtube.com/watch?v=dkHIju1Jj2s).*
 
 ## Build and run the PC port
 
