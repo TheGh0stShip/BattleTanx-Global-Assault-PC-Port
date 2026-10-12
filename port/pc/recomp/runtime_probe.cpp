@@ -482,7 +482,7 @@ int main(int argc, char** argv) {
     recomp::Configuration config{
         .argc = 0,
         .argv = nullptr,
-        .project_version = {0, 1, 0},
+        .project_version = {0, 2, 0},
         .window_handle = selected_window,
         .rsp_callbacks = {.get_rsp_microcode = select_rsp_microcode},
         .renderer_callbacks = {.create_render_context =

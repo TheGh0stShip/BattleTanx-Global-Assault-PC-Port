@@ -80,7 +80,7 @@ source paths because MSVC/Ninja dependency handling is unreliable there.
 Create a redistributable, ROM-free ZIP after building:
 
 ```powershell
-./port/pc/package-windows.ps1 -BuildDirectory build-pc-windows -Version 0.1.0
+./port/pc/package-windows.ps1 -BuildDirectory build-pc-windows -Version 0.2.0
 ```
 
 The archive contains the executable, launcher, required DLLs, license, and PC runtime

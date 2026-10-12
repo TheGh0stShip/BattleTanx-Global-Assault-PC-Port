@@ -69,7 +69,7 @@ manual and Linux setup paths are in
 Create a ROM-free distributable ZIP with:
 
 ```powershell
-./port/pc/package-windows.ps1 -BuildDirectory build-pc-windows -Version 0.1.0
+./port/pc/package-windows.ps1 -BuildDirectory build-pc-windows -Version 0.2.0
 ```
 
 Controls, Linux/headless commands, save locations, renderer diagnostics, and
