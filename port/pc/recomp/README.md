@@ -106,5 +106,7 @@ loop. With `BTGA_BUILD_RT64=ON`, that loop is included in
 
 The interactive mode creates a resizable Vulkan window, sends the game's
 display lists through RT64, queues stereo audio through SDL, and supplies a
-basic keyboard mapping: WASD for the analog stick, X/Z for A/B, Enter for
-Start, and Q/E for L/R. The bounded `--boot` mode remains headless for CI.
+basic keyboard mapping: WASD for the analog stick, X/Z for A/B, left Shift for
+Z, Enter for Start, Q/E for L/R, arrows for the D-pad, and IJKL for C buttons.
+SDL game controllers use the left stick, face/shoulder buttons, left trigger,
+D-pad, and rumble. The bounded `--boot` mode remains headless for CI.

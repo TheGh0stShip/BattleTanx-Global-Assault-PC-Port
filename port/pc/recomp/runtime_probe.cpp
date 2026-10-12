@@ -34,6 +34,7 @@ std::atomic_uint32_t rsp_requests{0};
 #ifdef BTGA_HAS_RT64
 SDL_Window* window = nullptr;
 SDL_AudioDeviceID audio_device = 0;
+SDL_GameController* gamepad = nullptr;
 bool interactive = false;
 #endif
 
@@ -97,7 +98,21 @@ void configure_audio(std::uint32_t frequency) {
 }
 #endif
 
-void poll_input() {}
+void poll_input() {
+#ifdef BTGA_HAS_RT64
+    if (!interactive) return;
+    SDL_PumpEvents();
+    if (gamepad && !SDL_GameControllerGetAttached(gamepad)) {
+        SDL_GameControllerClose(gamepad);
+        gamepad = nullptr;
+    }
+    if (!gamepad) {
+        for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+            if (SDL_IsGameController(i)) { gamepad = SDL_GameControllerOpen(i); break; }
+        }
+    }
+#endif
+}
 bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
     if (controller != 0) {
         return false;
@@ -106,17 +121,50 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
     if (interactive) {
         const auto* keys = SDL_GetKeyboardState(nullptr);
         *buttons = (keys[SDL_SCANCODE_X] ? 0x8000 : 0) | (keys[SDL_SCANCODE_Z] ? 0x4000 : 0) |
-                   (keys[SDL_SCANCODE_RETURN] ? 0x1000 : 0) | (keys[SDL_SCANCODE_Q] ? 0x20 : 0) |
-                   (keys[SDL_SCANCODE_E] ? 0x10 : 0);
+                   (keys[SDL_SCANCODE_LSHIFT] ? 0x2000 : 0) | (keys[SDL_SCANCODE_RETURN] ? 0x1000 : 0) |
+                   (keys[SDL_SCANCODE_UP] ? 0x0800 : 0) | (keys[SDL_SCANCODE_DOWN] ? 0x0400 : 0) |
+                   (keys[SDL_SCANCODE_LEFT] ? 0x0200 : 0) | (keys[SDL_SCANCODE_RIGHT] ? 0x0100 : 0) |
+                   (keys[SDL_SCANCODE_Q] ? 0x20 : 0) | (keys[SDL_SCANCODE_E] ? 0x10 : 0) |
+                   (keys[SDL_SCANCODE_I] ? 0x08 : 0) | (keys[SDL_SCANCODE_K] ? 0x04 : 0) |
+                   (keys[SDL_SCANCODE_J] ? 0x02 : 0) | (keys[SDL_SCANCODE_L] ? 0x01 : 0);
         *x = float(keys[SDL_SCANCODE_D] - keys[SDL_SCANCODE_A]);
         *y = float(keys[SDL_SCANCODE_W] - keys[SDL_SCANCODE_S]);
+        if (gamepad) {
+            auto pressed = [](SDL_GameControllerButton b) { return SDL_GameControllerGetButton(gamepad, b) != 0; };
+            *buttons |= (pressed(SDL_CONTROLLER_BUTTON_A) ? 0x8000 : 0) |
+                        (pressed(SDL_CONTROLLER_BUTTON_X) ? 0x4000 : 0) |
+                        (pressed(SDL_CONTROLLER_BUTTON_BACK) ? 0x2000 : 0) |
+                        (pressed(SDL_CONTROLLER_BUTTON_START) ? 0x1000 : 0) |
+                        (pressed(SDL_CONTROLLER_BUTTON_DPAD_UP) ? 0x0800 : 0) |
+                        (pressed(SDL_CONTROLLER_BUTTON_DPAD_DOWN) ? 0x0400 : 0) |
+                        (pressed(SDL_CONTROLLER_BUTTON_DPAD_LEFT) ? 0x0200 : 0) |
+                        (pressed(SDL_CONTROLLER_BUTTON_DPAD_RIGHT) ? 0x0100 : 0) |
+                        (pressed(SDL_CONTROLLER_BUTTON_LEFTSHOULDER) ? 0x20 : 0) |
+                        (pressed(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) ? 0x10 : 0) |
+                        (pressed(SDL_CONTROLLER_BUTTON_Y) ? 0x08 : 0) |
+                        (pressed(SDL_CONTROLLER_BUTTON_B) ? 0x04 : 0);
+            constexpr float scale = 1.0F / 32767.0F;
+            const float gx = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTX) * scale;
+            const float gy = -SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTY) * scale;
+            if (gx > 0.15F || gx < -0.15F) *x = gx;
+            if (gy > 0.15F || gy < -0.15F) *y = gy;
+            if (SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 8000) *buttons |= 0x2000;
+        }
         return true;
     }
 #endif
     *buttons = 0; *x = 0.0F; *y = 0.0F;
     return true;
 }
-void set_rumble(int, bool) {}
+void set_rumble(int controller, bool enabled) {
+#ifdef BTGA_HAS_RT64
+    if (interactive && controller == 0 && gamepad) {
+        SDL_GameControllerRumble(gamepad, enabled ? 0xFFFF : 0, enabled ? 0xFFFF : 0, 250);
+    }
+#else
+    (void)controller; (void)enabled;
+#endif
+}
 ultramodern::input::connected_device_info_t connected_device(int controller) {
     if (controller == 0) {
         return {ultramodern::input::Device::Controller, ultramodern::input::Pak::None};
