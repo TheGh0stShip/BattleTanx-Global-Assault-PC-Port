@@ -97,6 +97,8 @@ int main() {
     settings.players[1].invert_y = true;
     settings.players[1].controller_slot = 3;
     settings.keyboard.button_a = "Space";
+    settings.controllers[1].button_a = "rightshoulder";
+    settings.controllers[1].c_left = "right_x_negative";
     settings.remember_rom("C:/Games/BattleTanx - Global Assault (USA).z64");
     settings.remember_rom("D:/ROMs/BattleTanxGA.z64");
     settings.save(settings_path);
@@ -108,6 +110,8 @@ int main() {
     CHECK(loaded.players[1].deadzone == 0.25F);
     CHECK(loaded.players[1].invert_y && loaded.players[1].controller_slot == 3);
     CHECK(loaded.keyboard.button_a == "Space");
+    CHECK(loaded.controllers[1].button_a == "rightshoulder");
+    CHECK(loaded.controllers[1].c_left == "right_x_negative");
     CHECK(loaded.last_rom_path == "D:/ROMs/BattleTanxGA.z64");
     CHECK(loaded.recent_rom_paths[0] == "D:/ROMs/BattleTanxGA.z64");
     CHECK(loaded.recent_rom_paths[1] == "C:/Games/BattleTanx - Global Assault (USA).z64");

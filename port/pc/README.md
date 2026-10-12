@@ -52,12 +52,13 @@ rumble. Keyboard input is combined with the first controller for player one.
 Press **F10** in game to open the native settings overlay. It supports keyboard
 and controller navigation and exposes window mode and size, internal render
 scale, antialiasing, master volume, per-player controller assignment,
-deadzones, sensitivity, inversion, rumble strength, complete keyboard
-rebinding, and restore defaults. **Apply & Save** writes the settings
+deadzones, sensitivity, inversion, rumble strength, complete keyboard and
+per-player controller rebinding (including triggers and stick directions),
+VSync and presentation frame limiting, and restore defaults. **Apply & Save**
+writes the settings
 atomically under `%LOCALAPPDATA%\BattleTanxGA` and applies the supported video,
-audio, and input changes. VSync/frame limiting and separate music/effects
-mixing remain forthcoming runtime integrations rather than being presented as
-working controls.
+audio, and input changes. Separate music/effects mixing remains a forthcoming
+runtime integration rather than being presented as a working control.
 
 ## Renderer diagnostics
 

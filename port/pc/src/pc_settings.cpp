@@ -85,6 +85,24 @@ void assign_string(std::string_view value, std::string& output) {
     if (!value.empty()) output.assign(value);
 }
 
+void apply_controller_binding(ControllerBindings& bindings, std::string_view field,
+                              std::string_view value) {
+    if (field == "a") assign_string(value, bindings.button_a);
+    else if (field == "b") assign_string(value, bindings.button_b);
+    else if (field == "z") assign_string(value, bindings.button_z);
+    else if (field == "start") assign_string(value, bindings.button_start);
+    else if (field == "l") assign_string(value, bindings.button_l);
+    else if (field == "r") assign_string(value, bindings.button_r);
+    else if (field == "dpad_up") assign_string(value, bindings.dpad_up);
+    else if (field == "dpad_down") assign_string(value, bindings.dpad_down);
+    else if (field == "dpad_left") assign_string(value, bindings.dpad_left);
+    else if (field == "dpad_right") assign_string(value, bindings.dpad_right);
+    else if (field == "c_up") assign_string(value, bindings.c_up);
+    else if (field == "c_down") assign_string(value, bindings.c_down);
+    else if (field == "c_left") assign_string(value, bindings.c_left);
+    else if (field == "c_right") assign_string(value, bindings.c_right);
+}
+
 void apply_key(PcSettings& settings, std::string_view key, std::string_view value) {
     if (key == "version") parse_number(value, settings.version);
     else if (key == "video.window_mode") settings.window_mode = parse_window_mode(value, settings.window_mode);
@@ -124,6 +142,11 @@ void apply_key(PcSettings& settings, std::string_view key, std::string_view valu
             }
         }
         for (std::size_t i = 0; i < settings.players.size(); ++i) {
+            const std::string controller_prefix = "controller" + std::to_string(i + 1) + ".";
+            if (key.starts_with(controller_prefix)) {
+                apply_controller_binding(settings.controllers[i], key.substr(controller_prefix.size()), value);
+                return;
+            }
             const std::string prefix = "player" + std::to_string(i + 1) + ".";
             if (!key.starts_with(prefix)) continue;
             const std::string_view field = key.substr(prefix.size());
@@ -141,6 +164,25 @@ void apply_key(PcSettings& settings, std::string_view key, std::string_view valu
 
 void write_binding(std::ostream& stream, const char* name, const std::string& value) {
     stream << "keyboard." << name << '=' << value << '\n';
+}
+
+void write_controller_bindings(std::ostream& stream, std::size_t index,
+                               const ControllerBindings& bindings) {
+    const std::string prefix = "controller" + std::to_string(index + 1) + '.';
+    stream << prefix << "a=" << bindings.button_a << '\n';
+    stream << prefix << "b=" << bindings.button_b << '\n';
+    stream << prefix << "z=" << bindings.button_z << '\n';
+    stream << prefix << "start=" << bindings.button_start << '\n';
+    stream << prefix << "l=" << bindings.button_l << '\n';
+    stream << prefix << "r=" << bindings.button_r << '\n';
+    stream << prefix << "dpad_up=" << bindings.dpad_up << '\n';
+    stream << prefix << "dpad_down=" << bindings.dpad_down << '\n';
+    stream << prefix << "dpad_left=" << bindings.dpad_left << '\n';
+    stream << prefix << "dpad_right=" << bindings.dpad_right << '\n';
+    stream << prefix << "c_up=" << bindings.c_up << '\n';
+    stream << prefix << "c_down=" << bindings.c_down << '\n';
+    stream << prefix << "c_left=" << bindings.c_left << '\n';
+    stream << prefix << "c_right=" << bindings.c_right << '\n';
 }
 
 } // namespace
@@ -213,6 +255,9 @@ void PcSettings::save(const std::filesystem::path& path) const {
     write_binding(stream, "c_down", clean.keyboard.c_down);
     write_binding(stream, "c_left", clean.keyboard.c_left);
     write_binding(stream, "c_right", clean.keyboard.c_right);
+    for (std::size_t i = 0; i < clean.controllers.size(); ++i) {
+        write_controller_bindings(stream, i, clean.controllers[i]);
+    }
     for (std::size_t i = 0; i < clean.players.size(); ++i) {
         const PlayerSettings& player = clean.players[i];
         const std::string prefix = "player" + std::to_string(i + 1) + '.';
@@ -256,6 +301,7 @@ void PcSettings::remember_rom(const std::filesystem::path& path) {
 }
 
 void PcSettings::validate() {
+    const PcSettings fallback = defaults();
     version = current_version;
     window_width = std::clamp(window_width, 640, 7680);
     window_height = std::clamp(window_height, 480, 4320);
@@ -277,6 +323,24 @@ void PcSettings::validate() {
         if (!duplicate && output < deduplicated.size()) deduplicated[output++] = recent;
     }
     recent_rom_paths = std::move(deduplicated);
+    for (std::size_t i = 0; i < controllers.size(); ++i) {
+        ControllerBindings& binding = controllers[i];
+        const ControllerBindings& defaults_for_player = fallback.controllers[i];
+        if (binding.button_a.empty()) binding.button_a = defaults_for_player.button_a;
+        if (binding.button_b.empty()) binding.button_b = defaults_for_player.button_b;
+        if (binding.button_z.empty()) binding.button_z = defaults_for_player.button_z;
+        if (binding.button_start.empty()) binding.button_start = defaults_for_player.button_start;
+        if (binding.button_l.empty()) binding.button_l = defaults_for_player.button_l;
+        if (binding.button_r.empty()) binding.button_r = defaults_for_player.button_r;
+        if (binding.dpad_up.empty()) binding.dpad_up = defaults_for_player.dpad_up;
+        if (binding.dpad_down.empty()) binding.dpad_down = defaults_for_player.dpad_down;
+        if (binding.dpad_left.empty()) binding.dpad_left = defaults_for_player.dpad_left;
+        if (binding.dpad_right.empty()) binding.dpad_right = defaults_for_player.dpad_right;
+        if (binding.c_up.empty()) binding.c_up = defaults_for_player.c_up;
+        if (binding.c_down.empty()) binding.c_down = defaults_for_player.c_down;
+        if (binding.c_left.empty()) binding.c_left = defaults_for_player.c_left;
+        if (binding.c_right.empty()) binding.c_right = defaults_for_player.c_right;
+    }
     for (PlayerSettings& player : players) {
         player.deadzone = std::clamp(player.deadzone, 0.0F, 0.95F);
         player.sensitivity = std::clamp(player.sensitivity, 0.1F, 3.0F);

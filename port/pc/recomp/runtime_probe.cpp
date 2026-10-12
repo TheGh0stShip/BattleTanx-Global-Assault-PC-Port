@@ -237,6 +237,25 @@ SDL_GameController* configured_gamepad(int controller) {
     if (slot < 0 || slot >= max_controllers) return nullptr;
     return gamepads[static_cast<std::size_t>(slot)];
 }
+
+bool controller_input_pressed(SDL_GameController* gamepad, const std::string& binding) {
+    constexpr Sint16 threshold = 16000;
+    const SDL_GameControllerButton button = SDL_GameControllerGetButtonFromString(binding.c_str());
+    if (button != SDL_CONTROLLER_BUTTON_INVALID) {
+        return SDL_GameControllerGetButton(gamepad, button) != 0;
+    }
+    if (binding == "left_trigger") return SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > threshold;
+    if (binding == "right_trigger") return SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > threshold;
+    if (binding == "left_x_negative") return SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTX) < -threshold;
+    if (binding == "left_x_positive") return SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTX) > threshold;
+    if (binding == "left_y_negative") return SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTY) < -threshold;
+    if (binding == "left_y_positive") return SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTY) > threshold;
+    if (binding == "right_x_negative") return SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_RIGHTX) < -threshold;
+    if (binding == "right_x_positive") return SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_RIGHTX) > threshold;
+    if (binding == "right_y_negative") return SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_RIGHTY) < -threshold;
+    if (binding == "right_y_positive") return SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_RIGHTY) > threshold;
+    return false;
+}
 #endif
 
 void poll_input() {
@@ -296,19 +315,22 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
         }
         SDL_GameController* gamepad = configured_gamepad(controller);
         if (gamepad) {
-            auto pressed = [gamepad](SDL_GameControllerButton b) { return SDL_GameControllerGetButton(gamepad, b) != 0; };
-            *buttons |= (pressed(SDL_CONTROLLER_BUTTON_A) ? 0x8000 : 0) |
-                        (pressed(SDL_CONTROLLER_BUTTON_X) ? 0x4000 : 0) |
-                        (pressed(SDL_CONTROLLER_BUTTON_BACK) ? 0x2000 : 0) |
-                        (pressed(SDL_CONTROLLER_BUTTON_START) ? 0x1000 : 0) |
-                        (pressed(SDL_CONTROLLER_BUTTON_DPAD_UP) ? 0x0800 : 0) |
-                        (pressed(SDL_CONTROLLER_BUTTON_DPAD_DOWN) ? 0x0400 : 0) |
-                        (pressed(SDL_CONTROLLER_BUTTON_DPAD_LEFT) ? 0x0200 : 0) |
-                        (pressed(SDL_CONTROLLER_BUTTON_DPAD_RIGHT) ? 0x0100 : 0) |
-                        (pressed(SDL_CONTROLLER_BUTTON_LEFTSHOULDER) ? 0x20 : 0) |
-                        (pressed(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) ? 0x10 : 0) |
-                        (pressed(SDL_CONTROLLER_BUTTON_Y) ? 0x08 : 0) |
-                        (pressed(SDL_CONTROLLER_BUTTON_B) ? 0x04 : 0);
+            const btga::ControllerBindings& binding = pc_settings.controllers[static_cast<std::size_t>(controller)];
+            auto pressed = [gamepad](const std::string& input) { return controller_input_pressed(gamepad, input); };
+            *buttons |= (pressed(binding.button_a) ? 0x8000 : 0) |
+                        (pressed(binding.button_b) ? 0x4000 : 0) |
+                        (pressed(binding.button_z) ? 0x2000 : 0) |
+                        (pressed(binding.button_start) ? 0x1000 : 0) |
+                        (pressed(binding.dpad_up) ? 0x0800 : 0) |
+                        (pressed(binding.dpad_down) ? 0x0400 : 0) |
+                        (pressed(binding.dpad_left) ? 0x0200 : 0) |
+                        (pressed(binding.dpad_right) ? 0x0100 : 0) |
+                        (pressed(binding.button_l) ? 0x20 : 0) |
+                        (pressed(binding.button_r) ? 0x10 : 0) |
+                        (pressed(binding.c_up) ? 0x08 : 0) |
+                        (pressed(binding.c_down) ? 0x04 : 0) |
+                        (pressed(binding.c_left) ? 0x02 : 0) |
+                        (pressed(binding.c_right) ? 0x01 : 0);
             constexpr float scale = 1.0F / 32767.0F;
             const float gx = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTX) * scale;
             const float gy = -SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTY) * scale;
@@ -321,7 +343,6 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
             if (configured_y > player.deadzone || configured_y < -player.deadzone) {
                 *y = std::clamp(configured_y, -1.0F, 1.0F);
             }
-            if (SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 8000) *buttons |= 0x2000;
         }
         return controller == 0 || gamepad != nullptr;
     }

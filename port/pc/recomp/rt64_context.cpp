@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <array>
+#include <cctype>
 #include <cstdlib>
 #include <cstdint>
 #include <iostream>
@@ -38,6 +39,44 @@ bool environment_flag_enabled(const char* name) {
     const std::string_view text{value};
     return !text.empty() && text != "0" && text != "false" && text != "FALSE" &&
            text != "off" && text != "OFF";
+}
+
+std::string controller_input_name(std::string_view input) {
+    if (input == "left_trigger") return "Left Trigger";
+    if (input == "right_trigger") return "Right Trigger";
+    if (input == "left_x_negative") return "Left Stick Left";
+    if (input == "left_x_positive") return "Left Stick Right";
+    if (input == "left_y_negative") return "Left Stick Up";
+    if (input == "left_y_positive") return "Left Stick Down";
+    if (input == "right_x_negative") return "Right Stick Left";
+    if (input == "right_x_positive") return "Right Stick Right";
+    if (input == "right_y_negative") return "Right Stick Up";
+    if (input == "right_y_positive") return "Right Stick Down";
+    const SDL_GameControllerButton button = SDL_GameControllerGetButtonFromString(std::string{input}.c_str());
+    if (button != SDL_CONTROLLER_BUTTON_INVALID) {
+        const char* name = SDL_GameControllerGetStringForButton(button);
+        if (name != nullptr && *name != '\0') {
+            std::string display{name};
+            display.front() = static_cast<char>(std::toupper(static_cast<unsigned char>(display.front())));
+            return display;
+        }
+    }
+    return std::string{input};
+}
+
+std::string controller_axis_binding(const SDL_ControllerAxisEvent& event) {
+    constexpr Sint16 threshold = 16000;
+    if (event.value > -threshold && event.value < threshold) return {};
+    const bool positive = event.value > 0;
+    switch (static_cast<SDL_GameControllerAxis>(event.axis)) {
+    case SDL_CONTROLLER_AXIS_LEFTX: return positive ? "left_x_positive" : "left_x_negative";
+    case SDL_CONTROLLER_AXIS_LEFTY: return positive ? "left_y_positive" : "left_y_negative";
+    case SDL_CONTROLLER_AXIS_RIGHTX: return positive ? "right_x_positive" : "right_x_negative";
+    case SDL_CONTROLLER_AXIS_RIGHTY: return positive ? "right_y_positive" : "right_y_negative";
+    case SDL_CONTROLLER_AXIS_TRIGGERLEFT: return positive ? "left_trigger" : std::string{};
+    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: return positive ? "right_trigger" : std::string{};
+    default: return {};
+    }
 }
 
 SDL_Scancode imgui_key_to_sdl_scancode(ImGuiKey key) {
@@ -214,7 +253,10 @@ public:
             app_->userConfig.antialiasing = RT64::UserConfiguration::Antialiasing::None;
             break;
         }
-        app_->userConfig.refreshRate = RT64::UserConfiguration::RefreshRate::Original;
+        app_->userConfig.refreshRate = pc_settings.frame_limit > 0
+            ? RT64::UserConfiguration::RefreshRate::Manual
+            : RT64::UserConfiguration::RefreshRate::Original;
+        app_->userConfig.refreshRateTarget = pc_settings.frame_limit > 0 ? pc_settings.frame_limit : 60;
         app_->userConfig.internalColorFormat = RT64::UserConfiguration::InternalColorFormat::Standard;
         app_->userConfig.displayBuffering = RT64::UserConfiguration::DisplayBuffering::Triple;
         const bool open_inspector = environment_flag_enabled("BTGA_RT64_INSPECTOR");
@@ -226,6 +268,7 @@ public:
             app_->processDeveloperShortcut(RT64::Application::DeveloperShortcut::Inspector);
         }
         if (app_) {
+            if (app_->swapChain != nullptr) app_->swapChain->setVsyncEnabled(pc_settings.vsync);
             app_->customOverlayCallback = [this]() { draw_settings_overlay(); };
             active_context.store(this, std::memory_order_release);
             if (environment_flag_enabled("BTGA_SETTINGS_OPEN")) app_->setCustomOverlayVisible(true);
@@ -279,6 +322,20 @@ public:
             event->key.keysym.scancode == SDL_SCANCODE_F10) {
             return false;
         }
+        const std::lock_guard capture_lock(controller_capture_mutex_);
+        if (controller_capture_player_ >= 0) {
+            if (event->type == SDL_CONTROLLERBUTTONDOWN) {
+                const char* name = SDL_GameControllerGetStringForButton(
+                    static_cast<SDL_GameControllerButton>(event->cbutton.button));
+                if (name != nullptr && *name != '\0') pending_controller_binding_ = name;
+                return true;
+            }
+            if (event->type == SDL_CONTROLLERAXISMOTION) {
+                const std::string binding = controller_axis_binding(event->caxis);
+                if (!binding.empty()) pending_controller_binding_ = binding;
+                return !binding.empty();
+            }
+        }
         return app_->sdlEventFilter(event);
     }
 
@@ -315,6 +372,13 @@ private:
         default: app_->userConfig.antialiasing = RT64::UserConfiguration::Antialiasing::None; break;
         }
         if (previous_aa != app_->userConfig.msaaSampleCount()) app_->updateMultisampling();
+        if (app_->swapChain != nullptr) app_->swapChain->setVsyncEnabled(draft_settings_.vsync);
+        app_->userConfig.refreshRate = draft_settings_.frame_limit > 0
+            ? RT64::UserConfiguration::RefreshRate::Manual
+            : RT64::UserConfiguration::RefreshRate::Original;
+        if (draft_settings_.frame_limit > 0) {
+            app_->userConfig.refreshRateTarget = draft_settings_.frame_limit;
+        }
         app_->updateUserConfig(true);
 
         SDL_Window* window = app_->appWindow->sdlWindow;
@@ -351,6 +415,36 @@ private:
         }
     }
 
+    void draw_controller_binding(const char* label, std::string& binding,
+                                 int player, int index) {
+        const std::lock_guard capture_lock(controller_capture_mutex_);
+        ImGui::TextUnformatted(label);
+        ImGui::SameLine(190.0F);
+        const bool capturing = controller_capture_player_ == player &&
+                               controller_capture_binding_ == index;
+        const std::string button = (capturing ? "Press a controller input..." :
+                                    controller_input_name(binding)) +
+                                   "##controller-" + std::to_string(player) + '-' +
+                                   std::to_string(index);
+        if (ImGui::Button(button.c_str(), ImVec2(220.0F, 0.0F))) {
+            controller_capture_player_ = player;
+            controller_capture_binding_ = index;
+            pending_controller_binding_.clear();
+        }
+        if (!capturing) return;
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            controller_capture_player_ = -1;
+            controller_capture_binding_ = -1;
+            pending_controller_binding_.clear();
+        }
+        else if (!pending_controller_binding_.empty()) {
+            binding = std::move(pending_controller_binding_);
+            pending_controller_binding_.clear();
+            controller_capture_player_ = -1;
+            controller_capture_binding_ = -1;
+        }
+    }
+
     void draw_settings_overlay() {
         // Closing is completed by RT64 after this empty frame is submitted.
         // That clears the previous ImGui draw data instead of freezing the last
@@ -383,7 +477,15 @@ private:
                         constexpr int values[] = {0, 2, 4, 8};
                         draft_settings_.antialiasing = values[aa];
                     }
-                    ImGui::TextDisabled("VSync and frame limiting are saved but not yet applied by this RT64 build.");
+                    ImGui::Checkbox("VSync", &draft_settings_.vsync);
+                    bool custom_frame_limit = draft_settings_.frame_limit > 0;
+                    if (ImGui::Checkbox("Custom presentation frame limit", &custom_frame_limit)) {
+                        draft_settings_.frame_limit = custom_frame_limit ? 60 : 0;
+                    }
+                    if (custom_frame_limit) {
+                        ImGui::SliderInt("Frame limit", &draft_settings_.frame_limit, 20, 360, "%d FPS");
+                        ImGui::TextDisabled("Gameplay simulation remains at its original rate.");
+                    }
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Audio")) {
@@ -405,6 +507,25 @@ private:
                         ImGui::Checkbox("Invert horizontal", &player.invert_x); ImGui::SameLine();
                         ImGui::Checkbox("Invert vertical", &player.invert_y);
                         slider_percent("Rumble", player.rumble_strength);
+                        if (ImGui::TreeNode("Controller bindings")) {
+                            auto& b = draft_settings_.controllers[i];
+                            std::array<std::pair<const char*, std::string*>, 14> bindings{{
+                                {"A button", &b.button_a}, {"B button", &b.button_b},
+                                {"Z trigger", &b.button_z}, {"Start", &b.button_start},
+                                {"L shoulder", &b.button_l}, {"R shoulder", &b.button_r},
+                                {"D-pad up", &b.dpad_up}, {"D-pad down", &b.dpad_down},
+                                {"D-pad left", &b.dpad_left}, {"D-pad right", &b.dpad_right},
+                                {"C up", &b.c_up}, {"C down", &b.c_down},
+                                {"C left", &b.c_left}, {"C right", &b.c_right},
+                            }};
+                            for (std::size_t binding_index = 0; binding_index < bindings.size(); ++binding_index) {
+                                draw_controller_binding(bindings[binding_index].first,
+                                                        *bindings[binding_index].second,
+                                                        static_cast<int>(i),
+                                                        static_cast<int>(binding_index));
+                            }
+                            ImGui::TreePop();
+                        }
                         ImGui::PopID();
                     }
                     ImGui::EndTabItem();
@@ -440,6 +561,10 @@ private:
     std::unique_ptr<RT64::Application> app_;
     btga::PcSettings draft_settings_;
     int capture_binding_ = -1;
+    int controller_capture_player_ = -1;
+    int controller_capture_binding_ = -1;
+    std::string pending_controller_binding_;
+    std::mutex controller_capture_mutex_;
     std::atomic_bool apply_render_requested_{false};
 };
 }

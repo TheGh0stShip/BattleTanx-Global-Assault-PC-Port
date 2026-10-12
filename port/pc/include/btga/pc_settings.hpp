@@ -42,8 +42,25 @@ struct KeyboardBindings {
     std::string c_right = "L";
 };
 
+struct ControllerBindings {
+    std::string button_a = "a";
+    std::string button_b = "x";
+    std::string button_z = "left_trigger";
+    std::string button_start = "start";
+    std::string button_l = "leftshoulder";
+    std::string button_r = "rightshoulder";
+    std::string dpad_up = "dpup";
+    std::string dpad_down = "dpdown";
+    std::string dpad_left = "dpleft";
+    std::string dpad_right = "dpright";
+    std::string c_up = "right_y_negative";
+    std::string c_down = "right_y_positive";
+    std::string c_left = "right_x_negative";
+    std::string c_right = "right_x_positive";
+};
+
 struct PcSettings {
-    static constexpr int current_version = 2;
+    static constexpr int current_version = 3;
     static constexpr std::size_t recent_rom_capacity = 5;
 
     int version = current_version;
@@ -60,6 +77,7 @@ struct PcSettings {
     std::string last_rom_path;
     std::array<std::string, recent_rom_capacity> recent_rom_paths{};
     KeyboardBindings keyboard{};
+    std::array<ControllerBindings, 4> controllers{};
     std::array<PlayerSettings, 4> players{};
 
     static PcSettings defaults();
