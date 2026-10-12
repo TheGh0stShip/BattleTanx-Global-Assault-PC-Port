@@ -78,9 +78,9 @@ output, input mapping, and a user-facing executable loop; this headless boot
 milestone is not presented as a playable build.
 
 `bootstrap_rt64.sh` pins the same RT64 revision used by the reference runtime
-integration. It is kept separate from the headless probe until the interactive
+integration. It applies a small recorded patch that supplies a non-interactive
+file-dialog backend, because choosing the ROM remains the launcher's job and
+rendering must not require GTK or D-Bus. The renderer itself has been verified
+to configure and build with `RT64_STATIC=ON`, `RT64_SDL_WINDOW_VULKAN=ON`, and
+`NFD_STUB=ON`. It is kept separate from the headless probe until the interactive
 SDL window and renderer adapter are enabled, so CI does not require a GPU.
-On Debian/Ubuntu, configuring that optional renderer currently requires the
-development packages for SDL2, Vulkan, and either GTK3 or D-Bus (when CMake is
-configured with `-DNFD_PORTAL=ON`). The bootstrap does not install system
-packages or request elevated privileges.

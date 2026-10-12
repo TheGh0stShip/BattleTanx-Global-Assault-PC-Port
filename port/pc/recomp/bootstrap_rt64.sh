@@ -13,6 +13,15 @@ git -C "$destination" fetch --depth=1 origin "$revision"
 git -C "$destination" checkout --detach "$revision"
 git -C "$destination" submodule update --init --recursive --depth=1
 
+nfd="$destination/src/contrib/nativefiledialog-extended"
+patch="$root/port/pc/recomp/patches/rt64-nfd-stub.patch"
+if git -C "$nfd" apply --check "$patch" 2>/dev/null; then
+    git -C "$nfd" apply "$patch"
+elif ! git -C "$nfd" apply --reverse --check "$patch" 2>/dev/null; then
+    echo "RT64 file-dialog patch does not apply cleanly" >&2
+    exit 1
+fi
+
 actual="$(git -C "$destination" rev-parse HEAD)"
 [[ "$actual" == "$revision" ]] || {
     echo "RT64 revision mismatch: expected $revision, got $actual" >&2
