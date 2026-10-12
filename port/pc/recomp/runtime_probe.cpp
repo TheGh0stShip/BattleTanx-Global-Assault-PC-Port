@@ -394,8 +394,10 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
                 *y = std::clamp(configured_y, -1.0F, 1.0F);
             }
             if (controller != 0 || !mouse_turret_aiming.load(std::memory_order_relaxed)) {
+                const float turret_direction = player.invert_turret_x ? -1.0F : 1.0F;
+                const float configured_turret = rx * player.turret_sensitivity * turret_direction;
                 turret_stick_x[static_cast<std::size_t>(controller)].store(
-                    std::abs(rx) > player.deadzone ? std::clamp(rx, -1.0F, 1.0F) : 0.0F,
+                    std::abs(rx) > player.deadzone ? std::clamp(configured_turret, -1.0F, 1.0F) : 0.0F,
                     std::memory_order_relaxed);
             }
         }

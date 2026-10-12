@@ -659,6 +659,8 @@ private:
                         ImGui::SliderFloat("Sensitivity", &player.sensitivity, 0.1F, 3.0F, "%.2fx");
                         ImGui::Checkbox("Invert horizontal", &player.invert_x); ImGui::SameLine();
                         ImGui::Checkbox("Invert vertical", &player.invert_y);
+                        ImGui::SliderFloat("Turret sensitivity", &player.turret_sensitivity, 0.1F, 4.0F, "%.2fx");
+                        ImGui::Checkbox("Invert turret horizontal", &player.invert_turret_x);
                         slider_percent("Rumble", player.rumble_strength);
                         if (ImGui::TreeNode("Controller bindings")) {
                             auto& b = draft_settings_.controllers[i];

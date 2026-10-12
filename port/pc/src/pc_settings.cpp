@@ -175,6 +175,8 @@ void apply_key(PcSettings& settings, std::string_view key, std::string_view valu
             else if (field == "sensitivity") parse_number(value, player.sensitivity);
             else if (field == "invert_x") parse_bool(value, player.invert_x);
             else if (field == "invert_y") parse_bool(value, player.invert_y);
+            else if (field == "turret_sensitivity") parse_number(value, player.turret_sensitivity);
+            else if (field == "invert_turret_x") parse_bool(value, player.invert_turret_x);
             else if (field == "rumble_strength") parse_number(value, player.rumble_strength);
             else if (field == "controller_slot") parse_number(value, player.controller_slot);
             return;
@@ -292,6 +294,8 @@ void PcSettings::save(const std::filesystem::path& path) const {
         stream << prefix << "sensitivity=" << player.sensitivity << '\n';
         stream << prefix << "invert_x=" << player.invert_x << '\n';
         stream << prefix << "invert_y=" << player.invert_y << '\n';
+        stream << prefix << "turret_sensitivity=" << player.turret_sensitivity << '\n';
+        stream << prefix << "invert_turret_x=" << player.invert_turret_x << '\n';
         stream << prefix << "rumble_strength=" << player.rumble_strength << '\n';
         stream << prefix << "controller_slot=" << player.controller_slot << '\n';
     }
@@ -386,6 +390,8 @@ void PcSettings::validate() {
     for (PlayerSettings& player : players) {
         player.deadzone = std::clamp(player.deadzone, 0.0F, 0.95F);
         player.sensitivity = std::clamp(player.sensitivity, 0.1F, 3.0F);
+        if (!std::isfinite(player.turret_sensitivity)) player.turret_sensitivity = 1.0F;
+        player.turret_sensitivity = std::clamp(player.turret_sensitivity, 0.1F, 4.0F);
         player.rumble_strength = std::clamp(player.rumble_strength, 0.0F, 1.0F);
         player.controller_slot = std::clamp(player.controller_slot, -1, 3);
     }

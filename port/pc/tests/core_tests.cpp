@@ -119,6 +119,8 @@ int main() {
     settings.texture_packs_enabled = false;
     settings.players[1].deadzone = 0.25F;
     settings.players[1].invert_y = true;
+    settings.players[1].turret_sensitivity = 1.75F;
+    settings.players[1].invert_turret_x = true;
     settings.players[1].controller_slot = 3;
     settings.keyboard.button_a = "Space";
     settings.controllers[1].button_a = "rightshoulder";
@@ -142,6 +144,8 @@ int main() {
     CHECK(!loaded.texture_packs_enabled);
     CHECK(loaded.players[1].deadzone == 0.25F);
     CHECK(loaded.players[1].invert_y && loaded.players[1].controller_slot == 3);
+    CHECK(loaded.players[1].turret_sensitivity == 1.75F);
+    CHECK(loaded.players[1].invert_turret_x);
     CHECK(loaded.keyboard.button_a == "Space");
     CHECK(loaded.controllers[1].button_a == "rightshoulder");
     CHECK(loaded.controllers[1].c_left == "right_x_negative");
@@ -162,7 +166,8 @@ int main() {
                   << "audio.music_volume=inf\n"
                   << "accessibility.screen_shake=-3\n"
                   << "mods.mouse_turret_sensitivity=99\n"
-                  << "player1.deadzone=-5\n";
+                  << "player1.deadzone=-5\n"
+                  << "player1.turret_sensitivity=99\n";
     }
     const btga::PcSettings validated = btga::PcSettings::load(settings_path);
     CHECK(validated.window_width == 640);
@@ -173,6 +178,7 @@ int main() {
     CHECK(validated.music_volume == 0.5F);
     CHECK(validated.screen_shake_intensity == 0.0F);
     CHECK(validated.players[0].deadzone == 0.0F);
+    CHECK(validated.players[0].turret_sensitivity == 4.0F);
 
     btga::PcSettings invalid_enum = btga::PcSettings::defaults();
     invalid_enum.aspect_ratio = static_cast<btga::AspectRatioMode>(99);

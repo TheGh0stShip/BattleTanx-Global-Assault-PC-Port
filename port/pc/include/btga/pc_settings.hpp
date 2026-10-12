@@ -26,6 +26,8 @@ struct PlayerSettings {
     float sensitivity = 1.0F;
     bool invert_x = false;
     bool invert_y = false;
+    float turret_sensitivity = 1.0F;
+    bool invert_turret_x = false;
     float rumble_strength = 1.0F;
     int controller_slot = -1;
 };
@@ -69,7 +71,7 @@ struct ControllerBindings {
 };
 
 struct PcSettings {
-    static constexpr int current_version = 9;
+    static constexpr int current_version = 10;
     static constexpr std::size_t recent_rom_capacity = 5;
 
     int version = current_version;

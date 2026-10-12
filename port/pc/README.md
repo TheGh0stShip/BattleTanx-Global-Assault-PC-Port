@@ -112,7 +112,8 @@ installation retains the original game rules and presentation.
 For mouse and keyboard, WASD drives, left click supplies primary fire, and
 holding right click captures relative mouse movement for turret aiming. Release
 right click to return the cursor. Mouse turret sensitivity is adjustable in the
-Mods tab. Open F10 settings before changing windows or
+Mods tab. Each player also has independent right-stick turret sensitivity and
+horizontal inversion in the Controllers tab. Open F10 settings before changing windows or
 leaving the game; mouse capture is disabled while the settings overlay is open.
 
 ### Texture packs
