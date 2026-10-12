@@ -697,6 +697,22 @@ private:
                     for (std::size_t i = 0; i < bindings.size(); ++i) draw_binding(bindings[i].first, *bindings[i].second, static_cast<int>(i));
                     ImGui::EndTabItem();
                 }
+                if (ImGui::BeginTabItem("Online")) {
+                    ImGui::SeparatorText("Online Multiplayer");
+                    ImGui::TextWrapped("The native PC transport has passed a public host/client relay test. Player-facing lobby browsing, hosting, and synchronized gameplay are still under active development.");
+                    ImGui::Spacing();
+                    ImGui::TextWrapped("Networking remains fully offline until you explicitly choose an online action. The relay path requires no port forwarding, UPnP, or NAT configuration and does not disclose your address to other players.");
+                    ImGui::Spacing();
+                    if (ImGui::Button("Open live multiplayer dashboard")) {
+                        open_external_url("https://btga.thegh0stship.com/");
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Multiplayer documentation")) {
+                        open_external_url("https://github.com/TheGh0stShip/BattleTanx-Global-Assault-PC-Port/blob/main/docs/ONLINE_MULTIPLAYER.md");
+                    }
+                    ImGui::TextDisabled("The dashboard opens in your system browser. Viewing this tab makes no network request.");
+                    ImGui::EndTabItem();
+                }
                 if (ImGui::BeginTabItem("System")) {
                     ImGui::SeparatorText("ROM startup");
                     if (draft_settings_.last_rom_path.empty()) {

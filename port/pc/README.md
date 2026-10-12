@@ -259,9 +259,13 @@ local split-screen.
 
 The public service dashboard at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/) shows active games,
-open lobbies, and players without exposing addresses or credentials. Developers
-can reproduce the live PC transport test on Linux with `curl`, `jq`, CMake, and
-a C++20 compiler:
+open lobbies, and players without exposing addresses or credentials.
+The F10 settings overlay has an **Online** tab with links to the live dashboard
+and multiplayer documentation. Merely opening the tab performs no network
+access; the dashboard opens only after its button is selected.
+
+Developers can reproduce the live PC transport test on Linux with `curl`, `jq`,
+CMake, and a C++20 compiler:
 
 ```sh
 ./port/pc/scripts/test-live-multiplayer.sh

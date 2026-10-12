@@ -250,6 +250,8 @@ and relay, but a future explicit **Online Multiplayer** action is still needed
 to expose that path in the game. There is not yet a user-visible online mode or
 playable synchronized Internet match. Live service status is available at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/).
+The F10 overlay also includes an **Online** tab linking to the live dashboard
+and multiplayer documentation. Opening that tab itself remains network-inert.
 
 ## License
 
