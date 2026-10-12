@@ -343,7 +343,10 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
                 }
                 int mouse_x = 0;
                 SDL_GetRelativeMouseState(&mouse_x, nullptr);
-                if ((mouse & SDL_BUTTON_LMASK) != 0) *buttons |= 0x8000;
+                // Primary fire defaults to the N64 Z trigger. Keep mouse fire
+                // aligned with that game action instead of injecting A, which
+                // is a different action in the standard control layout.
+                if ((mouse & SDL_BUTTON_LMASK) != 0) *buttons |= 0x2000;
                 if (aiming && was_aiming) {
                     const float sensitivity = pc_settings.mouse_turret_sensitivity;
                     turret_stick_x[0].store(std::clamp(mouse_x * 0.025F * sensitivity, -1.0F, 1.0F),
@@ -432,6 +435,12 @@ extern "C" float btga_screen_shake_intensity() {
 extern "C" float btga_turret_stick_x(int player) {
     if (player < 0 || player >= max_controllers) return 0.0F;
     return turret_stick_x[static_cast<std::size_t>(player)].load(std::memory_order_relaxed);
+}
+
+extern "C" bool btga_turret_aim_active(int player) {
+    if (player < 0 || player >= max_controllers) return false;
+    if (player == 0 && mouse_turret_aiming.load(std::memory_order_relaxed)) return true;
+    return turret_stick_x[static_cast<std::size_t>(player)].load(std::memory_order_relaxed) != 0.0F;
 }
 
 void set_rumble(int controller, bool enabled) {

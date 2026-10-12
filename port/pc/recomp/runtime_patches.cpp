@@ -9,6 +9,7 @@ extern "C" void yield_self_1ms(std::uint8_t* rdram);
 extern "C" bool btga_extended_visibility_enabled();
 extern "C" bool btga_independent_turret_enabled();
 extern "C" float btga_turret_stick_x(int player);
+extern "C" bool btga_turret_aim_active(int player);
 extern "C" float btga_screen_shake_intensity();
 extern "C" float btga_music_volume_setting();
 extern "C" float btga_effects_volume_setting();
@@ -98,42 +99,40 @@ extern "C" void btga_projection_far_step(std::uint8_t*, recomp_context* ctx) {
     if (btga_extended_visibility_enabled()) ctx->f4.fl = 32767.0F;
 }
 
-extern "C" void btga_independent_turret_step(std::uint8_t* rdram, recomp_context* ctx) {
+extern "C" void btga_turret_right_test(std::uint8_t* rdram, recomp_context* ctx) {
     if (!btga_independent_turret_enabled()) return;
-    const gpr tank = ctx->r18; // func_80091768 keeps its Tank * in s2.
-    if (tank == 0) return;
-    const std::uint32_t owner = static_cast<std::uint32_t>(MEM_W(0x1D0, tank));
-    if (owner == 0) return;
-    const int player = MEM_BU(0x0B, static_cast<gpr>(owner));
-    const std::int32_t kind = static_cast<std::int32_t>(MEM_W(0x98, tank));
-    if (kind < 0) return;
-    constexpr gpr definitions = static_cast<gpr>(static_cast<std::int32_t>(0x80122E8CU));
-    constexpr std::int32_t definition_stride = 0xD0;
-    const gpr definition = ADD32(definitions, kind * definition_stride);
-    if ((MEM_W(0x2C, definition) & 1) == 0) return; // No rotating turret.
+    // This runs after retail has evaluated btnTurretR and before its branch.
+    // Override only the boolean result; no guest object or pad is modified.
+    const int controller = MEM_BU(0x95, ctx->r18);
+    if (controller < 4 && btga_turret_stick_x(controller) < 0.0F) ctx->r2 = 1;
+}
 
-    const float input = btga_turret_stick_x(player);
-    if (input == 0.0F) return;
-    constexpr gpr frame_step = static_cast<gpr>(static_cast<std::int32_t>(0x80219488U));
-    const float step = read_guest_float(rdram, static_cast<std::uint32_t>(frame_step));
-    const std::int32_t delta = static_cast<std::int32_t>(input * step * 1024.0F);
-    MEM_H(0x24, tank) = static_cast<std::uint16_t>(MEM_HU(0x24, tank) - delta);
+extern "C" void btga_turret_left_test(std::uint8_t* rdram, recomp_context* ctx) {
+    if (!btga_independent_turret_enabled()) return;
+    // Positive mouse/right-stick motion matches the former direct hook's
+    // decreasing-angle direction, which is retail's btnTurretL path.
+    const int controller = MEM_BU(0x95, ctx->r18);
+    if (controller < 4 && btga_turret_stick_x(controller) > 0.0F) ctx->r2 = 1;
+}
+
+extern "C" void btga_turret_control_scheme_step(std::uint8_t* rdram, recomp_context* ctx) {
+    if (!btga_independent_turret_enabled()) return;
+    const int controller = MEM_BU(0x95, ctx->r18);
+    if (controller >= 4 || !btga_turret_aim_active(controller)) return;
+    // Scheme 2 deliberately turns the hull toward the turret while moving.
+    // While aim mode is held, use retail's normal hull-steering path instead:
+    // W/S move on the hull heading and A/D turn it. Once aim mode is released,
+    // leave this register untouched and the selected retail scheme resumes.
+    ctx->r3 = 0;
 }
 
 extern "C" void btga_turret_camera_step(std::uint8_t* rdram, recomp_context* ctx) {
-    if (!btga_independent_turret_enabled()) return;
-    const gpr tank = ctx->r4;
-    const gpr query_mode = ctx->r6;
-    if (tank == 0 || query_mode == 0 || (MEM_W(0x1E0, tank) & 2) == 0) return;
-    const std::int32_t kind = static_cast<std::int32_t>(MEM_W(0x98, tank));
-    if (kind < 0) return;
-    constexpr gpr definitions = static_cast<gpr>(static_cast<std::int32_t>(0x80122E8CU));
-    const gpr definition = ADD32(definitions, kind * 0xD0);
-    if ((MEM_W(0x2C, definition) & 1) == 0) return;
-    // Camera transform queries normally request the hull frame (mode 0).
-    // Mode 1 is the game's existing turret transform, also used by the intro
-    // presentation, so this reuses retail camera math and smoothing.
-    MEM_W(0, query_mode) = 1;
+    // Forcing transform mode 1 globally also affects vehicle previews during
+    // campaign selection and can stall the guest state before gameplay begins.
+    // Keep this hook inert until it can be gated by the active gameplay camera;
+    // independent turret steering itself is handled by the input-update hook.
+    (void)rdram;
+    (void)ctx;
 }
 
 extern "C" void btga_screen_shake_step(std::uint8_t*, recomp_context* ctx) {

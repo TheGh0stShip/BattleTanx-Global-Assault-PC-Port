@@ -98,11 +98,16 @@ installation retains the original game rules and presentation.
   never intended to draw simultaneously.
 - **Independent dual-stick turret aiming** applies only to player-controlled
   vehicles whose tank definition has a rotating turret. The left stick keeps
-  the original hull movement, while the right stick rotates the turret. The
-  camera requests the game's existing turret-relative transform, also used by
-  its presentation code. Existing weapon spawn rules remain in charge, so
-  rounds and turret-aimed weapons follow the turret while mines, gun buddies,
-  bouncing betties, and other deployables keep their original behavior.
+  the original hull movement, while the right stick rotates the turret. W/S
+  move along the hull's heading and A/D turn the hull; turret or camera heading
+  does not reorient the hull while aim mode is held. Releasing RMB (or centering
+  the right stick) restores the player's selected retail control mechanics. The
+  camera currently retains the game's retail follow behavior; a dedicated
+  turret-relative camera remains experimental because applying the game's
+  presentation transform globally also affects vehicle-selection previews.
+  Existing weapon spawn rules remain in charge, so rounds and turret-aimed
+  weapons follow the turret while mines, gun buddies, bouncing betties, and
+  other deployables keep their original behavior.
 
 For mouse and keyboard, WASD drives, left click supplies primary fire, and
 holding right click captures relative mouse movement for turret aiming. Release
