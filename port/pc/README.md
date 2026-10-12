@@ -240,8 +240,10 @@ The PC core compiles against a pinned GPL-3.0-only revision of the shared
 [BattleTanx: Global Assault networking project](https://github.com/TheGh0stShip/BattleTanx-Global-Assault-Networking).
 The native PC transport passes a public end-to-end test through the live
 master and Azure UDP relay: two independent PC client processes bind as host
-and client, then deliver and decode a protocol-valid gameplay datagram. This is
-transport validation, not a synchronized playable match yet. Networking starts
+and client, then exchange and decode controller frames in both directions.
+The translated runtime now assigns the host to original controller port 1 and
+the joining player to port 2, transmits input at the controller-poll boundary,
+and briefly waits for the matching remote simulation tick. Networking starts
 offline and opens no socket or DNS request during normal startup. Only a user
 action in **F10 → Online** opts in and initializes the master/relay path;
 leaving that flow returns the client fully offline.
@@ -253,9 +255,9 @@ when the online flow ends.
 
 The design is relay-first and uses outbound UDP only. It does not use UPnP,
 NAT-PMP, inbound port forwarding, or expose a host's home connection. Each
-device renders its own full-screen player camera; synchronization begins in a
-host-authoritative roster and tank-selection lobby rather than by emulating
-local split-screen.
+device currently runs the original two-controller multiplayer flow. Replacing
+the retail split-screen layout with one full-screen local camera remains a
+required port feature; it is not represented as complete here.
 
 The public service dashboard at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/) shows active games,
@@ -264,6 +266,21 @@ The F10 settings overlay's **Online** tab can refresh compatible lobbies, host
 a public lobby, join a listed lobby, authenticate with the relay, maintain the
 host lease, disconnect, and open the dashboard. Merely opening the tab performs
 no network access.
+
+The current experimental play flow is:
+
+1. Both players launch the same verified USA Rev 0 ROM and remain at the same
+   title/main-menu state.
+2. One player selects **Host public lobby**. The other selects **Refresh public
+   lobbies**, then **Join**.
+3. Close F10 on both machines. Host input on controller port 1 drives the same
+   retail multiplayer menu flow on both processes; the joining player's input
+   is controller port 2.
+
+Automatic state recovery when peers connect from different screens, packet-loss
+recovery, disconnect recovery, and the full-screen local-camera conversion are
+still under development. Until those land, this is an experimental test path,
+not a finished public multiplayer mode.
 
 Developers can reproduce the fully native PC transport test with CMake and a
 C++20 compiler:
@@ -274,7 +291,7 @@ C++20 compiler:
 
 The script builds a native client that creates and discovers a temporary lobby,
 obtains separate signed host/client admission tokens, binds both endpoints,
-verifies gameplay delivery, updates the public game state, and removes the
+verifies bidirectional encoded controller delivery, updates the public game state, and removes the
 lobby through an authenticated cleanup guard. See
 [online multiplayer testing](../../docs/ONLINE_MULTIPLAYER.md) for scope and
 security details.

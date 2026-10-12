@@ -49,8 +49,10 @@ to play the full demonstration on YouTube.
   `BTGA_RT64_DEVELOPER=1` and pressing F1.
 - Distribution packages are ROM-free; the player supplies a verified local
   USA Rev 0 `.z64` dump at launch.
-- Native PC host/client transport passes an automated public relay test. The
-  player-facing lobby UI and synchronized gameplay are still in development.
+- Native PC host/client transport passes an automated public relay test in both
+  directions. The runtime has an experimental two-player controller-sync path;
+  automatic state reconciliation and full-screen per-device cameras remain in
+  development.
 
 This is still a development port. Long-session stability, every game mode,
 representative GPUs/controllers, in-game save-flow validation, and visual
@@ -247,7 +249,9 @@ The portable GPLv3 protocol and relay client are pinned into this build but
 remain dormant: constructing or launching the game performs no network access.
 The native PC transport has been tested end to end through the public master
 and relay. **F10 → Online** now browses, hosts, and joins real public relay
-lobbies, but there is not yet a playable synchronized Internet match. Live
+lobbies and exchanges original controller ports 1 and 2. The current path is
+experimental: both peers must begin from the same retail menu state, and state
+recovery plus full-screen local cameras are not finished. Live
 service status is available at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/).
 Opening the Online tab itself remains network-inert; Refresh, Host, and Join are

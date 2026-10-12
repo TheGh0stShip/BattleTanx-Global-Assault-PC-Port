@@ -10,17 +10,23 @@ explicit opt-in actions.
 - Master-service lobby registration and discovery.
 - Ed25519-signed host and client relay admission tokens.
 - Independent host/client UDP binding through the public Azure relay.
-- Protocol-valid gameplay datagram wrapping, forwarding, unwrapping, and
-  validation in the native PC C/C++ client.
+- Portable controller-frame encoding, wrapping, forwarding, unwrapping, session
+  and peer validation, and replay/old-tick rejection.
 - Public aggregate status at <https://btga.thegh0stship.com/>.
 - No UPnP, NAT-PMP, inbound forwarding, or peer address disclosure.
 - Native asynchronous lobby discovery, hosting, joining, relay binding,
   heartbeat, and disconnect controls in **F10 → Online**.
+- Experimental two-player runtime input synchronization: host is original N64
+  controller port 1, joining player is port 2, and input is exchanged at the
+  controller-poll boundary with a bounded matching-tick wait.
 
-The translated game now has a functional host/join panel, but does **not** yet
-synchronize the retail simulation between peers. Tank selection, match start,
-controller inputs, snapshots, and disconnect recovery remain the next
-integration milestones.
+The current runtime path requires both processes to begin at the same retail
+menu state. Host input then drives the original multiplayer menus on both
+processes, while the joining player's controller occupies port 2. Automatic
+state reconciliation, a formal ready/loading barrier, loss recovery, snapshots,
+disconnect recovery, and one full-screen local camera per device remain open.
+Accordingly, this is an experimental synchronization path rather than a claim
+that Internet multiplayer is release-ready.
 
 ## Reproduce the public PC transport test
 
@@ -35,8 +41,9 @@ store.
 The script builds and runs `btga_pc_native_online_e2e`. That executable uses
 the same native master client, TLS stack, UDP adapter, and relay state machine
 as the runtime. It creates and discovers a leased lobby, requests separate host
-and client tokens, binds two native clients, sends a gameplay datagram through
-the public relay, changes the dashboard state to `playing`, and removes the
+and client tokens, binds two native clients, exchanges encoded controller
+frames in both directions through the public relay, changes the dashboard state
+to `playing`, and removes the
 temporary lobby through an authenticated cleanup guard.
 
 Do not place admission tokens, host secrets, ROMs, or packet captures containing
