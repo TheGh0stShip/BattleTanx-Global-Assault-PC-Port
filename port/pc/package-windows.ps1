@@ -26,6 +26,7 @@ $required = @(
     (Join-Path $build "SDL2.dll"),
     (Join-Path $build "dxcompiler.dll"),
     (Join-Path $build "dxil.dll"),
+    (Join-Path $root "port\pc\launch-windows.cmd"),
     (Join-Path $root "COPYING"),
     (Join-Path $root "port\pc\README.md")
 )
@@ -46,6 +47,7 @@ Copy-Item (Join-Path $build "BattleTanxGA.exe") $staging
 Copy-Item (Join-Path $build "SDL2.dll") $staging
 Copy-Item (Join-Path $build "dxcompiler.dll") $staging
 Copy-Item (Join-Path $build "dxil.dll") $staging
+Copy-Item (Join-Path $root "port\pc\launch-windows.cmd") (Join-Path $staging "Launch BattleTanx GA.cmd")
 Copy-Item (Join-Path $root "COPYING") (Join-Path $staging "COPYING.txt")
 Copy-Item (Join-Path $root "port\pc\README.md") (Join-Path $staging "README.md")
 

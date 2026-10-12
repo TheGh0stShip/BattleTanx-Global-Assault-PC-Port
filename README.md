@@ -51,15 +51,20 @@ effects remain part of the release validation matrix.
 ## Build and run the PC port
 
 The complete native-runtime guide is in [port/pc/README.md](port/pc/README.md).
-On Windows, use a native NTFS checkout with Visual Studio's **Desktop
-development with C++** workload. After generating the local translated inputs
-and bootstrapping the pinned dependencies described in
-[port/pc/recomp/README.md](port/pc/recomp/README.md):
+On Windows, use a native NTFS checkout with Git for Windows and Visual Studio
+2022's **Desktop development with C++** workload. One PowerShell command
+verifies your local ROM, downloads and builds the pinned dependencies,
+generates the ignored translation output, builds the native x64 executable,
+and launches it:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-./port/pc/build-windows.ps1 -Rom 'C:\Games\BattleTanxGA.z64' -Run
+./port/pc/setup-windows.ps1 -Rom 'C:\Games\BattleTanxGA.z64' -Run
 ```
+
+Subsequent code-only rebuilds can use `port/pc/build-windows.ps1`. The complete
+manual and Linux setup paths are in
+[port/pc/recomp/README.md](port/pc/recomp/README.md).
 
 Create a ROM-free distributable ZIP with:
 

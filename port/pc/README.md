@@ -14,6 +14,17 @@ release; in-game save-flow validation, long-session stability, every game
 mode, and representative GPU/controller combinations still need broader
 validation.
 
+## Run a Windows release
+
+1. Download and extract the Windows x64 ZIP from the repository's
+   [Releases](https://github.com/TheGh0stShip/BattleTanx-Global-Assault-PC-Port/releases).
+2. Supply your own verified USA Rev 0 big-endian `.z64` ROM; it is not included.
+3. Drag the ROM onto **Launch BattleTanx GA.cmd**, or open that launcher and
+   paste the ROM path when prompted.
+
+The launcher passes the ROM directly to `BattleTanxGA.exe`; it does not copy,
+modify, upload, or bundle it. The runtime validates the ROM before starting.
+
 ## Controls
 
 - WASD: analog stick
@@ -48,14 +59,18 @@ enables developer mode.
 ## Windows developer build
 
 Use a native Windows checkout on NTFS and run PowerShell—not the Linux binary
-through `wsl.exe`. Visual Studio's **Desktop development with C++** workload is
-required. After the pinned dependencies and locally generated recompilation
-inputs described in [`recomp/README.md`](recomp/README.md) are present:
+through `wsl.exe`. Install Git for Windows and Visual Studio 2022's **Desktop
+development with C++** workload. For a first build, the setup script verifies
+your own local ROM, obtains the pinned dependencies, generates all ignored
+translation inputs, builds the native executable, and optionally launches it:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-./port/pc/build-windows.ps1 -Rom 'C:\Games\BattleTanxGA.z64' -Run
+./port/pc/setup-windows.ps1 -Rom 'C:\Games\BattleTanxGA.z64' -Run
 ```
+
+After setup, use `build-windows.ps1` for fast code-only rebuilds. Neither
+script uploads, embeds, or commits the ROM or generated translation output.
 
 The script configures an optimized x64 Ninja build, builds
 `BattleTanxGA.exe`, copies SDL2 and the DirectX Shader Compiler runtime beside
@@ -68,7 +83,7 @@ Create a redistributable, ROM-free ZIP after building:
 ./port/pc/package-windows.ps1 -BuildDirectory build-pc-windows -Version 0.1.0
 ```
 
-The archive contains the executable, required DLLs, license, and PC runtime
+The archive contains the executable, launcher, required DLLs, license, and PC runtime
 instructions. It deliberately contains no ROM, extracted assets, generated
 translation output, save data, or developer diagnostics.
 

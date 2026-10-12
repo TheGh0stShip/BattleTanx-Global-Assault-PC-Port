@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  portable-core:
+  linux-core:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,3 +21,30 @@ jobs:
         run: ctest --test-dir build-pc --output-on-failure
       - name: Repository safety
         run: python3 tools/check_repository.py
+
+  windows-core:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate PowerShell entry points
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($path in @('port/pc/setup-windows.ps1', 'port/pc/build-windows.ps1', 'port/pc/package-windows.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -ne 0) {
+              $failed = $true
+              $errors | ForEach-Object { Write-Error "$path`: $($_.Message)" }
+            }
+          }
+          if ($failed) { throw 'PowerShell parser validation failed.' }
+      - name: Configure
+        run: cmake -S port/pc -B build-pc -A x64
+      - name: Build
+        run: cmake --build build-pc --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build-pc -C Release --output-on-failure
+      - name: Repository safety
+        run: python tools/check_repository.py
