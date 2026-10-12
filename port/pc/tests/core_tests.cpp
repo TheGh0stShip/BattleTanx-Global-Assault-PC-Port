@@ -114,6 +114,7 @@ int main() {
     settings.master_volume = 0.625F;
     settings.music_volume = 0.5F;
     settings.effects_volume = 0.75F;
+    settings.mono_audio = true;
     settings.texture_packs_enabled = false;
     settings.players[1].deadzone = 0.25F;
     settings.players[1].invert_y = true;
@@ -135,6 +136,7 @@ int main() {
     CHECK(loaded.master_volume == 0.625F);
     CHECK(loaded.music_volume == 0.5F);
     CHECK(loaded.effects_volume == 0.75F);
+    CHECK(loaded.mono_audio);
     CHECK(!loaded.texture_packs_enabled);
     CHECK(loaded.players[1].deadzone == 0.25F);
     CHECK(loaded.players[1].invert_y && loaded.players[1].controller_slot == 3);

@@ -167,9 +167,20 @@ void queue_audio(std::int16_t* samples, std::size_t sample_count) {
     }
 
     float master_volume = 1.0F;
+    bool mono_audio = false;
     {
         const std::lock_guard settings_lock(input_settings_mutex);
         master_volume = pc_settings.master_volume;
+        mono_audio = pc_settings.mono_audio;
+    }
+    if (mono_audio) {
+        for (std::size_t i = 0; i + 1 < sample_count; i += channels) {
+            // Sum in 32 bits so opposite full-scale channels cannot overflow.
+            const std::int32_t mixed =
+                (static_cast<std::int32_t>(samples[i]) + samples[i + 1]) / 2;
+            samples[i] = static_cast<std::int16_t>(mixed);
+            samples[i + 1] = static_cast<std::int16_t>(mixed);
+        }
     }
     if (master_volume < 1.0F) {
         for (std::size_t i = 0; i < sample_count; ++i) {

@@ -639,7 +639,8 @@ private:
                     slider_percent("Master volume", draft_settings_.master_volume);
                     slider_percent("Music volume", draft_settings_.music_volume);
                     slider_percent("Effects volume", draft_settings_.effects_volume);
-                    ImGui::TextDisabled("Master applies to the final mix; music and effects use the game's separate libmus buses.");
+                    ImGui::Checkbox("Mono audio", &draft_settings_.mono_audio);
+                    ImGui::TextDisabled("Master applies to the final mix; music and effects use the game's separate libmus buses. Mono averages both output channels.");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Controllers")) {
