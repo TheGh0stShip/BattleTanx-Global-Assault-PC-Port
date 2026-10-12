@@ -21,6 +21,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "btga/texture_packs.hpp"
@@ -432,8 +433,22 @@ public:
         if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby ||
             player < 0 || player >= static_cast<int>(btga::InputSynchronizer::max_players) ||
             player == static_cast<int>(online_connection_->relay_slot())) return false;
-        pump_online_inputs_locked();
-        const auto input = online_inputs_.latest_input_for(static_cast<std::uint8_t>(player));
+        const std::uint32_t requested_tick = online_tick_ == 0 ? 0 : online_tick_ - 1;
+        auto input = online_inputs_.input_for(
+            static_cast<std::uint8_t>(player), requested_tick);
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(100);
+        while (!input && std::chrono::steady_clock::now() < deadline) {
+            pump_online_inputs_locked();
+            input = online_inputs_.input_for(
+                static_cast<std::uint8_t>(player), requested_tick);
+            if (!input) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        // During initial connection the peers can have a small tick offset.
+        // Latest input keeps menus responsive until the first matching tick.
+        if (!input) {
+            input = online_inputs_.latest_input_for(static_cast<std::uint8_t>(player));
+        }
         if (!input) return false;
         buttons = input->buttons;
         x = static_cast<float>(input->stick_x) / 127.0F;

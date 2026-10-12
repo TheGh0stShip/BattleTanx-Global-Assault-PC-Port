@@ -83,6 +83,30 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         if (!received) throw std::runtime_error("native gameplay receive timed out");
+
+        const btga::OnlineControllerInput host_input{0x5000, 80, -32};
+        const std::size_t reply_size = host_inputs.encode(
+            gameplay, hosted.session_id, host.relay_slot(), 7, 121, 0,
+            host_input);
+        if (reply_size == 0 ||
+            !host.send_gameplay(client.relay_slot(), {gameplay.data(), reply_size})) {
+            throw std::runtime_error("native host gameplay reply failed");
+        }
+        received = false;
+        const auto reply_deadline = std::chrono::steady_clock::now() +
+            std::chrono::seconds(10);
+        while (std::chrono::steady_clock::now() < reply_deadline) {
+            std::uint16_t source = 0;
+            const std::size_t size = client.receive_gameplay(gameplay, source);
+            if (size != 0) {
+                received = source == host.relay_slot() &&
+                    client_inputs.accept({gameplay.data(), size}, hosted.session_id, source) &&
+                    client_inputs.input_for(0, 121) == host_input;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!received) throw std::runtime_error("native gameplay reply timed out");
         master.heartbeat(hosted.lobby.id, hosted.host_secret, 2, "playing");
         std::cout << "native HTTPS + public relay multiplayer test passed\n";
         return 0;

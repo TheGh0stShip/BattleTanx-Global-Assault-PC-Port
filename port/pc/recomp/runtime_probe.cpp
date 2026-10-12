@@ -54,6 +54,7 @@ std::atomic_uint32_t screen_updates{0};
 std::atomic_uint32_t vi_events{0};
 std::atomic_uint32_t rsp_requests{0};
 std::array<std::atomic<float>, max_controllers> turret_stick_x{};
+std::atomic_bool online_input_presampled{false};
 std::atomic_bool mouse_turret_aiming{false};
 btga::PcSettings pc_settings = btga::PcSettings::defaults();
 std::mutex input_settings_mutex;
@@ -273,35 +274,48 @@ bool controller_input_pressed(SDL_GameController* gamepad, const std::string& bi
 }
 #endif
 
+bool get_input(int controller, std::uint16_t* buttons, float* x, float* y);
+
 void poll_input() {
 #ifdef BTGA_HAS_RT64
     if (!interactive) return;
-    const std::lock_guard lock(input_settings_mutex);
-    if (btga::renderer::consume_settings_update(pc_settings)) configure_keyboard();
-    SDL_PumpEvents();
-    for (auto& gamepad : gamepads) {
-        if (gamepad && !SDL_GameControllerGetAttached(gamepad)) {
-            SDL_GameControllerClose(gamepad);
-            gamepad = nullptr;
+    {
+        const std::lock_guard lock(input_settings_mutex);
+        if (btga::renderer::consume_settings_update(pc_settings)) configure_keyboard();
+        SDL_PumpEvents();
+        for (auto& gamepad : gamepads) {
+            if (gamepad && !SDL_GameControllerGetAttached(gamepad)) {
+                SDL_GameControllerClose(gamepad);
+                gamepad = nullptr;
+            }
+        }
+        for (int device = 0; device < SDL_NumJoysticks(); ++device) {
+            if (!SDL_IsGameController(device)) continue;
+            const SDL_JoystickID instance = SDL_JoystickGetDeviceInstanceID(device);
+            bool already_open = false;
+            for (SDL_GameController* gamepad : gamepads) {
+                if (gamepad && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gamepad)) == instance) {
+                    already_open = true;
+                    break;
+                }
+            }
+            if (already_open) continue;
+            for (auto& gamepad : gamepads) {
+                if (!gamepad) {
+                    gamepad = SDL_GameControllerOpen(device);
+                    break;
+                }
+            }
         }
     }
-    for (int device = 0; device < SDL_NumJoysticks(); ++device) {
-        if (!SDL_IsGameController(device)) continue;
-        const SDL_JoystickID instance = SDL_JoystickGetDeviceInstanceID(device);
-        bool already_open = false;
-        for (SDL_GameController* gamepad : gamepads) {
-            if (gamepad && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gamepad)) == instance) {
-                already_open = true;
-                break;
-            }
-        }
-        if (already_open) continue;
-        for (auto& gamepad : gamepads) {
-            if (!gamepad) {
-                gamepad = SDL_GameControllerOpen(device);
-                break;
-            }
-        }
+    const int online_slot = btga::renderer::online_local_player_slot();
+    if (online_slot >= 0 && online_slot < 2) {
+        std::uint16_t buttons = 0;
+        float x = 0.0F;
+        float y = 0.0F;
+        online_input_presampled.store(false, std::memory_order_relaxed);
+        (void)get_input(online_slot, &buttons, &x, &y);
+        online_input_presampled.store(true, std::memory_order_release);
     }
 #endif
 }
@@ -410,7 +424,9 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
             }
         }
         if (online_slot >= 0) {
-            btga::renderer::online_submit_local_input(*buttons, *x, *y);
+            if (!online_input_presampled.exchange(false, std::memory_order_acq_rel)) {
+                btga::renderer::online_submit_local_input(*buttons, *x, *y);
+            }
             return true;
         }
         return controller == 0 || gamepad != nullptr;
