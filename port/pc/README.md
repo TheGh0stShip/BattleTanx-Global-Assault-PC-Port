@@ -10,8 +10,9 @@ The current Windows build boots the USA Rev 0 ROM, renders through native
 Direct3D 12, plays SDL audio, accepts keyboard and SDL game-controller input,
 passes the original menus, and enters playable campaign gameplay. Linux uses
 RT64's Vulkan backend. This remains development software rather than a packaged
-release; save-data, long-session stability, every game mode, and representative
-GPU/controller combinations still need broader validation.
+release; in-game save-flow validation, long-session stability, every game
+mode, and representative GPU/controller combinations still need broader
+validation.
 
 ## Controls
 
@@ -73,11 +74,14 @@ translation output, save data, or developer diagnostics.
 The ROM must be the big-endian USA Rev 0 dump documented in the repository
 README. Runtime validation rejects any other file.
 
-Save data is stored outside the installation directory. Windows uses
+The original cartridge has no EEPROM save chip; BattleTanx stores profiles on
+an N64 Controller Pak. The port provides a real 32 KiB pak filesystem and
+persists it as a standard `.mpk` image, allowing interchange with common N64
+emulators. Save data is stored outside the installation directory. Windows uses
 `%LOCALAPPDATA%\BattleTanxGA`; Linux uses
 `$XDG_DATA_HOME/BattleTanxGA` or `~/.local/share/BattleTanxGA`. Closing the
-window requests an orderly runtime shutdown so pending EEPROM writes are
-flushed before the process exits.
+window requests an orderly runtime shutdown; pak writes are committed
+immediately with a recoverable backup file.
 
 The SDL audio queue keeps a small scheduling cushion but caps accumulated
 latency. If a skipped cutscene or transition produces audio faster than real

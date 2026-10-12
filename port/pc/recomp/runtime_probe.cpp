@@ -224,7 +224,10 @@ void set_rumble(int controller, bool enabled) {
 }
 ultramodern::input::connected_device_info_t connected_device(int controller) {
     if (controller == 0) {
-        return {ultramodern::input::Device::Controller, ultramodern::input::Pak::None};
+        // The runtime enum has no ControllerPak value. Reporting a generic
+        // attached pak makes libultra's status probe succeed; osPfsInitPak HLE
+        // determines that this is a memory pak rather than a rumble pak.
+        return {ultramodern::input::Device::Controller, ultramodern::input::Pak::RumblePak};
     }
     return {ultramodern::input::Device::None, ultramodern::input::Pak::None};
 }
@@ -306,7 +309,10 @@ recomp::GameEntry make_game(std::uint64_t rom_hash) {
         .display_name = "BattleTanx: Global Assault",
         .game_id = std::u8string{game_id},
         .mod_game_id = "battletanx-ga",
-        .save_type = recomp::SaveType::Eep16k,
+        // BattleTanx GA stores profiles on a Controller Pak, not cartridge
+        // EEPROM. AllowAll keeps unrelated runtime probes benign while the
+        // actual persistence is handled by controller_pak_hle.cpp.
+        .save_type = recomp::SaveType::AllowAll,
         .thumbnail_bytes = {},
         .is_enabled = true,
         .entrypoint_address = get_entrypoint_address(),

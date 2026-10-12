@@ -12,6 +12,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(btga_pc_core
+    src/controller_pak.cpp
     src/game.cpp
     src/lzari.cpp
     src/rom.cpp
@@ -115,6 +116,7 @@ if(BTGA_BUILD_RECOMP)
                 RT64_SDL_WINDOW_VULKAN HLSL_CPU NOMINMAX)
         endif()
         add_executable(btga_runtime_probe
+            recomp/controller_pak_hle.cpp
             recomp/generated/n_aspMain.cpp
             recomp/register_overlays.cpp
             recomp/runtime_probe.cpp

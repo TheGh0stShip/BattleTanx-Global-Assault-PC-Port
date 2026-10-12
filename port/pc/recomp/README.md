@@ -136,7 +136,9 @@ Save data is written outside the build/install tree: under
 `%LOCALAPPDATA%\BattleTanxGA` on Windows, or
 `$XDG_DATA_HOME/BattleTanxGA` (falling back to
 `~/.local/share/BattleTanxGA`) on Linux. Closing the window requests an orderly
-runtime shutdown so pending EEPROM writes can be flushed.
+runtime shutdown. The game has no cartridge EEPROM; profiles are persisted as
+a standard 32 KiB Controller Pak `.mpk` image, written immediately with a
+recoverable backup.
 
 For renderer diagnosis, set `BTGA_RT64_DEVELOPER=1` and press F1 during play.
 Set `BTGA_RT64_INSPECTOR=1` to open the inspector at startup. Normal launches

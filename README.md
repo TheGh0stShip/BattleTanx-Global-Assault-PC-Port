@@ -35,16 +35,16 @@ to play the full demonstration on YouTube.
 - Native Linux build path with Vulkan rendering.
 - Original menus and campaign gameplay are playable.
 - Keyboard and SDL game-controller input, rumble, and SDL audio are connected.
-- Save data is kept in a stable per-user directory and window close requests
-  an orderly runtime shutdown.
+- Native Controller Pak persistence uses standard 32 KiB `.mpk` images in a
+  stable per-user directory, compatible with common N64 emulator pak images.
 - RT64's live developer inspector is available by setting
   `BTGA_RT64_DEVELOPER=1` and pressing F1.
 - Distribution packages are ROM-free; the player supplies a verified local
   USA Rev 0 `.z64` dump at launch.
 
 This is still a development port. Long-session stability, every game mode,
-representative GPUs/controllers, save persistence, and visual effects remain
-part of the release validation matrix.
+representative GPUs/controllers, in-game save-flow validation, and visual
+effects remain part of the release validation matrix.
 
 ## Build and run the PC port
 
