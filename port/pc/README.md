@@ -9,10 +9,10 @@ code are local build inputs and are never committed.
 The current Windows build boots the USA Rev 0 ROM, renders through native
 Direct3D 12, plays SDL audio, accepts keyboard and SDL game-controller input,
 passes the original menus, and enters playable campaign gameplay. Linux uses
-RT64's Vulkan backend. This remains development software rather than a packaged
-release; in-game save-flow validation, long-session stability, every game
-mode, and representative GPU/controller combinations still need broader
-validation.
+RT64's Vulkan backend. A verified ROM-free Windows x64 package is published on
+the repository's Releases page. This remains development software: in-game
+save-flow validation, long-session stability, every game mode, and
+representative GPU/controller combinations still need broader validation.
 
 ## Run a Windows release
 

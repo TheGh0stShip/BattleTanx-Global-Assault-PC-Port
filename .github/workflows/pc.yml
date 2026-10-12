@@ -10,7 +10,7 @@ jobs:
   linux-core:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install portable harness dependencies
         run: sudo apt-get update && sudo apt-get install -y libx11-dev ninja-build
       - name: Configure
@@ -25,7 +25,7 @@ jobs:
   windows-core:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Validate PowerShell entry points
         shell: pwsh
         run: |
