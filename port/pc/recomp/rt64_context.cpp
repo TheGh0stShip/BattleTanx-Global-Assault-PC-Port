@@ -12,6 +12,7 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <cstdint>
 #include <iostream>
@@ -36,6 +37,42 @@
 #include "ultramodern/ultramodern.hpp"
 
 namespace {
+constexpr std::uint8_t online_state_version = 1;
+constexpr std::uint8_t online_state_ack_version = 2;
+constexpr std::size_t online_state_packet_size = 17;
+constexpr std::size_t random_seed_offset = 0x00114C80U;
+constexpr std::size_t frame_counter_offset = 0x0021945CU;
+constexpr std::uint32_t online_state_checksum_salt = UINT32_C(0x42544741);
+
+void put_u32_be(std::uint8_t* output, std::uint32_t value) {
+    output[0] = static_cast<std::uint8_t>(value >> 24);
+    output[1] = static_cast<std::uint8_t>(value >> 16);
+    output[2] = static_cast<std::uint8_t>(value >> 8);
+    output[3] = static_cast<std::uint8_t>(value);
+}
+
+std::uint32_t get_u32_be(const std::uint8_t* input) {
+    return (static_cast<std::uint32_t>(input[0]) << 24) |
+           (static_cast<std::uint32_t>(input[1]) << 16) |
+           (static_cast<std::uint32_t>(input[2]) << 8) | input[3];
+}
+
+std::uint32_t load_rdram_word(const std::uint8_t* rdram, std::size_t offset) {
+    std::uint32_t value = 0;
+    std::memcpy(&value, rdram + offset, sizeof(value));
+    return value;
+}
+
+void store_rdram_word(std::uint8_t* rdram, std::size_t offset, std::uint32_t value) {
+    std::memcpy(rdram + offset, &value, sizeof(value));
+}
+
+std::uint32_t online_state_checksum(std::uint8_t version, std::uint32_t seed,
+                                    std::uint32_t frame, std::uint32_t generation) {
+    const std::uint32_t rotated_frame = (frame << 11) | (frame >> 21);
+    return online_state_checksum_salt ^ version ^ seed ^ rotated_frame ^ generation;
+}
+
 btga::PcSettings pc_settings = btga::PcSettings::defaults();
 std::filesystem::path pc_data_path;
 std::mutex settings_update_mutex;
@@ -452,7 +489,7 @@ public:
         // authority and binds its next tick to the latest client tick it has
         // actually observed; that exact pair is repeated in every host packet.
         pump_online_inputs_locked();
-        if (local == 0 && !online_tick_origins_valid_) {
+        if (local == 0 && online_state_synchronized_ && !online_tick_origins_valid_) {
             const auto remote_tick = online_inputs_.latest_tick_for(1);
             if (remote_tick) {
                 online_local_tick_origin_ = online_tick_;
@@ -494,6 +531,42 @@ public:
             (void)sent;
         }
         pump_online_inputs_locked();
+        const auto state_wait_started = std::chrono::steady_clock::now();
+        while (!online_state_synchronized_) {
+            if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby) {
+                return;
+            }
+            if (local == 0 && online_peer_seen_[1]) {
+                if (!online_state_sent_) {
+                    online_state_seed_ = load_rdram_word(rdram_, random_seed_offset);
+                    online_state_frame_ = load_rdram_word(rdram_, frame_counter_offset);
+                    online_state_generation_ = sequence;
+                    online_state_sent_ = true;
+                }
+                send_online_state_locked(1, online_state_version);
+            } else if (size != 0) {
+                (void)online_connection_->send_gameplay(destination, {packet.data(), size});
+            }
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            lock.lock();
+            pump_online_inputs_locked();
+            if (std::chrono::steady_clock::now() - state_wait_started >=
+                std::chrono::milliseconds(250)) {
+                online_status_ = local == 0
+                    ? "Synchronizing authoritative game state..."
+                    : "Waiting for authoritative game state...";
+            }
+        }
+        if (local == 0 && !online_tick_origins_valid_) {
+            const auto remote_tick = online_inputs_.latest_tick_for(1);
+            if (remote_tick) {
+                online_local_tick_origin_ = tick;
+                online_remote_tick_origin_ = *remote_tick;
+                online_tick_origins_valid_ = true;
+                trace_online_origin_locked(local);
+            }
+        }
         if (!online_tick_origins_valid_) return;
 
         const auto wait_started = std::chrono::steady_clock::now();
@@ -617,6 +690,11 @@ private:
         online_inputs_ = {};
         online_peer_seen_.fill(false);
         online_tick_origins_valid_ = false;
+        online_state_synchronized_ = false;
+        online_state_sent_ = false;
+        online_state_seed_ = 0;
+        online_state_frame_ = 0;
+        online_state_generation_ = 0;
         online_applied_inputs_valid_ = false;
         online_local_tick_origin_ = 0;
         online_remote_tick_origin_ = 0;
@@ -639,12 +717,59 @@ private:
             std::uint16_t source = 0;
             const std::size_t size = online_connection_->receive_gameplay(packet, source);
             if (size == 0) break;
+            BtgaNetHeader header{};
+            if (btga_net_decode_header(&header, packet.data(), size) &&
+                header.protocol_version == BTGA_NET_PROTOCOL_VERSION &&
+                header.message_type == BTGA_NET_MSG_SNAPSHOT &&
+                header.session_id == online_session_id_ && header.peer_id == source &&
+                header.payload_size == online_state_packet_size &&
+                size == BTGA_NET_HEADER_SIZE + online_state_packet_size) {
+                const std::uint8_t* payload = packet.data() + BTGA_NET_HEADER_SIZE;
+                const std::uint8_t version = payload[0];
+                const std::uint32_t seed = get_u32_be(payload + 1);
+                const std::uint32_t frame = get_u32_be(payload + 5);
+                const std::uint32_t generation = get_u32_be(payload + 9);
+                const std::uint32_t checksum = get_u32_be(payload + 13);
+                if (checksum != online_state_checksum(version, seed, frame, generation)) {
+                    continue;
+                }
+                const std::uint16_t local = online_connection_->relay_slot();
+                if (local == 1 && source == 0 && version == online_state_version) {
+                    store_rdram_word(rdram_, random_seed_offset, seed);
+                    store_rdram_word(rdram_, frame_counter_offset, frame);
+                    online_state_seed_ = seed;
+                    online_state_frame_ = frame;
+                    online_state_generation_ = generation;
+                    online_state_synchronized_ = true;
+                    send_online_state_locked(0, online_state_ack_version);
+                    if (online_trace_) {
+                        online_trace_ << "STATE_RESTORED seed=" << seed
+                                      << " frame=" << frame
+                                      << " generation=" << generation << '\n';
+                        online_trace_.flush();
+                    }
+                } else if (local == 0 && source == 1 &&
+                           version == online_state_ack_version && online_state_sent_ &&
+                           seed == online_state_seed_ && frame == online_state_frame_ &&
+                           generation == online_state_generation_) {
+                    online_state_synchronized_ = true;
+                    online_status_ = "Authoritative state synchronized.";
+                    if (online_trace_) {
+                        online_trace_ << "STATE_ACK seed=" << seed
+                                      << " frame=" << frame
+                                      << " generation=" << generation << '\n';
+                        online_trace_.flush();
+                    }
+                }
+                continue;
+            }
             const bool accepted = online_inputs_.accept(
                 {packet.data(), size}, online_session_id_, source);
             if (accepted && source < online_peer_seen_.size()) {
                 online_peer_seen_[source] = true;
                 const std::uint16_t local = online_connection_->relay_slot();
-                if (local == 1 && source == 0 && !online_tick_origins_valid_) {
+                if (local == 1 && source == 0 && online_state_synchronized_ &&
+                    !online_tick_origins_valid_) {
                     const auto origin = online_inputs_.sync_origin_for(0);
                     if (origin) {
                         // Host announces (host tick, client tick). Reverse the
@@ -656,6 +781,36 @@ private:
                     }
                 }
             }
+        }
+    }
+
+    void send_online_state_locked(std::uint16_t destination, std::uint8_t version) {
+        if (!online_connection_) return;
+        std::array<std::uint8_t, BTGA_NET_HEADER_SIZE + online_state_packet_size> packet{};
+        BtgaNetHeader header{};
+        header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
+        header.message_type = BTGA_NET_MSG_SNAPSHOT;
+        header.flags = static_cast<std::uint8_t>(BTGA_NET_FLAG_RELIABLE |
+                                                 BTGA_NET_FLAG_RELAYED);
+        header.session_id = online_session_id_;
+        header.sequence = online_sequence_++;
+        header.payload_size = static_cast<std::uint16_t>(online_state_packet_size);
+        header.peer_id = online_connection_->relay_slot();
+        if (btga_net_encode_header(packet.data(), packet.size(), &header) !=
+            BTGA_NET_HEADER_SIZE) return;
+        std::uint8_t* payload = packet.data() + BTGA_NET_HEADER_SIZE;
+        payload[0] = version;
+        put_u32_be(payload + 1, online_state_seed_);
+        put_u32_be(payload + 5, online_state_frame_);
+        put_u32_be(payload + 9, online_state_generation_);
+        put_u32_be(payload + 13, online_state_checksum(
+            version, online_state_seed_, online_state_frame_, online_state_generation_));
+        (void)online_connection_->send_gameplay(destination, packet);
+        if (version == online_state_version && online_trace_) {
+            online_trace_ << "STATE_SEND seed=" << online_state_seed_
+                          << " frame=" << online_state_frame_
+                          << " generation=" << online_state_generation_ << '\n';
+            online_trace_.flush();
         }
     }
 
@@ -718,7 +873,9 @@ private:
                       << " p1=" << p1.buttons << ',' << static_cast<int>(p1.stick_x)
                       << ',' << static_cast<int>(p1.stick_y);
         if ((relative_tick % 60U) == 0U) {
-            online_trace_ << " rdram_fnv64=" << rdram_hash();
+            online_trace_ << " rdram_fnv64=" << rdram_hash()
+                          << " seed=" << load_rdram_word(rdram_, random_seed_offset)
+                          << " frame=" << load_rdram_word(rdram_, frame_counter_offset);
         }
         online_trace_ << '\n';
         online_trace_.flush();
@@ -1232,6 +1389,11 @@ private:
     std::uint32_t online_local_tick_origin_ = 0;
     std::uint32_t online_remote_tick_origin_ = 0;
     bool online_tick_origins_valid_ = false;
+    bool online_state_synchronized_ = false;
+    bool online_state_sent_ = false;
+    std::uint32_t online_state_seed_ = 0;
+    std::uint32_t online_state_frame_ = 0;
+    std::uint32_t online_state_generation_ = 0;
     bool online_applied_inputs_valid_ = false;
     std::array<btga::OnlineControllerInput, 2> online_applied_inputs_{};
     std::ofstream online_trace_;
