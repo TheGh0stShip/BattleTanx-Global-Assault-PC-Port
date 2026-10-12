@@ -53,12 +53,14 @@ function Apply-CheckedPatch {
         [Parameter(Mandatory = $true)][string] $Patch,
         [Parameter(Mandatory = $true)][string] $Description
     )
-    & git -C $Repository apply --check $Patch 2>$null
+    # Existing Windows clones may already have CRLF-normalized patch payloads.
+    # Ignore whitespace changes while retaining git apply's context checking.
+    & git -C $Repository apply --ignore-space-change --check $Patch 2>$null
     if ($LASTEXITCODE -eq 0) {
-        Invoke-Checked git @("-C", $Repository, "apply", $Patch) $Description
+        Invoke-Checked git @("-C", $Repository, "apply", "--ignore-space-change", $Patch) $Description
         return
     }
-    & git -C $Repository apply --reverse --check $Patch 2>$null
+    & git -C $Repository apply --reverse --ignore-space-change --check $Patch 2>$null
     if ($LASTEXITCODE -ne 0) {
         throw "$Description does not apply cleanly."
     }

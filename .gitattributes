@@ -1,0 +1,7 @@
+# Patch payloads must retain Unix line endings. Git for Windows commonly uses
+# core.autocrlf=true, but CRLF patch files fail against LF dependency sources.
+*.patch text eol=lf
+
+# Keep native scripting conventions explicit across Windows and Unix clones.
+*.sh text eol=lf
+*.ps1 text eol=crlf
