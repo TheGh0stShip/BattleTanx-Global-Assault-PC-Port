@@ -63,6 +63,13 @@ display-list, screen-update, and RSP counts at the end of the run. The bounded
 probe deliberately uses headless callbacks; `--play` selects the interactive
 RT64/SDL backends.
 
+For a longer stability run, select an explicit duration from one second through
+one hour:
+
+```sh
+./build-pc-runtime/BattleTanxGA --boot-seconds 300 /path/to/battletanx_ga.z64
+```
+
 `runtime_patches.cpp` contains required scheduler portability patches. The
 controller, scheduler-record, graphics-completion, and render-slot busy-waits
 now cooperatively yield. Those original loops depend on R4300 interrupt

@@ -1,3 +1,4 @@
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <cstdint>
@@ -243,6 +244,7 @@ void show_error(const char* message) {
 
 bool boot_requested = false;
 std::chrono::steady_clock::time_point boot_started;
+std::chrono::seconds headless_boot_duration{5};
 
 std::filesystem::path user_data_directory() {
 #if defined(_WIN32)
@@ -284,7 +286,7 @@ void drive_headless_runtime(void*) {
         boot_requested = true;
         boot_started = std::chrono::steady_clock::now();
         recomp::start_game(std::u8string{game_id}, {});
-    } else if (std::chrono::steady_clock::now() - boot_started > std::chrono::seconds{5}) {
+    } else if (std::chrono::steady_clock::now() - boot_started > headless_boot_duration) {
         std::cerr << "Headless boot window elapsed: threads=" << created_threads.load()
                   << " vi=" << vi_events.load()
                   << " display_lists=" << display_lists.load()
@@ -315,16 +317,31 @@ recomp::GameEntry make_game(std::uint64_t rom_hash) {
 
 int main(int argc, char** argv) {
     bool boot = argc == 3 && std::string_view{argv[1]} == "--boot";
+    bool timed_boot = argc == 4 && std::string_view{argv[1]} == "--boot-seconds";
     bool play = argc == 3 && std::string_view{argv[1]} == "--play";
-    if (argc != 1 && !boot && !play) {
-        std::cerr << "Usage: " << argv[0] << " [--boot|--play /path/to/battletanx_ga.z64]\n";
+    if (argc != 1 && !boot && !timed_boot && !play) {
+        std::cerr << "Usage: " << argv[0]
+                  << " [--boot ROM | --boot-seconds SECONDS ROM | --play ROM]\n";
         return 2;
+    }
+
+    if (timed_boot) {
+        unsigned int seconds = 0;
+        const std::string_view text{argv[2]};
+        const auto [end, error] =
+            std::from_chars(text.data(), text.data() + text.size(), seconds);
+        if (error != std::errc{} || end != text.data() + text.size() ||
+            seconds == 0 || seconds > 3600) {
+            std::cerr << "--boot-seconds must be an integer from 1 through 3600\n";
+            return 2;
+        }
+        headless_boot_duration = std::chrono::seconds{seconds};
     }
 
     std::uint64_t rom_hash = 0;
     std::filesystem::path rom_path;
-    if (boot || play) {
-        rom_path = argv[2];
+    if (boot || timed_boot || play) {
+        rom_path = timed_boot ? argv[3] : argv[2];
         const btga::Rom rom = btga::Rom::load_verified(rom_path);
         rom_hash = XXH3_64bits(rom.bytes().data(), rom.bytes().size());
     }
@@ -340,7 +357,7 @@ int main(int argc, char** argv) {
     std::cout << "Registered all translated game code at entrypoint 0x"
               << std::hex << static_cast<std::uint32_t>(game.entrypoint_address) << '\n';
 
-    if (!boot && !play) {
+    if (!boot && !timed_boot && !play) {
         return 0;
     }
 
