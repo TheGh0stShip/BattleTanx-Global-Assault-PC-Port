@@ -49,6 +49,17 @@ extern "C" void btga_score_count_step(std::uint8_t* rdram, recomp_context* ctx) 
     }
 }
 
+extern "C" void btga_cutscene_far_plane(std::uint8_t*, recomp_context* ctx) {
+    // The cutscene camera reads the gameplay draw-distance global before it
+    // has necessarily been initialized. Avoid a degenerate near=16/far=0
+    // matrix while preserving every valid scripted or gameplay distance.
+    constexpr std::int32_t near_plane = 16;
+    constexpr std::int32_t fallback_far_plane = 32767;
+    if (static_cast<std::int32_t>(ctx->r3) <= near_plane) {
+        ctx->r3 = fallback_far_plane;
+    }
+}
+
 extern "C" void func_80098B40(std::uint8_t* rdram, recomp_context*) {
     constexpr gpr controller_read_pending = static_cast<gpr>(static_cast<std::int32_t>(0x80219230U));
     while (MEM_W(0, controller_read_pending) != 0) {
