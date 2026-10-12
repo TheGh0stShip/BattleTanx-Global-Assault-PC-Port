@@ -1,4 +1,5 @@
 #include "btga/game.hpp"
+#include "btga/input_sync.hpp"
 #include "btga/controller_pak.hpp"
 #include "btga/pc_settings.hpp"
 #include "btga/online_multiplayer.hpp"
@@ -6,6 +7,11 @@
 #include "btga/sha256.hpp"
 #include "btga/texture_packs.hpp"
 #include "btga/udp_online_io.hpp"
+
+extern "C" {
+#include <btga/btga_gameplay.h>
+#include <btga/btga_net.h>
+}
 
 #include <chrono>
 #include <filesystem>
@@ -26,6 +32,33 @@
     } while (false)
 
 int main() {
+    {
+        btga::InputSynchronizer sender;
+        btga::InputSynchronizer receiver;
+        std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
+        const btga::OnlineControllerInput input{0xA510, -73, 91};
+        const std::size_t size = sender.encode(
+            packet, UINT64_C(0x1020304050607080), 1, 42, 900, 1, input);
+        CHECK(size == BTGA_NET_HEADER_SIZE + BTGA_NET_INPUT_HEADER_SIZE +
+                      BTGA_NET_INPUT_FRAME_SIZE);
+        CHECK(receiver.accept({packet.data(), size},
+                              UINT64_C(0x1020304050607080), 1));
+        CHECK(receiver.input_for(1, 900) == input);
+        CHECK(!receiver.input_for(1, 899).has_value());
+        CHECK(!receiver.accept({packet.data(), size},
+                               UINT64_C(0x1020304050607081), 1));
+
+        // Replays and older ticks must not replace the newest accepted input.
+        CHECK(receiver.accept({packet.data(), size},
+                              UINT64_C(0x1020304050607080), 1));
+        const btga::OnlineControllerInput newer{0x2000, 10, -10};
+        const std::size_t newer_size = sender.encode(
+            packet, UINT64_C(0x1020304050607080), 1, 43, 901, 1, newer);
+        CHECK(receiver.accept({packet.data(), newer_size},
+                              UINT64_C(0x1020304050607080), 1));
+        CHECK(receiver.input_for(1, 901) == newer);
+        CHECK(!receiver.input_for(1, 900).has_value());
+    }
     class TestHttpClient final : public btga::HttpClient {
     public:
         btga::HttpResponse request(std::string_view method, std::string_view path,

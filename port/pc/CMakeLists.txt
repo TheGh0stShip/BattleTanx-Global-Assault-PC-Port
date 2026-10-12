@@ -28,6 +28,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(btga_pc_core
     src/controller_pak.cpp
     src/game.cpp
+    src/input_sync.cpp
     src/lzari.cpp
     src/master_client.cpp
     src/online_multiplayer.cpp

@@ -315,15 +315,23 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
         *buttons = 0;
         *x = 0.0F;
         *y = 0.0F;
+        const int online_slot = btga::renderer::online_local_player_slot();
+        if (online_slot >= 0 && controller != online_slot) {
+            // Online peers occupy the original game's controller ports. A
+            // missing packet is neutral input rather than stale local input.
+            btga::renderer::online_remote_input(controller, *buttons, *x, *y);
+            return controller == 0 || controller == 1;
+        }
+        const int input_controller = online_slot == controller ? 0 : controller;
         if (btga::renderer::settings_overlay_visible()) {
-            if (controller == 0) {
+            if (input_controller == 0) {
                 SDL_SetRelativeMouseMode(SDL_FALSE);
                 mouse_turret_aiming.store(false, std::memory_order_relaxed);
                 turret_stick_x[0].store(0.0F, std::memory_order_relaxed);
             }
             return true;
         }
-        if (controller == 0) {
+        if (input_controller == 0) {
             const auto* keys = SDL_GetKeyboardState(nullptr);
             *buttons = (keys[keyboard.button_a] ? 0x8000 : 0) | (keys[keyboard.button_b] ? 0x4000 : 0) |
                        (keys[keyboard.button_z] ? 0x2000 : 0) | (keys[keyboard.button_start] ? 0x1000 : 0) |
@@ -361,9 +369,9 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
                 turret_stick_x[0].store(0.0F, std::memory_order_relaxed);
             }
         }
-        SDL_GameController* gamepad = configured_gamepad(controller);
+        SDL_GameController* gamepad = configured_gamepad(input_controller);
         if (gamepad) {
-            const btga::ControllerBindings& binding = pc_settings.controllers[static_cast<std::size_t>(controller)];
+            const btga::ControllerBindings& binding = pc_settings.controllers[static_cast<std::size_t>(input_controller)];
             auto pressed = [gamepad](const std::string& input) { return controller_input_pressed(gamepad, input); };
             const bool independent_turret = pc_settings.mod_independent_turret;
             *buttons |= (pressed(binding.button_a) ? 0x8000 : 0) |
@@ -384,7 +392,7 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
             const float gx = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTX) * scale;
             const float gy = -SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTY) * scale;
             const float rx = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_RIGHTX) * scale;
-            const btga::PlayerSettings& player = pc_settings.players[static_cast<std::size_t>(controller)];
+            const btga::PlayerSettings& player = pc_settings.players[static_cast<std::size_t>(input_controller)];
             const float configured_x = gx * player.sensitivity * (player.invert_x ? -1.0F : 1.0F);
             const float configured_y = gy * player.sensitivity * (player.invert_y ? -1.0F : 1.0F);
             if (configured_x > player.deadzone || configured_x < -player.deadzone) {
@@ -393,13 +401,17 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
             if (configured_y > player.deadzone || configured_y < -player.deadzone) {
                 *y = std::clamp(configured_y, -1.0F, 1.0F);
             }
-            if (controller != 0 || !mouse_turret_aiming.load(std::memory_order_relaxed)) {
+            if (input_controller != 0 || !mouse_turret_aiming.load(std::memory_order_relaxed)) {
                 const float turret_direction = player.invert_turret_x ? -1.0F : 1.0F;
                 const float configured_turret = rx * player.turret_sensitivity * turret_direction;
-                turret_stick_x[static_cast<std::size_t>(controller)].store(
+                turret_stick_x[static_cast<std::size_t>(input_controller)].store(
                     std::abs(rx) > player.deadzone ? std::clamp(configured_turret, -1.0F, 1.0F) : 0.0F,
                     std::memory_order_relaxed);
             }
+        }
+        if (online_slot >= 0) {
+            btga::renderer::online_submit_local_input(*buttons, *x, *y);
+            return true;
         }
         return controller == 0 || gamepad != nullptr;
     }
@@ -460,6 +472,10 @@ void set_rumble(int controller, bool enabled) {
 #endif
 }
 ultramodern::input::connected_device_info_t connected_device(int controller) {
+    const int online_slot = btga::renderer::online_local_player_slot();
+    if (online_slot >= 0 && (controller == 0 || controller == 1)) {
+        return {ultramodern::input::Device::Controller, ultramodern::input::Pak::RumblePak};
+    }
     if (controller == 0) {
         // The runtime enum has no ControllerPak value. Reporting a generic
         // attached pak makes libultra's status probe succeed; osPfsInitPak HLE

@@ -25,6 +25,7 @@
 
 #include "btga/texture_packs.hpp"
 #include "btga/master_client.hpp"
+#include "btga/input_sync.hpp"
 #include "btga/online_multiplayer.hpp"
 #include "btga/udp_online_io.hpp"
 #include "hle/rt64_application.h"
@@ -420,6 +421,49 @@ public:
         return app_->sdlEventFilter(event);
     }
 
+    int online_local_player_slot() {
+        const std::lock_guard lock(online_mutex_);
+        if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby) return -1;
+        return static_cast<int>(online_connection_->relay_slot());
+    }
+
+    bool online_remote_input(int player, std::uint16_t& buttons, float& x, float& y) {
+        const std::lock_guard lock(online_mutex_);
+        if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby ||
+            player < 0 || player >= static_cast<int>(btga::InputSynchronizer::max_players) ||
+            player == static_cast<int>(online_connection_->relay_slot())) return false;
+        pump_online_inputs_locked();
+        const auto input = online_inputs_.latest_input_for(static_cast<std::uint8_t>(player));
+        if (!input) return false;
+        buttons = input->buttons;
+        x = static_cast<float>(input->stick_x) / 127.0F;
+        y = static_cast<float>(input->stick_y) / 127.0F;
+        return true;
+    }
+
+    void online_submit_local_input(std::uint16_t buttons, float x, float y) {
+        const std::lock_guard lock(online_mutex_);
+        if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby) return;
+        const std::uint16_t local = online_connection_->relay_slot();
+        if (local > 1) return; // Two-player synchronization milestone.
+        std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
+        const btga::OnlineControllerInput input{
+            buttons,
+            static_cast<std::int8_t>(std::clamp(x, -1.0F, 1.0F) * 127.0F),
+            static_cast<std::int8_t>(std::clamp(y, -1.0F, 1.0F) * 127.0F),
+        };
+        const std::size_t size = online_inputs_.encode(
+            packet, online_session_id_, local, online_sequence_++, online_tick_++,
+            static_cast<std::uint8_t>(local), input);
+        const std::uint16_t destination = local == 0 ? 1 : 0;
+        if (size != 0) {
+            const bool sent = online_connection_->send_gameplay(
+                destination, {packet.data(), size});
+            (void)sent;
+        }
+        pump_online_inputs_locked();
+    }
+
 private:
     enum class OnlineTaskKind { Browse, Host, Join, Heartbeat };
     struct OnlineTaskResult {
@@ -503,10 +547,30 @@ private:
             return false;
         }
         online_status_ = "Authenticating with the gameplay relay...";
+        online_session_id_ = session;
+        online_sequence_ = 1;
+        online_tick_ = 0;
+        online_peer_seen_.fill(false);
         return true;
     }
 
+    void pump_online_inputs_locked() {
+        if (!online_connection_) return;
+        for (;;) {
+            std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
+            std::uint16_t source = 0;
+            const std::size_t size = online_connection_->receive_gameplay(packet, source);
+            if (size == 0) break;
+            const bool accepted = online_inputs_.accept(
+                {packet.data(), size}, online_session_id_, source);
+            if (accepted && source < online_peer_seen_.size()) {
+                online_peer_seen_[source] = true;
+            }
+        }
+    }
+
     void disconnect_online() {
+        const std::lock_guard lock(online_mutex_);
         if (online_connection_) online_connection_->leave_online();
         online_connection_.reset();
         online_udp_.reset();
@@ -525,6 +589,7 @@ private:
     }
 
     void update_online() {
+        const std::lock_guard lock(online_mutex_);
         if (online_task_.valid() &&
             online_task_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             OnlineTaskResult result = online_task_.get();
@@ -571,9 +636,12 @@ private:
             btga::MasterClient* master = online_master_.get();
             const std::string lobby = online_lobby_id_;
             const std::string secret = online_host_secret_;
+            const std::uint16_t players = static_cast<std::uint16_t>(
+                1 + std::count(online_peer_seen_.begin(), online_peer_seen_.end(), true));
             start_online_task(OnlineTaskKind::Heartbeat,
-                [master, lobby, secret](OnlineTaskResult&) {
-                    master->heartbeat(lobby, secret, 1, "lobby");
+                [master, lobby, secret, players](OnlineTaskResult&) {
+                    master->heartbeat(lobby, secret, players,
+                                      players > 1 ? "playing" : "lobby");
                 });
         }
     }
@@ -615,7 +683,7 @@ private:
             ImGui::EndDisabled();
             ImGui::PopID();
         }
-        ImGui::TextDisabled("Lobby and relay binding are operational. Match-state synchronization is the next milestone.");
+        ImGui::TextWrapped("Experimental two-player input synchronization is active after relay binding. The host is N64 controller port 1 and the joining player is port 2. Both players must currently select the same original multiplayer mode and match settings; synchronized lobby navigation and match launch are still in development.");
     }
 
     static int window_mode_index(btga::WindowMode mode) {
@@ -988,6 +1056,12 @@ private:
     std::string online_host_secret_;
     bool online_is_host_ = false;
     std::chrono::steady_clock::time_point online_next_heartbeat_{};
+    std::recursive_mutex online_mutex_;
+    btga::InputSynchronizer online_inputs_;
+    std::uint64_t online_session_id_ = 0;
+    std::uint32_t online_sequence_ = 1;
+    std::uint32_t online_tick_ = 0;
+    std::array<bool, btga::InputSynchronizer::max_players> online_peer_seen_{};
 };
 }
 
@@ -1022,4 +1096,21 @@ bool btga::renderer::consume_settings_update(PcSettings& settings) {
     settings = std::move(*settings_update);
     settings_update.reset();
     return true;
+}
+
+int btga::renderer::online_local_player_slot() {
+    Context* context = active_context.load(std::memory_order_acquire);
+    return context ? context->online_local_player_slot() : -1;
+}
+
+bool btga::renderer::online_remote_input(int player, std::uint16_t& buttons,
+                                         float& x, float& y) {
+    Context* context = active_context.load(std::memory_order_acquire);
+    return context && context->online_remote_input(player, buttons, x, y);
+}
+
+void btga::renderer::online_submit_local_input(std::uint16_t buttons, float x, float y) {
+    if (Context* context = active_context.load(std::memory_order_acquire)) {
+        context->online_submit_local_input(buttons, x, y);
+    }
 }
