@@ -227,3 +227,18 @@ cmake --build build-pc-rt64 --target btga_runtime_probe
 The small `battletanx_ga_pc` target is an earlier native-engine bring-up
 harness. It is retained for portable core tests, but `BattleTanxGA` is the
 complete-game compatibility runtime.
+
+## Online multiplayer status
+
+The PC core compiles against a pinned GPL-3.0-only revision of the shared
+[BattleTanx: Global Assault networking project](https://github.com/TheGh0stShip/BattleTanx-Global-Assault-Networking).
+This is foundational integration, not a playable online mode yet. Networking
+starts offline and opens no socket or DNS request during normal startup. Only a
+future explicit **Online Multiplayer** action may opt in and initialize the
+master/relay path; leaving that flow returns the client fully offline.
+
+The design is relay-first and uses outbound UDP only. It does not use UPnP,
+NAT-PMP, inbound port forwarding, or expose a host's home connection. Each
+device renders its own full-screen player camera; synchronization begins in a
+host-authoritative roster and tank-selection lobby rather than by emulating
+local split-screen.

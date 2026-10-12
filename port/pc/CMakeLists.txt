@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.20)
 project(BattleTanxGA_PC LANGUAGES C CXX)
 
+include(FetchContent)
+
+set(BTGA_NET_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(btga_networking
+    GIT_REPOSITORY https://github.com/TheGh0stShip/BattleTanx-Global-Assault-Networking.git
+    GIT_TAG 97b190991311525e360b426e4d303a948264c881
+    GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(btga_networking)
+
 option(BTGA_BUILD_RECOMP "Compile locally generated N64Recomp output" OFF)
 option(BTGA_BUILD_RUNTIME_PROBE "Link the translated game against N64ModernRuntime" OFF)
 option(BTGA_BUILD_RT64 "Build the optional RT64 renderer adapter" OFF)
@@ -15,6 +24,7 @@ add_library(btga_pc_core
     src/controller_pak.cpp
     src/game.cpp
     src/lzari.cpp
+    src/online_multiplayer.cpp
     src/pc_settings.cpp
     src/rom.cpp
     src/sha256.cpp
@@ -22,6 +32,7 @@ add_library(btga_pc_core
     src/world.cpp
 )
 target_include_directories(btga_pc_core PUBLIC include)
+target_link_libraries(btga_pc_core PUBLIC BattleTanxGA::NetProtocol)
 target_compile_options(btga_pc_core PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
     $<$<CXX_COMPILER_ID:MSVC>:/W4;/WX>

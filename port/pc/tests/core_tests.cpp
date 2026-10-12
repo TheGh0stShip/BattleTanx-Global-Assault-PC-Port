@@ -1,6 +1,7 @@
 #include "btga/game.hpp"
 #include "btga/controller_pak.hpp"
 #include "btga/pc_settings.hpp"
+#include "btga/online_multiplayer.hpp"
 #include "btga/sha256.hpp"
 #include "btga/texture_packs.hpp"
 
@@ -23,6 +24,52 @@
     } while (false)
 
 int main() {
+    class TestOnlineIo final : public btga::OnlineIo {
+    public:
+        bool open() override { ++open_calls; return open_result; }
+        void close() override { ++close_calls; }
+        bool send_relay(std::span<const std::uint8_t> packet) override {
+            ++send_calls;
+            last_packet.assign(packet.begin(), packet.end());
+            return send_result;
+        }
+        bool open_result = true;
+        bool send_result = true;
+        int open_calls = 0;
+        int close_calls = 0;
+        int send_calls = 0;
+        std::vector<std::uint8_t> last_packet;
+    } online_io;
+    {
+        btga::OnlineMultiplayer online{online_io};
+        CHECK(online.state() == btga::OnlineState::Offline);
+        CHECK(online_io.open_calls == 0 && online_io.send_calls == 0);
+        CHECK(online.enter_online());
+        CHECK(online_io.open_calls == 1);
+        static constexpr std::string_view token = "signed.token";
+        CHECK(online.begin_relay(false, UINT64_C(0x1020304050607080), {
+            reinterpret_cast<const std::uint8_t*>(token.data()), token.size()
+        }));
+        CHECK(online.state() == btga::OnlineState::RelayBinding);
+        CHECK(online_io.send_calls == 1 && !online_io.last_packet.empty());
+
+        BtgaRelayEnvelope bound{};
+        bound.message_type = BTGA_RELAY_MSG_BOUND;
+        bound.session_id = UINT64_C(0x1020304050607080);
+        bound.source_slot = 1;
+        bound.destination_slot = 1;
+        std::array<std::uint8_t, BTGA_RELAY_HEADER_SIZE> response{};
+        CHECK(btga_relay_encode(response.data(), response.size(), &bound) ==
+              response.size());
+        CHECK(online.accept_relay_datagram(response));
+        CHECK(online.state() == btga::OnlineState::Lobby);
+        CHECK(online.relay_slot() == 1);
+        online.leave_online();
+        CHECK(online.state() == btga::OnlineState::Offline);
+        CHECK(online_io.close_calls == 1);
+    }
+    CHECK(online_io.close_calls == 1);
+
     constexpr std::string_view abc = "abc";
     const auto* bytes = reinterpret_cast<const std::uint8_t*>(abc.data());
     CHECK(btga::hex_digest(btga::sha256({bytes, abc.size()})) ==

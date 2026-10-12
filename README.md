@@ -170,8 +170,10 @@ See also the [reusable decompilation toolkit](docs/DECOMPKIT.md),
 
 Cross-platform multiplayer is developed independently in
 [BattleTanx-Global-Assault-Networking](https://github.com/TheGh0stShip/BattleTanx-Global-Assault-Networking).
-This repository will consume a tagged protocol release when gameplay
-replication is ready for integration.
+The portable GPLv3 protocol and relay client are pinned into this build but
+remain dormant: constructing or launching the game performs no network access.
+A future explicit **Online Multiplayer** action will open the network path;
+there is not yet a user-visible online mode or playable Internet multiplayer.
 
 ## License
 
