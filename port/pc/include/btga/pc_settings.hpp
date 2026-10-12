@@ -69,7 +69,7 @@ struct ControllerBindings {
 };
 
 struct PcSettings {
-    static constexpr int current_version = 8;
+    static constexpr int current_version = 9;
     static constexpr std::size_t recent_rom_capacity = 5;
 
     int version = current_version;
@@ -85,6 +85,7 @@ struct PcSettings {
     float music_volume = 1.0F;
     float effects_volume = 1.0F;
     bool mono_audio = false;
+    float screen_shake_intensity = 1.0F;
     bool texture_packs_enabled = true;
     bool mod_extended_visibility = false;
     bool mod_independent_turret = false;

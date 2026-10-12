@@ -9,6 +9,7 @@ extern "C" void yield_self_1ms(std::uint8_t* rdram);
 extern "C" bool btga_extended_visibility_enabled();
 extern "C" bool btga_independent_turret_enabled();
 extern "C" float btga_turret_stick_x(int player);
+extern "C" float btga_screen_shake_intensity();
 extern "C" float btga_music_volume_setting();
 extern "C" float btga_effects_volume_setting();
 
@@ -133,6 +134,13 @@ extern "C" void btga_turret_camera_step(std::uint8_t* rdram, recomp_context* ctx
     // Mode 1 is the game's existing turret transform, also used by the intro
     // presentation, so this reuses retail camera math and smoothing.
     MEM_W(0, query_mode) = 1;
+}
+
+extern "C" void btga_screen_shake_step(std::uint8_t*, recomp_context* ctx) {
+    // func_800A6588 passes the current shake amplitude in f12 to each of its
+    // three random camera-offset calls. Scale that transient argument while
+    // leaving the retail shake state and decay untouched.
+    ctx->f12.fl *= btga_screen_shake_intensity();
 }
 
 extern "C" void MusSetMasterVolume(std::uint8_t* rdram, recomp_context* ctx) {

@@ -77,6 +77,10 @@ SDL mix; the music and effects controls independently scale the two master
 buses already present in the original libmus audio engine. Mono audio is also
 available and safely averages each stereo frame into both output channels.
 
+The **Accessibility** tab includes a screen-shake intensity control. Reducing
+it scales only random camera displacement; vehicle recoil, gameplay state, and
+the original shake decay timing remain intact.
+
 The aspect-ratio selector drives RT64's projection and extended-origin settings
 without changing the game's simulation. This is the renderer foundation for
 true widescreen; game-specific HUD placement, split-screen layouts, cutscenes,

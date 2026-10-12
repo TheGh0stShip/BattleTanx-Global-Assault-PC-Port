@@ -130,6 +130,7 @@ void apply_key(PcSettings& settings, std::string_view key, std::string_view valu
     else if (key == "audio.music_volume") parse_number(value, settings.music_volume);
     else if (key == "audio.effects_volume") parse_number(value, settings.effects_volume);
     else if (key == "audio.mono") parse_bool(value, settings.mono_audio);
+    else if (key == "accessibility.screen_shake") parse_number(value, settings.screen_shake_intensity);
     else if (key == "textures.enabled") parse_bool(value, settings.texture_packs_enabled);
     else if (key == "mods.extended_visibility") parse_bool(value, settings.mod_extended_visibility);
     else if (key == "mods.independent_turret") parse_bool(value, settings.mod_independent_turret);
@@ -254,6 +255,7 @@ void PcSettings::save(const std::filesystem::path& path) const {
     stream << "audio.music_volume=" << clean.music_volume << '\n';
     stream << "audio.effects_volume=" << clean.effects_volume << '\n';
     stream << "audio.mono=" << clean.mono_audio << '\n';
+    stream << "accessibility.screen_shake=" << clean.screen_shake_intensity << '\n';
     stream << "textures.enabled=" << clean.texture_packs_enabled << '\n';
     stream << "mods.extended_visibility=" << clean.mod_extended_visibility << '\n';
     stream << "mods.independent_turret=" << clean.mod_independent_turret << '\n';
@@ -351,6 +353,7 @@ void PcSettings::validate() {
     master_volume = std::clamp(master_volume, 0.0F, 1.0F);
     music_volume = std::clamp(music_volume, 0.0F, 1.0F);
     effects_volume = std::clamp(effects_volume, 0.0F, 1.0F);
+    screen_shake_intensity = std::clamp(screen_shake_intensity, 0.0F, 1.0F);
     if (!std::isfinite(mouse_turret_sensitivity)) mouse_turret_sensitivity = 1.0F;
     mouse_turret_sensitivity = std::clamp(mouse_turret_sensitivity, 0.25F, 4.0F);
     std::array<std::string, recent_rom_capacity> deduplicated{};

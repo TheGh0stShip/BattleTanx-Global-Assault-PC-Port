@@ -115,6 +115,7 @@ int main() {
     settings.music_volume = 0.5F;
     settings.effects_volume = 0.75F;
     settings.mono_audio = true;
+    settings.screen_shake_intensity = 0.25F;
     settings.texture_packs_enabled = false;
     settings.players[1].deadzone = 0.25F;
     settings.players[1].invert_y = true;
@@ -137,6 +138,7 @@ int main() {
     CHECK(loaded.music_volume == 0.5F);
     CHECK(loaded.effects_volume == 0.75F);
     CHECK(loaded.mono_audio);
+    CHECK(loaded.screen_shake_intensity == 0.25F);
     CHECK(!loaded.texture_packs_enabled);
     CHECK(loaded.players[1].deadzone == 0.25F);
     CHECK(loaded.players[1].invert_y && loaded.players[1].controller_slot == 3);
@@ -158,6 +160,7 @@ int main() {
                   << "video.antialiasing=3\n"
                   << "audio.master_volume=9\n"
                   << "audio.music_volume=inf\n"
+                  << "accessibility.screen_shake=-3\n"
                   << "mods.mouse_turret_sensitivity=99\n"
                   << "player1.deadzone=-5\n";
     }
@@ -168,6 +171,7 @@ int main() {
     CHECK(validated.antialiasing == 0);
     CHECK(validated.master_volume == 1.0F);
     CHECK(validated.music_volume == 0.5F);
+    CHECK(validated.screen_shake_intensity == 0.0F);
     CHECK(validated.players[0].deadzone == 0.0F);
 
     btga::PcSettings invalid_enum = btga::PcSettings::defaults();

@@ -424,6 +424,11 @@ extern "C" float btga_effects_volume_setting() {
     return pc_settings.effects_volume;
 }
 
+extern "C" float btga_screen_shake_intensity() {
+    const std::lock_guard lock(input_settings_mutex);
+    return pc_settings.screen_shake_intensity;
+}
+
 extern "C" float btga_turret_stick_x(int player) {
     if (player < 0 || player >= max_controllers) return 0.0F;
     return turret_stick_x[static_cast<std::size_t>(player)].load(std::memory_order_relaxed);

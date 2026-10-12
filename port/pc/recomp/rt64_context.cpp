@@ -643,6 +643,11 @@ private:
                     ImGui::TextDisabled("Master applies to the final mix; music and effects use the game's separate libmus buses. Mono averages both output channels.");
                     ImGui::EndTabItem();
                 }
+                if (ImGui::BeginTabItem("Accessibility")) {
+                    slider_percent("Screen shake", draft_settings_.screen_shake_intensity);
+                    ImGui::TextDisabled("0% removes random camera displacement while preserving gameplay recoil and timing.");
+                    ImGui::EndTabItem();
+                }
                 if (ImGui::BeginTabItem("Controllers")) {
                     for (std::size_t i = 0; i < draft_settings_.players.size(); ++i) {
                         auto& player = draft_settings_.players[i];
