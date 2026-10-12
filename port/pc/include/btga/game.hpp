@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace btga {
 
@@ -45,12 +46,14 @@ class Game {
   public:
     void update(const Input& input, float seconds);
     void render(Framebuffer& target) const;
+    void set_map_points(std::vector<std::array<float, 2>> points);
     [[nodiscard]] const Tank& player() const { return player_; }
     [[nodiscard]] std::span<const Projectile> projectiles() const { return projectiles_; }
 
   private:
     Tank player_{};
     std::array<Projectile, 32> projectiles_{};
+    std::vector<std::array<float, 2>> map_points_{};
     bool fire_latched_{};
     void spawn_projectile();
 };

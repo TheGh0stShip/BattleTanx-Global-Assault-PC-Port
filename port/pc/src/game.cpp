@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace btga {
 namespace {
@@ -51,6 +52,10 @@ void Game::spawn_projectile() {
               dx * 280.0F, dy * 280.0F, 1.8F, true};
 }
 
+void Game::set_map_points(std::vector<std::array<float, 2>> points) {
+    map_points_ = std::move(points);
+}
+
 void Game::update(const Input& input, float seconds) {
     seconds = std::clamp(seconds, 0.0F, 0.05F);
     const float turn = (input.right ? 1.0F : 0.0F) - (input.left ? 1.0F : 0.0F);
@@ -86,6 +91,9 @@ void Game::render(Framebuffer& target) const {
     target.rectangle(12, kHeight - 16, kWidth - 24, 4, 0xFF647048U);
     target.rectangle(12, 12, 4, kHeight - 24, 0xFF647048U);
     target.rectangle(kWidth - 16, 12, 4, kHeight - 24, 0xFF647048U);
+    for (const auto& point : map_points_) {
+        target.rectangle(static_cast<int>(point[0]), static_cast<int>(point[1]), 2, 2, 0xFF708050U);
+    }
     const int x = static_cast<int>(player_.x), y = static_cast<int>(player_.y);
     target.circle(x, y, 15, 0xFF4068B0U);
     target.line(x, y, x + static_cast<int>(std::cos(player_.angle) * 25.0F),
