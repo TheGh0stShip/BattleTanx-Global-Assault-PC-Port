@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
         if (headless) {
             btga::Game game;
             configure_world(game);
-            btga::Framebuffer framebuffer;
+            auto framebuffer = std::make_unique<btga::Framebuffer>();
             for (int frame = 0; frame < 600; ++frame) {
                 btga::Input input{};
                 input.forward = frame < 180;
@@ -50,9 +50,9 @@ int main(int argc, char** argv) {
                 input.fire = frame == 360;
                 game.update(input, 1.0F / 60.0F);
             }
-            game.render(framebuffer);
+            game.render(*framebuffer);
             std::uint32_t checksum = 2166136261U;
-            for (const auto pixel : framebuffer.pixels) checksum = (checksum ^ pixel) * 16777619U;
+            for (const auto pixel : framebuffer->pixels) checksum = (checksum ^ pixel) * 16777619U;
             std::cout << "Headless 600-frame runtime checksum: " << std::hex << checksum << '\n';
             return 0;
         }
@@ -60,7 +60,7 @@ int main(int argc, char** argv) {
         if (!platform) throw std::runtime_error("could not create a window");
         btga::Game game;
         configure_world(game);
-        btga::Framebuffer framebuffer;
+        auto framebuffer = std::make_unique<btga::Framebuffer>();
         auto previous = std::chrono::steady_clock::now();
         bool running = true;
         while (running) {
@@ -70,8 +70,8 @@ int main(int argc, char** argv) {
             const float elapsed = std::chrono::duration<float>(now - previous).count();
             previous = now;
             game.update(input, elapsed);
-            game.render(framebuffer);
-            platform->present(framebuffer);
+            game.render(*framebuffer);
+            platform->present(*framebuffer);
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     } catch (const std::exception& error) {
