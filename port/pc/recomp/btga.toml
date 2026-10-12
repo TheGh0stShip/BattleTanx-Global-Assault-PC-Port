@@ -1,0 +1,22 @@
+# N64Recomp compatibility configuration. Inputs are generated locally by
+# prepare.sh from the matching worktree and the user's verified ROM.
+[input]
+entrypoint = 0x80071000
+symbols_file_path = "input/functions.toml"
+rom_file_path = "input/battletanx_ga.z64"
+output_func_path = "generated/functions"
+output_binary_path = "generated/battletanx_ga.bin"
+functions_per_output_file = 50
+uses_mips3_float_mode = true
+
+[patches]
+stubs = [
+    # Host instruction caches are coherent; this boot-time N64 cache sweep is unnecessary.
+    "func_80078DFC",
+    "func_80078E18",
+    "func_8007919C",
+    "func_80079260",
+    "__osExceptionPreamble_80104FA0",
+    "__osException_80104FB0",
+]
+ignored = []

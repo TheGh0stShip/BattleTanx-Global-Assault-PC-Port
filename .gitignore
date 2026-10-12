@@ -15,6 +15,9 @@ asm/
 assets/extracted/
 build/
 build-*/
+.deps/
+port/pc/recomp/input/
+port/pc/recomp/generated/
 battletanx_ga.ld
 include/macro.inc
 baseroms/*/baserom.*
