@@ -1,20 +1,22 @@
-# BattleTanx: Global Assault — matching decompilation
+# BattleTanx: Global Assault — native PC port
 
+[![PC: Windows playable](https://img.shields.io/badge/PC-Windows%20playable-brightgreen)](port/pc/README.md)
 [![Decompilation: 100%](https://img.shields.io/badge/decompilation-100%25-brightgreen)](https://decomp.dev/TheGh0stShip/BattleTanx-Global-Assault)
 [![Functions: 1879/1879](https://img.shields.io/badge/functions-1879%2F1879-brightgreen)](https://decomp.dev/TheGh0stShip/BattleTanx-Global-Assault)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](COPYING)
 
-This repository contains a **complete matching decompilation** of
-**BattleTanx: Global Assault** for Nintendo 64 (USA Rev 0). All 1,879
-catalogued functions and all source-owned data in the defined loaded-program
-scope reconstruct byte-for-byte. The result is readable C, authentic source
-assembly where appropriate, documented compiler-normalizer rules, and a
-reproducible build that matches retail ROM offsets `0x000000–0x101000`.
+This branch contains a playable native PC port of **BattleTanx: Global
+Assault**, built from the completed matching Nintendo 64 decompilation. The
+Windows runtime boots the original game, renders through RT64/Direct3D 12,
+plays audio through SDL2, supports keyboard and SDL game controllers, and has
+been played through the original menus into campaign gameplay. Linux uses
+RT64's Vulkan backend.
 
-The recovered N64 source is the upstream reference for **VitaTanxGA**, the
-separate PS Vita port. This repository remains the N64 matching decompilation;
-portability work belongs in the port repository and must not weaken this
-project's binary-evidence gates.
+The port uses N64Recomp for the recovered CPU program, RSPRecomp for audio
+microcode, N64ModernRuntime for N64 operating-system services, and RT64 for
+display-list rendering. It is a native host executable—not an emulator bundle.
+The completed byte-matching decompilation remains in this repository as the
+auditable source and compatibility foundation.
 
 No ROM or ROM-derived assets are included. Supply your own legally obtained dump.
 
@@ -22,10 +24,49 @@ No ROM or ROM-derived assets are included. Supply your own legally obtained dump
 
 [![BattleTanx: Global Assault native Windows port demonstration](https://img.youtube.com/vi/PrhwXBr1qJI/maxresdefault.jpg)](https://www.youtube.com/watch?v=PrhwXBr1qJI)
 
-The video above demonstrates the recovered game running as a native Windows
-executable through the `pc-port` runtime: original menus and campaign gameplay,
+The video above demonstrates the game running as a native Windows executable
+from this branch: original menus and campaign gameplay,
 RT64 Direct3D 12 rendering, SDL audio, and live keyboard input. Click the image
 to play the full demonstration on YouTube.
+
+## PC port status
+
+- Native Windows x64 executable with Direct3D 12 rendering.
+- Native Linux build path with Vulkan rendering.
+- Original menus and campaign gameplay are playable.
+- Keyboard and SDL game-controller input, rumble, and SDL audio are connected.
+- Save data is kept in a stable per-user directory and window close requests
+  an orderly runtime shutdown.
+- RT64's live developer inspector is available by setting
+  `BTGA_RT64_DEVELOPER=1` and pressing F1.
+- Distribution packages are ROM-free; the player supplies a verified local
+  USA Rev 0 `.z64` dump at launch.
+
+This is still a development port. Long-session stability, every game mode,
+representative GPUs/controllers, save persistence, and visual effects remain
+part of the release validation matrix.
+
+## Build and run the PC port
+
+The complete native-runtime guide is in [port/pc/README.md](port/pc/README.md).
+On Windows, use a native NTFS checkout with Visual Studio's **Desktop
+development with C++** workload. After generating the local translated inputs
+and bootstrapping the pinned dependencies described in
+[port/pc/recomp/README.md](port/pc/recomp/README.md):
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+./port/pc/build-windows.ps1 -Rom 'C:\Games\BattleTanxGA.z64' -Run
+```
+
+Create a ROM-free distributable ZIP with:
+
+```powershell
+./port/pc/package-windows.ps1 -BuildDirectory build-pc-windows -Version 0.1.0
+```
+
+Controls, Linux/headless commands, save locations, renderer diagnostics, and
+packaging contents are documented in the [PC runtime guide](port/pc/README.md).
 
 ## Supported ROM
 
@@ -36,7 +77,7 @@ to play the full demonstration on YouTube.
 - SHA-1: `805248fb0a0ee694cad8d7dc927b631d860dd8cf`
 - SHA-256: `88268ce770ff39f2ca839848b842c87866df6c5ddaf775f180b2522c18ff6221`
 
-## Reproduce from your own ROM
+## Reproduce the original N64 build from your own ROM
 
 ```sh
 python3 tools/reproduce.py /absolute/path/to/BattleTanxGA.z64
@@ -57,7 +98,7 @@ For native-port resource packaging, see the [O2R runtime-resource
 path](docs/O2R_PORT_PATH.md). It records what is genuinely structured today
 and prevents container-only `.o2r` claims without runtime resource factories.
 
-## Current status
+## Matching-decompilation status
 
 - **Code: 100%.** All 1,879 catalogue functions and all 632,132 function-body bytes are represented by production C or authentic source assembly.
 - **Data: 100%.** All 115,617 tracked initialized/read-only bytes in the loaded executable scope are source-owned and matched.

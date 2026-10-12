@@ -214,12 +214,34 @@ void show_error(const char* message) {
 bool boot_requested = false;
 std::chrono::steady_clock::time_point boot_started;
 
+std::filesystem::path user_data_directory() {
+#if defined(_WIN32)
+    if (const char* local_app_data = std::getenv("LOCALAPPDATA")) {
+        return std::filesystem::path{local_app_data} / "BattleTanxGA";
+    }
+    if (const char* app_data = std::getenv("APPDATA")) {
+        return std::filesystem::path{app_data} / "BattleTanxGA";
+    }
+#else
+    if (const char* xdg_data_home = std::getenv("XDG_DATA_HOME")) {
+        return std::filesystem::path{xdg_data_home} / "BattleTanxGA";
+    }
+    if (const char* home = std::getenv("HOME")) {
+        return std::filesystem::path{home} / ".local" / "share" / "BattleTanxGA";
+    }
+#endif
+    return std::filesystem::temp_directory_path() / "BattleTanxGA";
+}
+
 void drive_headless_runtime(void*) {
 #ifdef BTGA_HAS_RT64
     if (interactive) {
         SDL_Event event{};
         while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_QUIT) std::_Exit(EXIT_SUCCESS);
+            if (event.type == SDL_QUIT) {
+                ultramodern::quit();
+                return;
+            }
         }
         if (!boot_requested) {
             boot_requested = true;
@@ -292,8 +314,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    const std::filesystem::path config_path =
-        std::filesystem::temp_directory_path() / "battletanx-ga-pc-runtime";
+    const std::filesystem::path config_path = user_data_directory();
     std::filesystem::create_directories(config_path);
     recomp::register_config_path(config_path);
     if (recomp::select_rom(rom_path, game.game_id) != recomp::RomValidationError::Good) {
@@ -317,15 +338,24 @@ int main(int argc, char** argv) {
     if (play) { std::cerr << "This build does not include RT64\n"; return 1; }
 #endif
 
+    auto selected_window = headless_window_handle();
+    auto* selected_queue_samples = discard_audio;
+    auto* selected_frames_remaining = audio_frames_remaining;
+    auto* selected_set_frequency = set_audio_frequency;
+#ifdef BTGA_HAS_RT64
+    if (play) {
+        selected_window = interactive_window_handle();
+        selected_queue_samples = queue_audio;
+        selected_frames_remaining = queued_audio_frames;
+        selected_set_frequency = configure_audio;
+    }
+#endif
+
     recomp::Configuration config{
         .argc = 0,
         .argv = nullptr,
         .project_version = {0, 1, 0},
-        .window_handle = play
-#ifdef BTGA_HAS_RT64
-            ? interactive_window_handle()
-#endif
-            : headless_window_handle(),
+        .window_handle = selected_window,
         .rsp_callbacks = {.get_rsp_microcode = select_rsp_microcode},
         .renderer_callbacks = {.create_render_context =
 #ifdef BTGA_HAS_RT64
@@ -333,21 +363,9 @@ int main(int argc, char** argv) {
 #endif
             create_headless_renderer},
         .audio_callbacks = {
-            .queue_samples = play
-#ifdef BTGA_HAS_RT64
-                ? queue_audio
-#endif
-                : discard_audio,
-            .get_frames_remaining = play
-#ifdef BTGA_HAS_RT64
-                ? queued_audio_frames
-#endif
-                : audio_frames_remaining,
-            .set_frequency = play
-#ifdef BTGA_HAS_RT64
-                ? configure_audio
-#endif
-                : set_audio_frequency,
+            .queue_samples = selected_queue_samples,
+            .get_frames_remaining = selected_frames_remaining,
+            .set_frequency = selected_set_frequency,
         },
         .input_callbacks = {
             .poll_input = poll_input,
@@ -361,5 +379,22 @@ int main(int argc, char** argv) {
         .threads_callbacks = {.get_game_thread_name = game_thread_name},
     };
     recomp::start(config);
+#ifdef BTGA_HAS_RT64
+    if (gamepad != nullptr) {
+        SDL_GameControllerClose(gamepad);
+        gamepad = nullptr;
+    }
+    if (audio_device != 0) {
+        SDL_CloseAudioDevice(audio_device);
+        audio_device = 0;
+    }
+    if (window != nullptr) {
+        SDL_DestroyWindow(window);
+        window = nullptr;
+    }
+    if (play) {
+        SDL_Quit();
+    }
+#endif
     return 0;
 }

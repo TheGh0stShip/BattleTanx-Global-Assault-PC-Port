@@ -8,13 +8,26 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstdint>
 #include <iostream>
+#include <string_view>
 
 #include "hle/rt64_application.h"
 #include "ultramodern/ultramodern.hpp"
 
 namespace {
+bool environment_flag_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr) {
+        return false;
+    }
+
+    const std::string_view text{value};
+    return !text.empty() && text != "0" && text != "false" && text != "FALSE" &&
+           text != "off" && text != "OFF";
+}
+
 std::array<std::uint8_t, 0x40> dummy_header{};
 std::array<std::uint8_t, 0x1000> dmem{};
 std::array<std::uint8_t, 0x1000> imem{};
@@ -89,9 +102,13 @@ public:
         app_->userConfig.refreshRate = RT64::UserConfiguration::RefreshRate::Original;
         app_->userConfig.internalColorFormat = RT64::UserConfiguration::InternalColorFormat::Standard;
         app_->userConfig.displayBuffering = RT64::UserConfiguration::DisplayBuffering::Triple;
-        app_->userConfig.developerMode = developer_mode;
+        const bool open_inspector = environment_flag_enabled("BTGA_RT64_INSPECTOR");
+        app_->userConfig.developerMode = developer_mode || open_inspector ||
+                                         environment_flag_enabled("BTGA_RT64_DEVELOPER");
         if (app_->setup(0) != RT64::Application::SetupResult::Success) {
             app_.reset();
+        } else if (open_inspector) {
+            app_->processDeveloperShortcut(RT64::Application::DeveloperShortcut::Inspector);
         }
     }
 

@@ -26,6 +26,23 @@ GPU/controller combinations still need broader validation.
 SDL game controllers use the left stick, face and shoulder buttons, left
 trigger, D-pad, and rumble.
 
+## Renderer diagnostics
+
+RT64's developer inspector can be enabled for renderer debugging without
+changing the normal player configuration. Set `BTGA_RT64_DEVELOPER=1` before
+launching, then press F1 in game to open or close the inspector. This is meant
+for diagnosing draw calls, materials, textures, and framebuffer state;
+ordinary launches leave it disabled.
+
+```powershell
+$env:BTGA_RT64_DEVELOPER = '1'
+.\BattleTanxGA.exe --play .\battletanx_ga.z64
+```
+
+For automated captures where synthesizing F1 is unreliable, set
+`BTGA_RT64_INSPECTOR=1` to open the inspector immediately at startup. It also
+enables developer mode.
+
 ## Windows developer build
 
 Use a native Windows checkout on NTFS and run PowerShell—not the Linux binary
@@ -43,8 +60,24 @@ The script configures an optimized x64 Ninja build, builds
 it, and optionally launches it with the supplied local ROM. It rejects WSL UNC
 source paths because MSVC/Ninja dependency handling is unreliable there.
 
+Create a redistributable, ROM-free ZIP after building:
+
+```powershell
+./port/pc/package-windows.ps1 -BuildDirectory build-pc-windows -Version 0.1.0
+```
+
+The archive contains the executable, required DLLs, license, and PC runtime
+instructions. It deliberately contains no ROM, extracted assets, generated
+translation output, save data, or developer diagnostics.
+
 The ROM must be the big-endian USA Rev 0 dump documented in the repository
 README. Runtime validation rejects any other file.
+
+Save data is stored outside the installation directory. Windows uses
+`%LOCALAPPDATA%\BattleTanxGA`; Linux uses
+`$XDG_DATA_HOME/BattleTanxGA` or `~/.local/share/BattleTanxGA`. Closing the
+window requests an orderly runtime shutdown so pending EEPROM writes are
+flushed before the process exits.
 
 ## Headless and Linux development
 

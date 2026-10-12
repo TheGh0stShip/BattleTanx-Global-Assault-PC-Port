@@ -43,9 +43,9 @@ cmake --build build-pc-runtime --target btga_runtime_probe
 ```
 
 Without `--boot`, the probe registers the translated entrypoint and exits. Ten
-libultra internals not supplied by the modern runtime fail loudly if reached;
-replacing those guards and providing production renderer, audio, and input
-backends remain explicit porting work.
+libultra internals not supplied by the modern runtime fail loudly if reached.
+The interactive build supplies the production renderer, audio, and input
+backends used by the playable Windows/Linux runtime.
 
 An experimental headless boot path validates the local ROM again, registers it
 with N64ModernRuntime, and runs until the first unsupported runtime boundary or
@@ -56,11 +56,12 @@ for five seconds:
 ```
 
 The current boot probe reaches five game-created N64 threads and a steady 60 Hz
-VI loop. Over the default five-second window it processes 300 VI events, four
-display lists, and four audio RSP tasks before exiting normally. It reports
-thread, VI, display-list, screen-update, and RSP counts at the end of the run.
-The renderer, controller, and audio callbacks are deliberately headless test
-implementations at this stage.
+VI loop. Over the default five-second window it processes about 300 VI events
+and roughly 150 display lists/screens and audio RSP tasks before exiting
+normally. Exact counts can vary by a frame. It reports thread, VI,
+display-list, screen-update, and RSP counts at the end of the run. The bounded
+probe deliberately uses headless callbacks; `--play` selects the interactive
+RT64/SDL backends.
 
 `runtime_patches.cpp` contains required scheduler portability patches. The
 controller, scheduler-record, graphics-completion, and render-slot busy-waits
@@ -78,13 +79,12 @@ interactive runtime now supplies RT64 rendering, SDL audio, keyboard/controller
 input, rumble, and a user-facing executable loop. The headless path remains a
 bounded CI and diagnostics mode.
 
-`bootstrap_rt64.sh` pins the same RT64 revision used by the reference runtime
-integration. It applies a small recorded patch that supplies a non-interactive
-file-dialog backend, because choosing the ROM remains the launcher's job and
-rendering must not require GTK or D-Bus. The renderer itself has been verified
-to configure and build with `RT64_STATIC=ON`, `RT64_SDL_WINDOW_VULKAN=ON`, and
-`NFD_STUB=ON`. It is kept separate from the headless probe until the interactive
-SDL window and renderer adapter are enabled, so CI does not require a GPU.
+`bootstrap_rt64.sh` pins the RT64 revision used by the runtime integration. It
+applies a small recorded patch that supplies a non-interactive file-dialog
+backend, because choosing the ROM remains the launcher's job and rendering must
+not require GTK or D-Bus. The renderer builds with `RT64_STATIC=ON`,
+`RT64_SDL_WINDOW_VULKAN=ON`, and `NFD_STUB=ON`. RT64 remains optional at CMake
+configure time so headless CI does not require a GPU.
 
 The RT64 adapter can be built with:
 
@@ -111,3 +111,13 @@ basic keyboard mapping: WASD for the analog stick, X/Z for A/B, left Shift for
 Z, Enter for Start, Q/E for L/R, arrows for the D-pad, and IJKL for C buttons.
 SDL game controllers use the left stick, face/shoulder buttons, left trigger,
 D-pad, and rumble. The bounded `--boot` mode remains headless for CI.
+
+Save data is written outside the build/install tree: under
+`%LOCALAPPDATA%\BattleTanxGA` on Windows, or
+`$XDG_DATA_HOME/BattleTanxGA` (falling back to
+`~/.local/share/BattleTanxGA`) on Linux. Closing the window requests an orderly
+runtime shutdown so pending EEPROM writes can be flushed.
+
+For renderer diagnosis, set `BTGA_RT64_DEVELOPER=1` and press F1 during play.
+Set `BTGA_RT64_INSPECTOR=1` to open the inspector at startup. Normal launches
+leave RT64 developer mode disabled.
