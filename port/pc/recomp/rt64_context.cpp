@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <iostream>
 #include <future>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -260,7 +261,7 @@ void check_interrupts() {}
 class Context final : public ultramodern::renderer::RendererContext {
 public:
     Context(std::uint8_t* rdram, ultramodern::renderer::WindowHandle window, bool developer_mode)
-        : draft_settings_(pc_settings) {
+        : rdram_(rdram), draft_settings_(pc_settings) {
         RT64::Application::Core core{};
 #if defined(_WIN32)
         core.window = window.window;
@@ -457,6 +458,7 @@ public:
                 online_local_tick_origin_ = online_tick_;
                 online_remote_tick_origin_ = *remote_tick;
                 online_tick_origins_valid_ = true;
+                trace_online_origin_locked(local);
             }
         }
         std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
@@ -514,8 +516,14 @@ public:
             if (std::chrono::steady_clock::now() - wait_started >=
                 std::chrono::milliseconds(250)) {
                 online_status_ = "Waiting for a confirmed synchronized input frame...";
+                if (!online_wait_traced_ && online_trace_) {
+                    online_trace_ << "WAIT local_tick=" << tick << '\n';
+                    online_trace_.flush();
+                    online_wait_traced_ = true;
+                }
             }
         }
+        online_wait_traced_ = false;
     }
 
 private:
@@ -612,6 +620,15 @@ private:
         online_applied_inputs_valid_ = false;
         online_local_tick_origin_ = 0;
         online_remote_tick_origin_ = 0;
+        online_last_traced_tick_.reset();
+        online_wait_traced_ = false;
+        online_trace_.close();
+        online_trace_.open(pc_data_path / "btga-net-sync.log",
+                           std::ios::out | std::ios::trunc);
+        if (online_trace_) {
+            online_trace_ << "BTGA net synchronization trace v1\n";
+            online_trace_.flush();
+        }
         return true;
     }
 
@@ -635,6 +652,7 @@ private:
                         online_local_tick_origin_ = origin->receiver_tick;
                         online_remote_tick_origin_ = origin->sender_tick;
                         online_tick_origins_valid_ = true;
+                        trace_online_origin_locked(local);
                     }
                 }
             }
@@ -663,7 +681,47 @@ private:
         online_applied_inputs_[local] = *local_input;
         online_applied_inputs_[remote] = *remote_input;
         online_applied_inputs_valid_ = true;
+        trace_online_apply_locked(relative_tick, online_local_tick_origin_ + delayed,
+                                  online_remote_tick_origin_ + delayed);
         return true;
+    }
+
+    void trace_online_origin_locked(std::uint16_t local) {
+        if (!online_trace_) return;
+        online_trace_ << "ORIGIN slot=" << local
+                      << " local=" << online_local_tick_origin_
+                      << " remote=" << online_remote_tick_origin_ << '\n';
+        online_trace_.flush();
+    }
+
+    std::uint64_t rdram_hash() const {
+        std::uint64_t hash = UINT64_C(1469598103934665603);
+        for (std::size_t index = 0; index < 8U * 1024U * 1024U; ++index) {
+            hash ^= rdram_[index];
+            hash *= UINT64_C(1099511628211);
+        }
+        return hash;
+    }
+
+    void trace_online_apply_locked(std::uint32_t relative_tick,
+                                   std::uint32_t local_tick,
+                                   std::uint32_t remote_tick) {
+        if (!online_trace_ || online_last_traced_tick_ == relative_tick) return;
+        online_last_traced_tick_ = relative_tick;
+        const auto& p0 = online_applied_inputs_[0];
+        const auto& p1 = online_applied_inputs_[1];
+        online_trace_ << "APPLY rel=" << relative_tick
+                      << " local_tick=" << local_tick
+                      << " remote_tick=" << remote_tick
+                      << " p0=" << p0.buttons << ',' << static_cast<int>(p0.stick_x)
+                      << ',' << static_cast<int>(p0.stick_y)
+                      << " p1=" << p1.buttons << ',' << static_cast<int>(p1.stick_x)
+                      << ',' << static_cast<int>(p1.stick_y);
+        if ((relative_tick % 60U) == 0U) {
+            online_trace_ << " rdram_fnv64=" << rdram_hash();
+        }
+        online_trace_ << '\n';
+        online_trace_.flush();
     }
 
     void disconnect_online() {
@@ -1141,6 +1199,7 @@ private:
         if (!open) app_->customOverlayCloseFrames.store(2, std::memory_order_release);
     }
 
+    std::uint8_t* rdram_ = nullptr;
     std::unique_ptr<RT64::Application> app_;
     btga::PcSettings draft_settings_;
     std::vector<btga::TexturePackInfo> texture_packs_;
@@ -1175,6 +1234,9 @@ private:
     bool online_tick_origins_valid_ = false;
     bool online_applied_inputs_valid_ = false;
     std::array<btga::OnlineControllerInput, 2> online_applied_inputs_{};
+    std::ofstream online_trace_;
+    std::optional<std::uint32_t> online_last_traced_tick_;
+    bool online_wait_traced_ = false;
     std::array<bool, btga::InputSynchronizer::max_players> online_peer_seen_{};
 };
 }
