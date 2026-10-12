@@ -428,27 +428,17 @@ public:
         return static_cast<int>(online_connection_->relay_slot());
     }
 
-    bool online_remote_input(int player, std::uint16_t& buttons, float& x, float& y) {
+    bool online_synchronized_input(int player, std::uint16_t& buttons, float& x, float& y) {
         const std::lock_guard lock(online_mutex_);
         if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby ||
-            player < 0 || player >= static_cast<int>(btga::InputSynchronizer::max_players) ||
-            player == static_cast<int>(online_connection_->relay_slot())) return false;
-        const std::uint32_t requested_tick = online_tick_ == 0 ? 0 : online_tick_ - 1;
+            player < 0 || player > 1) return false;
         pump_online_inputs_locked();
-        auto input = online_inputs_.input_for(
-            static_cast<std::uint8_t>(player), requested_tick);
-        // Never stall the emulation/audio thread on network latency. The
-        // peers can have a small tick offset, and controller polling can run
-        // more than once per rendered frame. Use the newest validated frame
-        // until the requested tick is present; a later synchronization layer
-        // can reconcile simulation state without blocking this callback.
-        if (!input) {
-            input = online_inputs_.latest_input_for(static_cast<std::uint8_t>(player));
-        }
-        if (!input) return false;
-        buttons = input->buttons;
-        x = static_cast<float>(input->stick_x) / 127.0F;
-        y = static_cast<float>(input->stick_y) / 127.0F;
+        prepare_applied_inputs_locked();
+        if (!online_applied_inputs_valid_) return false;
+        const auto& input = online_applied_inputs_[static_cast<std::size_t>(player)];
+        buttons = input.buttons;
+        x = static_cast<float>(input.stick_x) / 127.0F;
+        y = static_cast<float>(input.stick_y) / 127.0F;
         return true;
     }
 
@@ -457,15 +447,44 @@ public:
         if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby) return;
         const std::uint16_t local = online_connection_->relay_slot();
         if (local > 1) return; // Two-player synchronization milestone.
+        // Receive before assigning this poll's tick. Slot zero is the epoch
+        // authority and binds its next tick to the latest client tick it has
+        // actually observed; that exact pair is repeated in every host packet.
+        pump_online_inputs_locked();
+        if (local == 0 && !online_tick_origins_valid_) {
+            const auto remote_tick = online_inputs_.latest_tick_for(1);
+            if (remote_tick) {
+                online_local_tick_origin_ = online_tick_;
+                online_remote_tick_origin_ = *remote_tick;
+                online_tick_origins_valid_ = true;
+            }
+        }
         std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
         const btga::OnlineControllerInput input{
             buttons,
             static_cast<std::int8_t>(std::clamp(x, -1.0F, 1.0F) * 127.0F),
             static_cast<std::int8_t>(std::clamp(y, -1.0F, 1.0F) * 127.0F),
         };
-        const std::size_t size = online_inputs_.encode(
-            packet, online_session_id_, local, online_sequence_++, online_tick_++,
-            static_cast<std::uint8_t>(local), input);
+        const std::uint32_t tick = online_tick_++;
+        const std::uint32_t sequence = online_sequence_++;
+        online_inputs_.record_local(static_cast<std::uint8_t>(local), tick, sequence, input);
+        constexpr std::uint32_t redundancy = 8;
+        const std::uint32_t first_tick = tick >= redundancy - 1 ? tick - (redundancy - 1) : 0;
+        std::array<btga::OnlineControllerInput, redundancy> frames{};
+        std::size_t frame_count = 0;
+        for (std::uint32_t frame_tick = first_tick; frame_tick <= tick; ++frame_tick) {
+            const auto frame = online_inputs_.input_for(
+                static_cast<std::uint8_t>(local), frame_tick);
+            if (frame) frames[frame_count++] = *frame;
+        }
+        const std::size_t size = online_inputs_.encode_batch(
+            packet, online_session_id_, local, sequence, first_tick,
+            static_cast<std::uint8_t>(local),
+            std::span<const btga::OnlineControllerInput>{frames.data(), frame_count},
+            local == 0 && online_tick_origins_valid_
+                ? std::optional<btga::OnlineSyncOrigin>{btga::OnlineSyncOrigin{
+                      online_local_tick_origin_, online_remote_tick_origin_}}
+                : std::nullopt);
         const std::uint16_t destination = local == 0 ? 1 : 0;
         if (size != 0) {
             const bool sent = online_connection_->send_gameplay(
@@ -473,6 +492,7 @@ public:
             (void)sent;
         }
         pump_online_inputs_locked();
+        prepare_applied_inputs_locked();
     }
 
 private:
@@ -563,7 +583,12 @@ private:
         online_session_id_ = session;
         online_sequence_ = 1;
         online_tick_ = 0;
+        online_inputs_ = {};
         online_peer_seen_.fill(false);
+        online_tick_origins_valid_ = false;
+        online_applied_inputs_valid_ = false;
+        online_local_tick_origin_ = 0;
+        online_remote_tick_origin_ = 0;
         return true;
     }
 
@@ -578,8 +603,43 @@ private:
                 {packet.data(), size}, online_session_id_, source);
             if (accepted && source < online_peer_seen_.size()) {
                 online_peer_seen_[source] = true;
+                const std::uint16_t local = online_connection_->relay_slot();
+                if (local == 1 && source == 0 && !online_tick_origins_valid_) {
+                    const auto origin = online_inputs_.sync_origin_for(0);
+                    if (origin) {
+                        // Host announces (host tick, client tick). Reverse the
+                        // pair locally so both machines address identical input.
+                        online_local_tick_origin_ = origin->receiver_tick;
+                        online_remote_tick_origin_ = origin->sender_tick;
+                        online_tick_origins_valid_ = true;
+                    }
+                }
             }
         }
+    }
+
+    void prepare_applied_inputs_locked() {
+        if (!online_connection_ || !online_tick_origins_valid_ || online_tick_ == 0) return;
+        constexpr std::uint32_t input_delay = 4;
+        const std::uint16_t local = online_connection_->relay_slot();
+        if (local > 1) return;
+        const std::uint16_t remote = local == 0 ? 1 : 0;
+        const std::uint32_t latest_local_tick = online_tick_ - 1;
+        const std::uint32_t relative_tick = latest_local_tick - online_local_tick_origin_;
+        if (relative_tick < input_delay) {
+            online_applied_inputs_.fill({});
+            online_applied_inputs_valid_ = true;
+            return;
+        }
+        const std::uint32_t delayed = relative_tick - input_delay;
+        const auto local_input = online_inputs_.input_for(
+            static_cast<std::uint8_t>(local), online_local_tick_origin_ + delayed);
+        const auto remote_input = online_inputs_.input_for(
+            static_cast<std::uint8_t>(remote), online_remote_tick_origin_ + delayed);
+        if (!local_input || !remote_input) return;
+        online_applied_inputs_[local] = *local_input;
+        online_applied_inputs_[remote] = *remote_input;
+        online_applied_inputs_valid_ = true;
     }
 
     void disconnect_online() {
@@ -1086,6 +1146,11 @@ private:
     std::uint64_t online_session_id_ = 0;
     std::uint32_t online_sequence_ = 1;
     std::uint32_t online_tick_ = 0;
+    std::uint32_t online_local_tick_origin_ = 0;
+    std::uint32_t online_remote_tick_origin_ = 0;
+    bool online_tick_origins_valid_ = false;
+    bool online_applied_inputs_valid_ = false;
+    std::array<btga::OnlineControllerInput, 2> online_applied_inputs_{};
     std::array<bool, btga::InputSynchronizer::max_players> online_peer_seen_{};
 };
 }
@@ -1128,10 +1193,10 @@ int btga::renderer::online_local_player_slot() {
     return context ? context->online_local_player_slot() : -1;
 }
 
-bool btga::renderer::online_remote_input(int player, std::uint16_t& buttons,
-                                         float& x, float& y) {
+bool btga::renderer::online_synchronized_input(int player, std::uint16_t& buttons,
+                                               float& x, float& y) {
     Context* context = active_context.load(std::memory_order_acquire);
-    return context && context->online_remote_input(player, buttons, x, y);
+    return context && context->online_synchronized_input(player, buttons, x, y);
 }
 
 void btga::renderer::online_submit_local_input(std::uint16_t buttons, float x, float y) {

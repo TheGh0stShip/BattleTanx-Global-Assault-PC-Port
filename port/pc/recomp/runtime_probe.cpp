@@ -333,7 +333,7 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
         if (online_slot >= 0 && controller != online_slot) {
             // Online peers occupy the original game's controller ports. A
             // missing packet is neutral input rather than stale local input.
-            btga::renderer::online_remote_input(controller, *buttons, *x, *y);
+            btga::renderer::online_synchronized_input(controller, *buttons, *x, *y);
             return controller == 0 || controller == 1;
         }
         const int input_controller = online_slot == controller ? 0 : controller;
@@ -436,6 +436,8 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
             if (!online_input_presampled.exchange(false, std::memory_order_acq_rel)) {
                 btga::renderer::online_submit_local_input(*buttons, *x, *y);
             }
+            (void)btga::renderer::online_synchronized_input(
+                controller, *buttons, *x, *y);
             return true;
         }
         return controller == 0 || gamepad != nullptr;

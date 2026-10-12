@@ -14,15 +14,29 @@ std::size_t InputSynchronizer::encode(
     std::span<std::uint8_t> packet, std::uint64_t session_id,
     std::uint16_t peer_id, std::uint32_t sequence, std::uint32_t tick,
     std::uint8_t player_id, OnlineControllerInput input) const {
-    if (player_id >= max_players || packet.size() < BTGA_NET_HEADER_SIZE) return 0;
+    const std::array inputs{input};
+    return encode_batch(packet, session_id, peer_id, sequence, tick,
+                        player_id, inputs);
+}
+
+std::size_t InputSynchronizer::encode_batch(
+    std::span<std::uint8_t> packet, std::uint64_t session_id,
+    std::uint16_t peer_id, std::uint32_t sequence, std::uint32_t first_tick,
+    std::uint8_t player_id, std::span<const OnlineControllerInput> inputs,
+    std::optional<OnlineSyncOrigin> sync_origin) const {
+    if (player_id >= max_players || inputs.empty() ||
+        inputs.size() > BTGA_NET_MAX_INPUT_FRAMES ||
+        packet.size() < BTGA_NET_HEADER_SIZE) return 0;
 
     BtgaNetInputBatch batch{};
-    batch.first_tick = tick;
+    batch.first_tick = first_tick;
     batch.player_id = player_id;
-    batch.frame_count = 1;
-    batch.frames[0].buttons = input.buttons;
-    batch.frames[0].stick_x = input.stick_x;
-    batch.frames[0].stick_y = input.stick_y;
+    batch.frame_count = static_cast<std::uint8_t>(inputs.size());
+    for (std::size_t index = 0; index < inputs.size(); ++index) {
+        batch.frames[index].buttons = inputs[index].buttons;
+        batch.frames[index].stick_x = inputs[index].stick_x;
+        batch.frames[index].stick_y = inputs[index].stick_y;
+    }
 
     std::array<std::uint8_t, BTGA_NET_MAX_PAYLOAD_SIZE> payload{};
     const std::size_t payload_size = btga_net_encode_input_batch(
@@ -32,9 +46,14 @@ std::size_t InputSynchronizer::encode(
     BtgaNetHeader header{};
     header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
     header.message_type = BTGA_NET_MSG_INPUT;
-    header.flags = BTGA_NET_FLAG_RELAYED;
+    header.flags = static_cast<std::uint8_t>(BTGA_NET_FLAG_RELAYED |
+        (sync_origin ? static_cast<unsigned>(BTGA_NET_FLAG_RELIABLE) : 0U));
     header.session_id = session_id;
     header.sequence = sequence;
+    if (sync_origin) {
+        header.acknowledgment = sync_origin->sender_tick;
+        header.acknowledgment_bits = sync_origin->receiver_tick;
+    }
     header.payload_size = static_cast<std::uint16_t>(payload_size);
     header.peer_id = peer_id;
     if (btga_net_encode_header(packet.data(), packet.size(), &header) !=
@@ -58,11 +77,11 @@ bool InputSynchronizer::accept(std::span<const std::uint8_t> packet,
             &batch, packet.data() + BTGA_NET_HEADER_SIZE, header.payload_size) ||
         batch.player_id != expected_peer) return false;
 
-    StoredInput& stored = inputs_[batch.player_id];
+    PlayerHistory& history = histories_[batch.player_id];
+    if (history.valid && header.sequence <= history.latest_sequence) return true;
     for (std::uint8_t index = 0; index < batch.frame_count; ++index) {
         const std::uint32_t tick = batch.first_tick + index;
-        if (stored.valid && (tick < stored.tick ||
-            (tick == stored.tick && header.sequence <= stored.sequence))) continue;
+        StoredInput& stored = history.inputs[tick % history_size];
         stored.input = {
             batch.frames[index].buttons,
             batch.frames[index].stick_x,
@@ -71,22 +90,60 @@ bool InputSynchronizer::accept(std::span<const std::uint8_t> packet,
         stored.tick = tick;
         stored.sequence = header.sequence;
         stored.valid = true;
+        if (!history.valid || tick >= history.latest_tick) {
+            history.latest_input = stored.input;
+            history.latest_tick = tick;
+        }
     }
+    history.latest_sequence = header.sequence;
+    if ((header.flags & BTGA_NET_FLAG_RELIABLE) != 0U) {
+        history.sync_origin = {header.acknowledgment, header.acknowledgment_bits};
+        history.has_sync_origin = true;
+    }
+    history.valid = true;
     return true;
+}
+
+void InputSynchronizer::record_local(
+    std::uint8_t player_id, std::uint32_t tick, std::uint32_t sequence,
+    OnlineControllerInput input) {
+    if (player_id >= max_players) return;
+    PlayerHistory& history = histories_[player_id];
+    StoredInput& stored = history.inputs[tick % history_size];
+    stored = {input, tick, sequence, true};
+    history.latest_input = input;
+    history.latest_tick = tick;
+    history.latest_sequence = sequence;
+    history.valid = true;
 }
 
 std::optional<OnlineControllerInput> InputSynchronizer::input_for(
     std::uint8_t player_id, std::uint32_t tick) const {
     if (player_id >= max_players) return std::nullopt;
-    const StoredInput& stored = inputs_[player_id];
+    const PlayerHistory& history = histories_[player_id];
+    const StoredInput& stored = history.inputs[tick % history_size];
     if (!stored.valid || stored.tick != tick) return std::nullopt;
     return stored.input;
 }
 
 std::optional<OnlineControllerInput> InputSynchronizer::latest_input_for(
     std::uint8_t player_id) const {
-    if (player_id >= max_players || !inputs_[player_id].valid) return std::nullopt;
-    return inputs_[player_id].input;
+    if (player_id >= max_players || !histories_[player_id].valid) return std::nullopt;
+    return histories_[player_id].latest_input;
+}
+
+std::optional<std::uint32_t> InputSynchronizer::latest_tick_for(
+    std::uint8_t player_id) const {
+    if (player_id >= max_players || !histories_[player_id].valid) return std::nullopt;
+    return histories_[player_id].latest_tick;
+}
+
+std::optional<OnlineSyncOrigin> InputSynchronizer::sync_origin_for(
+    std::uint8_t player_id) const {
+    if (player_id >= max_players || !histories_[player_id].has_sync_origin) {
+        return std::nullopt;
+    }
+    return histories_[player_id].sync_origin;
 }
 
 } // namespace btga

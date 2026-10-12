@@ -57,7 +57,24 @@ int main() {
         CHECK(receiver.accept({packet.data(), newer_size},
                               UINT64_C(0x1020304050607080), 1));
         CHECK(receiver.input_for(1, 901) == newer);
-        CHECK(!receiver.input_for(1, 900).has_value());
+        CHECK(receiver.input_for(1, 900) == input);
+        CHECK(receiver.latest_tick_for(1) == 901);
+
+        const std::array redundant{
+            input, newer, btga::OnlineControllerInput{0x1000, 1, 2},
+        };
+        const std::size_t batch_size = sender.encode_batch(
+            packet, UINT64_C(0x1020304050607080), 1, 44, 900, 1, redundant,
+            btga::OnlineSyncOrigin{900, 17});
+        CHECK(batch_size == BTGA_NET_HEADER_SIZE + BTGA_NET_INPUT_HEADER_SIZE +
+                            redundant.size() * BTGA_NET_INPUT_FRAME_SIZE);
+        CHECK(receiver.accept({packet.data(), batch_size},
+                              UINT64_C(0x1020304050607080), 1));
+        CHECK(receiver.input_for(1, 900) == input);
+        CHECK(receiver.input_for(1, 901) == newer);
+        CHECK(receiver.input_for(1, 902) == redundant[2]);
+        const btga::OnlineSyncOrigin expected_origin{900, 17};
+        CHECK(receiver.sync_origin_for(1) == expected_origin);
     }
     class TestHttpClient final : public btga::HttpClient {
     public:
