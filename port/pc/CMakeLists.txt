@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(BattleTanxGA_PC LANGUAGES C CXX)
 
 option(BTGA_BUILD_RECOMP "Compile locally generated N64Recomp output" OFF)
+option(BTGA_BUILD_RUNTIME_PROBE "Link the translated game against N64ModernRuntime" OFF)
 set(BTGA_N64_RUNTIME_ROOT "${CMAKE_SOURCE_DIR}/../../.deps/N64ModernRuntime" CACHE PATH
     "Path to an N64ModernRuntime checkout")
 
@@ -64,7 +65,33 @@ if(BTGA_BUILD_RECOMP)
         "${BTGA_RECOMP_INCLUDE}"
     )
     target_compile_options(btga_recompiled_game PRIVATE
-        $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-fno-strict-aliasing;-Wno-unused-variable>
+        $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-fno-strict-aliasing;-Wno-unused-variable;-include;${CMAKE_CURRENT_SOURCE_DIR}/recomp/runtime_compat.h>
         $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-fno-strict-aliasing;-Wno-unused-variable>
+        $<$<COMPILE_LANG_AND_ID:C,MSVC>:/FI${CMAKE_CURRENT_SOURCE_DIR}/recomp/runtime_compat.h>
     )
+
+    if(BTGA_BUILD_RUNTIME_PROBE)
+        if(NOT EXISTS "${BTGA_N64_RUNTIME_ROOT}/CMakeLists.txt")
+            message(FATAL_ERROR
+                "N64ModernRuntime is missing at ${BTGA_N64_RUNTIME_ROOT}. "
+                "Run port/pc/recomp/bootstrap_runtime.sh first.")
+        endif()
+
+        add_subdirectory("${BTGA_N64_RUNTIME_ROOT}" "${CMAKE_BINARY_DIR}/N64ModernRuntime")
+        add_executable(btga_runtime_probe
+            recomp/runtime_probe.cpp
+            recomp/runtime_compat.cpp
+        )
+        target_include_directories(btga_runtime_probe PRIVATE
+            "${BTGA_RECOMP_DIR}"
+            "${BTGA_N64_RUNTIME_ROOT}/librecomp/include"
+            "${BTGA_N64_RUNTIME_ROOT}/N64Recomp/include"
+            "${BTGA_N64_RUNTIME_ROOT}/ultramodern/include"
+        )
+        target_link_libraries(btga_runtime_probe PRIVATE
+            btga_recompiled_game
+            librecomp
+            ultramodern
+        )
+    endif()
 endif()

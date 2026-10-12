@@ -19,4 +19,7 @@ stubs = [
     "__osExceptionPreamble_80104FA0",
     "__osException_80104FB0",
 ]
-ignored = []
+ignored = [
+    "__udivdi3_recomp",
+    "__umoddi3_recomp",
+]

@@ -9,6 +9,7 @@ Bootstrap the pinned official recompiler, then generate the compatibility C:
 
 ```sh
 port/pc/recomp/bootstrap.sh
+port/pc/recomp/bootstrap_runtime.sh
 port/pc/recomp/prepare.sh
 ```
 
@@ -27,6 +28,22 @@ cmake --build build-pc-recomp --target btga_recompiled_game
 This produces a host static library and deliberately does not embed the ROM or
 generated files in the repository. The ordinary native prototype build keeps
 `BTGA_BUILD_RECOMP` disabled and therefore has no dependency on these inputs.
+
+The next integration gate links that complete library with the pinned official
+N64ModernRuntime checkout:
+
+```sh
+cmake -S port/pc -B build-pc-runtime -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBTGA_BUILD_RECOMP=ON -DBTGA_BUILD_RUNTIME_PROBE=ON
+cmake --build build-pc-runtime --target btga_runtime_probe
+./build-pc-runtime/btga_runtime_probe
+```
+
+The probe registers the translated entrypoint but does not start the game. Ten
+libultra internals not supplied by the modern runtime currently fail loudly if
+reached; replacing those guards and providing renderer, RSP, audio and input
+callbacks are explicit remaining boot work.
 
 The configuration currently establishes the complete code-generation boundary.
 Runtime integration still requires N64ModernRuntime/RT64 service glue and RSP
