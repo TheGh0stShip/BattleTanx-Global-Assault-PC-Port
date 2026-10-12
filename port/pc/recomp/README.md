@@ -13,7 +13,8 @@ port/pc/recomp/bootstrap_runtime.sh
 port/pc/recomp/prepare.sh
 ```
 
-The current catalogue generates all 1,879 functions into 38 translation units.
+The current catalogue generates all 1,879 functions into 38 translation units,
+plus the game's `n_aspMain` audio microcode through RSPRecomp.
 Six N64-only cache/exception routines are explicitly stubbed; their services
 belong to the host runtime rather than translated game code.
 
@@ -52,6 +53,12 @@ for five seconds:
 ```sh
 ./build-pc-runtime/btga_runtime_probe --boot /path/to/battletanx_ga.z64
 ```
+
+The current boot probe reaches five game-created N64 threads and a steady 60 Hz
+VI loop. It reports thread, VI, display-list, screen-update and audio-RSP counts
+at the end of the window. The generated `n_aspMain` implementation is already
+registered for audio tasks; the current startup trace has not submitted its
+first display list or audio task yet.
 
 The configuration currently establishes the complete code-generation boundary.
 Runtime integration still requires N64ModernRuntime/RT64 service glue and RSP

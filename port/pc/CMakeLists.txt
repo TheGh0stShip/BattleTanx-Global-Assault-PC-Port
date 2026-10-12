@@ -76,9 +76,15 @@ if(BTGA_BUILD_RECOMP)
                 "N64ModernRuntime is missing at ${BTGA_N64_RUNTIME_ROOT}. "
                 "Run port/pc/recomp/bootstrap_runtime.sh first.")
         endif()
+        if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/recomp/generated/n_aspMain.cpp")
+            message(FATAL_ERROR
+                "Generated audio microcode is missing. Build RSPRecomp and rerun "
+                "port/pc/recomp/prepare.sh.")
+        endif()
 
         add_subdirectory("${BTGA_N64_RUNTIME_ROOT}" "${CMAKE_BINARY_DIR}/N64ModernRuntime")
         add_executable(btga_runtime_probe
+            recomp/generated/n_aspMain.cpp
             recomp/register_overlays.cpp
             recomp/runtime_probe.cpp
             recomp/runtime_compat.cpp
