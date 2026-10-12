@@ -38,6 +38,8 @@ to play the full demonstration on YouTube.
 - Native Linux build path with Vulkan rendering.
 - Original menus and campaign gameplay are playable.
 - Keyboard and SDL game-controller input, rumble, and SDL audio are connected.
+- Default-off gameplay mods provide extended fog-free visibility and
+  independent turret aiming with dual sticks or mouse and keyboard.
 - Native Controller Pak persistence uses standard 32 KiB `.mpk` images in a
   stable per-user directory, compatible with common N64 emulator pak images.
 - RT64's live developer inspector is available by setting

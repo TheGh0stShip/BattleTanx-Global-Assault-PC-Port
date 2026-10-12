@@ -60,7 +60,7 @@ struct ControllerBindings {
 };
 
 struct PcSettings {
-    static constexpr int current_version = 3;
+    static constexpr int current_version = 4;
     static constexpr std::size_t recent_rom_capacity = 5;
 
     int version = current_version;
@@ -74,6 +74,8 @@ struct PcSettings {
     float master_volume = 1.0F;
     float music_volume = 1.0F;
     float effects_volume = 1.0F;
+    bool mod_extended_visibility = false;
+    bool mod_independent_turret = false;
     std::string last_rom_path;
     std::array<std::string, recent_rom_capacity> recent_rom_paths{};
     KeyboardBindings keyboard{};

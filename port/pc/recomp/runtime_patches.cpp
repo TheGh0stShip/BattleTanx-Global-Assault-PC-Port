@@ -6,6 +6,9 @@
 #include "recomp.h"
 
 extern "C" void yield_self_1ms(std::uint8_t* rdram);
+extern "C" bool btga_extended_visibility_enabled();
+extern "C" bool btga_independent_turret_enabled();
+extern "C" float btga_turret_stick_x(int player);
 
 namespace {
 float read_guest_float(std::uint8_t* rdram, std::uint32_t address) {
@@ -58,6 +61,64 @@ extern "C" void btga_cutscene_far_plane(std::uint8_t*, recomp_context* ctx) {
     if (static_cast<std::int32_t>(ctx->r3) <= near_plane) {
         ctx->r3 = fallback_far_plane;
     }
+}
+
+extern "C" void btga_visibility_mod_step(std::uint8_t* rdram, recomp_context*) {
+    if (!btga_extended_visibility_enabled()) return;
+    constexpr gpr far_plane = static_cast<gpr>(static_cast<std::int32_t>(0x8023A060U));
+    // 32767 is already used by the port's safe cutscene fallback and remains
+    // representable by all original signed distance paths.
+    MEM_W(0, far_plane) = 32767;
+}
+
+extern "C" void btga_disable_fog_step(std::uint8_t*, recomp_context* ctx) {
+    if (btga_extended_visibility_enabled()) {
+        // func_8007A250 branches over the geometry-mode, fog-color and
+        // fog-position commands when func_800B0444 returns zero.
+        ctx->r2 = 0;
+    }
+}
+
+extern "C" void btga_projection_far_step(std::uint8_t*, recomp_context* ctx) {
+    if (btga_extended_visibility_enabled()) ctx->f4.fl = 32767.0F;
+}
+
+extern "C" void btga_independent_turret_step(std::uint8_t* rdram, recomp_context* ctx) {
+    if (!btga_independent_turret_enabled()) return;
+    const gpr tank = ctx->r18; // func_80091768 keeps its Tank * in s2.
+    if (tank == 0) return;
+    const std::uint32_t owner = static_cast<std::uint32_t>(MEM_W(0x1D0, tank));
+    if (owner == 0) return;
+    const int player = MEM_BU(0x0B, static_cast<gpr>(owner));
+    const std::int32_t kind = static_cast<std::int32_t>(MEM_W(0x98, tank));
+    if (kind < 0) return;
+    constexpr gpr definitions = static_cast<gpr>(static_cast<std::int32_t>(0x80122E8CU));
+    constexpr std::int32_t definition_stride = 0xD0;
+    const gpr definition = ADD32(definitions, kind * definition_stride);
+    if ((MEM_W(0x2C, definition) & 1) == 0) return; // No rotating turret.
+
+    const float input = btga_turret_stick_x(player);
+    if (input == 0.0F) return;
+    constexpr gpr frame_step = static_cast<gpr>(static_cast<std::int32_t>(0x80219488U));
+    const float step = read_guest_float(rdram, static_cast<std::uint32_t>(frame_step));
+    const std::int32_t delta = static_cast<std::int32_t>(input * step * 1024.0F);
+    MEM_H(0x24, tank) = static_cast<std::uint16_t>(MEM_HU(0x24, tank) - delta);
+}
+
+extern "C" void btga_turret_camera_step(std::uint8_t* rdram, recomp_context* ctx) {
+    if (!btga_independent_turret_enabled()) return;
+    const gpr tank = ctx->r4;
+    const gpr query_mode = ctx->r6;
+    if (tank == 0 || query_mode == 0 || (MEM_W(0x1E0, tank) & 2) == 0) return;
+    const std::int32_t kind = static_cast<std::int32_t>(MEM_W(0x98, tank));
+    if (kind < 0) return;
+    constexpr gpr definitions = static_cast<gpr>(static_cast<std::int32_t>(0x80122E8CU));
+    const gpr definition = ADD32(definitions, kind * 0xD0);
+    if ((MEM_W(0x2C, definition) & 1) == 0) return;
+    // Camera transform queries normally request the hull frame (mode 0).
+    // Mode 1 is the game's existing turret transform, also used by the intro
+    // presentation, so this reuses retail camera math and smoothing.
+    MEM_W(0, query_mode) = 1;
 }
 
 extern "C" void func_80098B40(std::uint8_t* rdram, recomp_context*) {

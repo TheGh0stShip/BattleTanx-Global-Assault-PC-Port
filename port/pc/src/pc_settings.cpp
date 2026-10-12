@@ -115,6 +115,8 @@ void apply_key(PcSettings& settings, std::string_view key, std::string_view valu
     else if (key == "audio.master_volume") parse_number(value, settings.master_volume);
     else if (key == "audio.music_volume") parse_number(value, settings.music_volume);
     else if (key == "audio.effects_volume") parse_number(value, settings.effects_volume);
+    else if (key == "mods.extended_visibility") parse_bool(value, settings.mod_extended_visibility);
+    else if (key == "mods.independent_turret") parse_bool(value, settings.mod_independent_turret);
     else if (key == "rom.last_path") assign_string(value, settings.last_rom_path);
     else if (key == "keyboard.stick_up") assign_string(value, settings.keyboard.stick_up);
     else if (key == "keyboard.stick_down") assign_string(value, settings.keyboard.stick_down);
@@ -233,6 +235,8 @@ void PcSettings::save(const std::filesystem::path& path) const {
     stream << "audio.master_volume=" << clean.master_volume << '\n';
     stream << "audio.music_volume=" << clean.music_volume << '\n';
     stream << "audio.effects_volume=" << clean.effects_volume << '\n';
+    stream << "mods.extended_visibility=" << clean.mod_extended_visibility << '\n';
+    stream << "mods.independent_turret=" << clean.mod_independent_turret << '\n';
     stream << "rom.last_path=" << clean.last_rom_path << '\n';
     for (std::size_t i = 0; i < clean.recent_rom_paths.size(); ++i) {
         stream << "rom.recent" << i + 1 << '=' << clean.recent_rom_paths[i] << '\n';

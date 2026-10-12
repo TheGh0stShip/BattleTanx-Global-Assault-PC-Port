@@ -51,12 +51,14 @@ std::atomic_uint32_t display_lists{0};
 std::atomic_uint32_t screen_updates{0};
 std::atomic_uint32_t vi_events{0};
 std::atomic_uint32_t rsp_requests{0};
+std::array<std::atomic<float>, max_controllers> turret_stick_x{};
+std::atomic_bool mouse_turret_aiming{false};
 btga::PcSettings pc_settings = btga::PcSettings::defaults();
+std::mutex input_settings_mutex;
 #ifdef BTGA_HAS_RT64
 SDL_Window* window = nullptr;
 SDL_AudioDeviceID audio_device = 0;
 std::mutex audio_mutex;
-std::mutex input_settings_mutex;
 std::uint32_t audio_frequency = 44100;
 std::array<SDL_GameController*, max_controllers> gamepads{};
 bool interactive = false;
@@ -300,7 +302,14 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
         *buttons = 0;
         *x = 0.0F;
         *y = 0.0F;
-        if (btga::renderer::settings_overlay_visible()) return true;
+        if (btga::renderer::settings_overlay_visible()) {
+            if (controller == 0) {
+                SDL_SetRelativeMouseMode(SDL_FALSE);
+                mouse_turret_aiming.store(false, std::memory_order_relaxed);
+                turret_stick_x[0].store(0.0F, std::memory_order_relaxed);
+            }
+            return true;
+        }
         if (controller == 0) {
             const auto* keys = SDL_GetKeyboardState(nullptr);
             *buttons = (keys[keyboard.button_a] ? 0x8000 : 0) | (keys[keyboard.button_b] ? 0x4000 : 0) |
@@ -312,11 +321,27 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
                        (keys[keyboard.c_left] ? 0x02 : 0) | (keys[keyboard.c_right] ? 0x01 : 0);
             *x = float(keys[keyboard.stick_right] - keys[keyboard.stick_left]);
             *y = float(keys[keyboard.stick_up] - keys[keyboard.stick_down]);
+            if (pc_settings.mod_independent_turret) {
+                int mouse_x = 0;
+                const std::uint32_t mouse = SDL_GetRelativeMouseState(&mouse_x, nullptr);
+                const bool aiming = (mouse & SDL_BUTTON_RMASK) != 0;
+                mouse_turret_aiming.store(aiming, std::memory_order_relaxed);
+                SDL_SetRelativeMouseMode(aiming ? SDL_TRUE : SDL_FALSE);
+                if ((mouse & SDL_BUTTON_LMASK) != 0) *buttons |= 0x8000;
+                if (aiming) {
+                    turret_stick_x[0].store(std::clamp(mouse_x * 0.025F, -1.0F, 1.0F),
+                                            std::memory_order_relaxed);
+                }
+                else {
+                    turret_stick_x[0].store(0.0F, std::memory_order_relaxed);
+                }
+            }
         }
         SDL_GameController* gamepad = configured_gamepad(controller);
         if (gamepad) {
             const btga::ControllerBindings& binding = pc_settings.controllers[static_cast<std::size_t>(controller)];
             auto pressed = [gamepad](const std::string& input) { return controller_input_pressed(gamepad, input); };
+            const bool independent_turret = pc_settings.mod_independent_turret;
             *buttons |= (pressed(binding.button_a) ? 0x8000 : 0) |
                         (pressed(binding.button_b) ? 0x4000 : 0) |
                         (pressed(binding.button_z) ? 0x2000 : 0) |
@@ -329,11 +354,12 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
                         (pressed(binding.button_r) ? 0x10 : 0) |
                         (pressed(binding.c_up) ? 0x08 : 0) |
                         (pressed(binding.c_down) ? 0x04 : 0) |
-                        (pressed(binding.c_left) ? 0x02 : 0) |
-                        (pressed(binding.c_right) ? 0x01 : 0);
+                        (!independent_turret && pressed(binding.c_left) ? 0x02 : 0) |
+                        (!independent_turret && pressed(binding.c_right) ? 0x01 : 0);
             constexpr float scale = 1.0F / 32767.0F;
             const float gx = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTX) * scale;
             const float gy = -SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTY) * scale;
+            const float rx = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_RIGHTX) * scale;
             const btga::PlayerSettings& player = pc_settings.players[static_cast<std::size_t>(controller)];
             const float configured_x = gx * player.sensitivity * (player.invert_x ? -1.0F : 1.0F);
             const float configured_y = gy * player.sensitivity * (player.invert_y ? -1.0F : 1.0F);
@@ -343,6 +369,11 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
             if (configured_y > player.deadzone || configured_y < -player.deadzone) {
                 *y = std::clamp(configured_y, -1.0F, 1.0F);
             }
+            if (controller != 0 || !mouse_turret_aiming.load(std::memory_order_relaxed)) {
+                turret_stick_x[static_cast<std::size_t>(controller)].store(
+                    std::abs(rx) > player.deadzone ? std::clamp(rx, -1.0F, 1.0F) : 0.0F,
+                    std::memory_order_relaxed);
+            }
         }
         return controller == 0 || gamepad != nullptr;
     }
@@ -351,6 +382,22 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
     *buttons = 0; *x = 0.0F; *y = 0.0F;
     return true;
 }
+
+extern "C" bool btga_extended_visibility_enabled() {
+    const std::lock_guard lock(input_settings_mutex);
+    return pc_settings.mod_extended_visibility;
+}
+
+extern "C" bool btga_independent_turret_enabled() {
+    const std::lock_guard lock(input_settings_mutex);
+    return pc_settings.mod_independent_turret;
+}
+
+extern "C" float btga_turret_stick_x(int player) {
+    if (player < 0 || player >= max_controllers) return 0.0F;
+    return turret_stick_x[static_cast<std::size_t>(player)].load(std::memory_order_relaxed);
+}
+
 void set_rumble(int controller, bool enabled) {
 #ifdef BTGA_HAS_RT64
     const std::lock_guard lock(input_settings_mutex);

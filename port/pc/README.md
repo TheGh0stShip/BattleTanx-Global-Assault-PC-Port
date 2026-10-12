@@ -60,6 +60,28 @@ atomically under `%LOCALAPPDATA%\BattleTanxGA` and applies the supported video,
 audio, and input changes. Separate music/effects mixing remains a forthcoming
 runtime integration rather than being presented as a working control.
 
+### Optional gameplay mods
+
+The **Mods** tab contains two opt-in changes. Both default to off, so a new
+installation retains the original game rules and presentation.
+
+- **Extended visibility** raises the game's projection and world-culling range
+  to its safe signed limit and omits the frame's fog geometry mode, fog colour,
+  and fog-position commands. Levels may reveal distant geometry that retail
+  never intended to draw simultaneously.
+- **Independent dual-stick turret aiming** applies only to player-controlled
+  vehicles whose tank definition has a rotating turret. The left stick keeps
+  the original hull movement, while the right stick rotates the turret. The
+  camera requests the game's existing turret-relative transform, also used by
+  its presentation code. Existing weapon spawn rules remain in charge, so
+  rounds and turret-aimed weapons follow the turret while mines, gun buddies,
+  bouncing betties, and other deployables keep their original behavior.
+
+For mouse and keyboard, WASD drives, left click supplies primary fire, and
+holding right click captures relative mouse movement for turret aiming. Release
+right click to return the cursor. Open F10 settings before changing windows or
+leaving the game; mouse capture is disabled while the settings overlay is open.
+
 ## Renderer diagnostics
 
 RT64's developer inspector can be enabled for renderer debugging without
