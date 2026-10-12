@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "btga/texture_packs.hpp"
+#include "btga/btga_gameplay.h"
 #include "btga/master_client.hpp"
 #include "btga/input_sync.hpp"
 #include "btga/online_multiplayer.hpp"
@@ -41,8 +42,6 @@ namespace {
 constexpr std::uint8_t online_state_version = 1;
 constexpr std::uint8_t online_state_ack_version = 2;
 constexpr std::size_t online_state_packet_size = 17;
-constexpr std::uint8_t online_frame_event_version = 0xF1;
-constexpr std::size_t online_frame_event_size = 9;
 constexpr std::size_t random_seed_offset = 0x00114C80U;
 constexpr std::size_t frame_counter_offset = 0x0021945CU;
 constexpr std::uint32_t online_state_checksum_salt = UINT32_C(0x42544741);
@@ -623,7 +622,7 @@ public:
         const std::uint16_t destination = local == 0 ? 1 : 0;
         const std::uint32_t frame = online_simulation_frame_++;
 
-        std::array<std::uint8_t, BTGA_NET_HEADER_SIZE + online_frame_event_size> packet{};
+        std::array<std::uint8_t, BTGA_NET_HEADER_SIZE + BTGA_NET_FRAME_SYNC_SIZE> packet{};
         BtgaNetHeader header{};
         header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
         header.message_type = BTGA_NET_MSG_EVENT;
@@ -631,14 +630,14 @@ public:
                                                  BTGA_NET_FLAG_RELAYED);
         header.session_id = online_session_id_;
         header.sequence = online_sequence_++;
-        header.payload_size = static_cast<std::uint16_t>(online_frame_event_size);
+        header.payload_size = static_cast<std::uint16_t>(BTGA_NET_FRAME_SYNC_SIZE);
         header.peer_id = local;
         if (btga_net_encode_header(packet.data(), packet.size(), &header) !=
             BTGA_NET_HEADER_SIZE) return false;
-        std::uint8_t* payload = packet.data() + BTGA_NET_HEADER_SIZE;
-        payload[0] = online_frame_event_version;
-        put_u32_be(payload + 1, frame);
-        put_u32_be(payload + 5, frame ^ online_state_checksum_salt);
+        const BtgaNetFrameSync sync{frame, 0U};
+        if (btga_net_encode_frame_sync(packet.data() + BTGA_NET_HEADER_SIZE,
+                                       BTGA_NET_FRAME_SYNC_SIZE, &sync) !=
+            BTGA_NET_FRAME_SYNC_SIZE) return false;
 
         const auto send_frame = [&]() {
             return online_connection_->send_gameplay(destination, packet);
@@ -797,15 +796,14 @@ private:
                 header.protocol_version == BTGA_NET_PROTOCOL_VERSION &&
                 header.message_type == BTGA_NET_MSG_EVENT &&
                 header.session_id == online_session_id_ && header.peer_id == source &&
-                header.payload_size == online_frame_event_size &&
-                size == BTGA_NET_HEADER_SIZE + online_frame_event_size) {
+                header.payload_size == BTGA_NET_FRAME_SYNC_SIZE &&
+                size == BTGA_NET_HEADER_SIZE + BTGA_NET_FRAME_SYNC_SIZE) {
                 const std::uint8_t* payload = packet.data() + BTGA_NET_HEADER_SIZE;
-                const std::uint32_t frame = get_u32_be(payload + 1);
-                if (payload[0] == online_frame_event_version &&
-                    get_u32_be(payload + 5) == (frame ^ online_state_checksum_salt) &&
+                BtgaNetFrameSync sync{};
+                if (btga_net_decode_frame_sync(&sync, payload, header.payload_size) &&
                     (!online_remote_simulation_frame_ ||
-                     frame > *online_remote_simulation_frame_)) {
-                    online_remote_simulation_frame_ = frame;
+                     sync.frame > *online_remote_simulation_frame_)) {
+                    online_remote_simulation_frame_ = sync.frame;
                 }
                 continue;
             }
