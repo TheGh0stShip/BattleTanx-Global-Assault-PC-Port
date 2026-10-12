@@ -55,10 +55,10 @@ scale, antialiasing, master volume, per-player controller assignment,
 deadzones, sensitivity, inversion, rumble strength, complete keyboard and
 per-player controller rebinding (including triggers and stick directions),
 VSync and presentation frame limiting, and restore defaults. **Apply & Save**
-writes the settings
-atomically under `%LOCALAPPDATA%\BattleTanxGA` and applies the supported video,
-audio, and input changes. Separate music/effects mixing remains a forthcoming
-runtime integration rather than being presented as a working control.
+writes the settings atomically under `%LOCALAPPDATA%\BattleTanxGA` and applies
+the supported video, audio, and input changes. Master volume scales the final
+SDL mix; the music and effects controls independently scale the two master
+buses already present in the original libmus audio engine.
 
 ### Optional gameplay mods
 

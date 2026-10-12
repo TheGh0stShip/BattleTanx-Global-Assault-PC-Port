@@ -9,11 +9,25 @@ extern "C" void yield_self_1ms(std::uint8_t* rdram);
 extern "C" bool btga_extended_visibility_enabled();
 extern "C" bool btga_independent_turret_enabled();
 extern "C" float btga_turret_stick_x(int player);
+extern "C" float btga_music_volume_setting();
+extern "C" float btga_effects_volume_setting();
 
 namespace {
+std::int32_t effects_master_requested = 0x7FFF;
+std::int32_t music_master_requested = 0x7FFF;
+
 float read_guest_float(std::uint8_t* rdram, std::uint32_t address) {
     const gpr guest_address = static_cast<gpr>(static_cast<std::int32_t>(address));
     return std::bit_cast<float>(static_cast<std::uint32_t>(MEM_W(0, guest_address)));
+}
+
+void apply_audio_bus_volumes(std::uint8_t* rdram) {
+    constexpr gpr effects_master = static_cast<gpr>(static_cast<std::int32_t>(0x803AD98CU));
+    constexpr gpr music_master = static_cast<gpr>(static_cast<std::int32_t>(0x803AD98EU));
+    const auto effects = static_cast<std::int32_t>(effects_master_requested * btga_effects_volume_setting());
+    const auto music = static_cast<std::int32_t>(music_master_requested * btga_music_volume_setting());
+    MEM_H(0, effects_master) = std::clamp(effects, 0, 0x7FFF);
+    MEM_H(0, music_master) = std::clamp(music, 0, 0x7FFF);
 }
 }
 
@@ -119,6 +133,18 @@ extern "C" void btga_turret_camera_step(std::uint8_t* rdram, recomp_context* ctx
     // Mode 1 is the game's existing turret transform, also used by the intro
     // presentation, so this reuses retail camera math and smoothing.
     MEM_W(0, query_mode) = 1;
+}
+
+extern "C" void MusSetMasterVolume(std::uint8_t* rdram, recomp_context* ctx) {
+    const std::int32_t type = static_cast<std::int32_t>(ctx->r4);
+    const std::int32_t requested = std::clamp(static_cast<std::int32_t>(ctx->r5), 0, 0x7FFF);
+    if (type & 1) effects_master_requested = requested;
+    if (type & 2) music_master_requested = requested;
+    apply_audio_bus_volumes(rdram);
+}
+
+extern "C" void btga_audio_volume_step(std::uint8_t* rdram, recomp_context*) {
+    apply_audio_bus_volumes(rdram);
 }
 
 extern "C" void func_80098B40(std::uint8_t* rdram, recomp_context*) {

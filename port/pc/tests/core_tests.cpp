@@ -95,6 +95,8 @@ int main() {
     settings.render_scale = 2.0F;
     settings.antialiasing = 4;
     settings.master_volume = 0.625F;
+    settings.music_volume = 0.5F;
+    settings.effects_volume = 0.75F;
     settings.players[1].deadzone = 0.25F;
     settings.players[1].invert_y = true;
     settings.players[1].controller_slot = 3;
@@ -111,6 +113,8 @@ int main() {
     CHECK(loaded.window_width == 2560 && loaded.window_height == 1440);
     CHECK(loaded.render_scale == 2.0F && loaded.antialiasing == 4);
     CHECK(loaded.master_volume == 0.625F);
+    CHECK(loaded.music_volume == 0.5F);
+    CHECK(loaded.effects_volume == 0.75F);
     CHECK(loaded.players[1].deadzone == 0.25F);
     CHECK(loaded.players[1].invert_y && loaded.players[1].controller_slot == 3);
     CHECK(loaded.keyboard.button_a == "Space");
@@ -137,7 +141,7 @@ int main() {
     CHECK(validated.render_scale == 2.0F);
     CHECK(validated.antialiasing == 0);
     CHECK(validated.master_volume == 1.0F);
-    CHECK(validated.music_volume == 1.0F);
+    CHECK(validated.music_volume == 0.5F);
     CHECK(validated.players[0].deadzone == 0.0F);
     std::filesystem::remove_all(settings_dir);
 

@@ -492,7 +492,7 @@ private:
                     slider_percent("Master volume", draft_settings_.master_volume);
                     slider_percent("Music volume", draft_settings_.music_volume);
                     slider_percent("Effects volume", draft_settings_.effects_volume);
-                    ImGui::TextDisabled("Music/effects separation requires game-audio channel classification; master volume applies now.");
+                    ImGui::TextDisabled("Master applies to the final mix; music and effects use the game's separate libmus buses.");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Controllers")) {
