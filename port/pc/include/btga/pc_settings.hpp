@@ -43,7 +43,8 @@ struct KeyboardBindings {
 };
 
 struct PcSettings {
-    static constexpr int current_version = 1;
+    static constexpr int current_version = 2;
+    static constexpr std::size_t recent_rom_capacity = 5;
 
     int version = current_version;
     WindowMode window_mode = WindowMode::Windowed;
@@ -56,12 +57,15 @@ struct PcSettings {
     float master_volume = 1.0F;
     float music_volume = 1.0F;
     float effects_volume = 1.0F;
+    std::string last_rom_path;
+    std::array<std::string, recent_rom_capacity> recent_rom_paths{};
     KeyboardBindings keyboard{};
     std::array<PlayerSettings, 4> players{};
 
     static PcSettings defaults();
     static PcSettings load(const std::filesystem::path& path);
     void save(const std::filesystem::path& path) const;
+    void remember_rom(const std::filesystem::path& path);
     void validate();
 };
 

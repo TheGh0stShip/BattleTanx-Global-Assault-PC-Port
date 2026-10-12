@@ -482,21 +482,41 @@ void patch_screen_edge_scissors(std::uint8_t*, recomp_context*) {
 }
 
 int runtime_main(int argc, char** argv) {
+    const std::filesystem::path config_path = btga::pc_user_data_directory();
+    std::filesystem::create_directories(config_path);
+    const std::filesystem::path settings_path = config_path / "settings.ini";
+    pc_settings = btga::PcSettings::load(settings_path);
+    if (!std::filesystem::exists(settings_path)) pc_settings.save(settings_path);
+
     std::optional<std::filesystem::path> picked_rom;
 #if defined(_WIN32) && defined(BTGA_HAS_RT64)
-    if (argc == 1) {
+    const bool choose_requested = argc == 2 && std::string_view{argv[1]} == "--choose-rom";
+    if (argc == 1 && !pc_settings.last_rom_path.empty()) {
+        const std::filesystem::path remembered = std::filesystem::u8path(pc_settings.last_rom_path);
+        if (std::filesystem::is_regular_file(remembered)) {
+            try {
+                (void)btga::Rom::load_verified(remembered);
+                picked_rom = remembered;
+            } catch (const std::exception& error) {
+                std::cerr << "Remembered ROM is no longer usable: " << error.what() << '\n';
+            }
+        }
+    }
+    if ((argc == 1 || choose_requested) && !picked_rom) {
         picked_rom = choose_rom();
         if (!picked_rom) return 0;
     }
+#else
+    const bool choose_requested = false;
 #endif
     bool boot = argc == 3 && std::string_view{argv[1]} == "--boot";
     bool timed_boot = argc == 4 && std::string_view{argv[1]} == "--boot-seconds";
     bool play = picked_rom.has_value() ||
                 (argc == 3 && std::string_view{argv[1]} == "--play") ||
                 (argc == 2 && std::string_view{argv[1]}.starts_with("-") == false);
-    if (argc != 1 && !boot && !timed_boot && !play) {
+    if (argc != 1 && !choose_requested && !boot && !timed_boot && !play) {
         std::cerr << "Usage: " << argv[0]
-                  << " [ROM | --boot ROM | --boot-seconds SECONDS ROM | --play ROM]\n";
+                  << " [ROM | --choose-rom | --boot ROM | --boot-seconds SECONDS ROM | --play ROM]\n";
         return 2;
     }
 
@@ -522,6 +542,12 @@ int runtime_main(int argc, char** argv) {
         else rom_path = argv[2];
         const btga::Rom rom = btga::Rom::load_verified(rom_path);
         rom_hash = XXH3_64bits(rom.bytes().data(), rom.bytes().size());
+        if (play) {
+            std::error_code path_error;
+            const std::filesystem::path absolute = std::filesystem::absolute(rom_path, path_error);
+            pc_settings.remember_rom(path_error ? rom_path : absolute);
+            pc_settings.save(settings_path);
+        }
     }
 
     const recomp::GameEntry game = make_game(rom_hash);
@@ -539,11 +565,6 @@ int runtime_main(int argc, char** argv) {
         return 0;
     }
 
-    const std::filesystem::path config_path = btga::pc_user_data_directory();
-    std::filesystem::create_directories(config_path);
-    const std::filesystem::path settings_path = config_path / "settings.ini";
-    pc_settings = btga::PcSettings::load(settings_path);
-    if (!std::filesystem::exists(settings_path)) pc_settings.save(settings_path);
     recomp::register_config_path(config_path);
     if (recomp::select_rom(rom_path, game.game_id) != recomp::RomValidationError::Good) {
         std::cerr << "N64ModernRuntime rejected the already verified ROM\n";

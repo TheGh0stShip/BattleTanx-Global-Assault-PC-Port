@@ -8,7 +8,7 @@ if not exist "%ROM%" goto missing
 goto finished
 
 :picker
-"%~dp0BattleTanxGA.exe"
+"%~dp0BattleTanxGA.exe" --choose-rom
 goto finished
 
 :missing

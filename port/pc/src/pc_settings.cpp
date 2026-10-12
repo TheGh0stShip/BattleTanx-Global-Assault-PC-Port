@@ -97,6 +97,7 @@ void apply_key(PcSettings& settings, std::string_view key, std::string_view valu
     else if (key == "audio.master_volume") parse_number(value, settings.master_volume);
     else if (key == "audio.music_volume") parse_number(value, settings.music_volume);
     else if (key == "audio.effects_volume") parse_number(value, settings.effects_volume);
+    else if (key == "rom.last_path") assign_string(value, settings.last_rom_path);
     else if (key == "keyboard.stick_up") assign_string(value, settings.keyboard.stick_up);
     else if (key == "keyboard.stick_down") assign_string(value, settings.keyboard.stick_down);
     else if (key == "keyboard.stick_left") assign_string(value, settings.keyboard.stick_left);
@@ -116,6 +117,12 @@ void apply_key(PcSettings& settings, std::string_view key, std::string_view valu
     else if (key == "keyboard.c_left") assign_string(value, settings.keyboard.c_left);
     else if (key == "keyboard.c_right") assign_string(value, settings.keyboard.c_right);
     else {
+        for (std::size_t i = 0; i < settings.recent_rom_paths.size(); ++i) {
+            if (key == "rom.recent" + std::to_string(i + 1)) {
+                assign_string(value, settings.recent_rom_paths[i]);
+                return;
+            }
+        }
         for (std::size_t i = 0; i < settings.players.size(); ++i) {
             const std::string prefix = "player" + std::to_string(i + 1) + ".";
             if (!key.starts_with(prefix)) continue;
@@ -184,6 +191,10 @@ void PcSettings::save(const std::filesystem::path& path) const {
     stream << "audio.master_volume=" << clean.master_volume << '\n';
     stream << "audio.music_volume=" << clean.music_volume << '\n';
     stream << "audio.effects_volume=" << clean.effects_volume << '\n';
+    stream << "rom.last_path=" << clean.last_rom_path << '\n';
+    for (std::size_t i = 0; i < clean.recent_rom_paths.size(); ++i) {
+        stream << "rom.recent" << i + 1 << '=' << clean.recent_rom_paths[i] << '\n';
+    }
     write_binding(stream, "stick_up", clean.keyboard.stick_up);
     write_binding(stream, "stick_down", clean.keyboard.stick_down);
     write_binding(stream, "stick_left", clean.keyboard.stick_left);
@@ -228,6 +239,22 @@ void PcSettings::save(const std::filesystem::path& path) const {
     }
 }
 
+void PcSettings::remember_rom(const std::filesystem::path& path) {
+    const std::u8string encoded = path.lexically_normal().generic_u8string();
+    const std::string text{reinterpret_cast<const char*>(encoded.data()), encoded.size()};
+    if (text.empty()) return;
+
+    std::array<std::string, recent_rom_capacity> updated{};
+    updated[0] = text;
+    std::size_t output = 1;
+    for (const std::string& recent : recent_rom_paths) {
+        if (recent.empty() || recent == text || output >= updated.size()) continue;
+        updated[output++] = recent;
+    }
+    last_rom_path = text;
+    recent_rom_paths = std::move(updated);
+}
+
 void PcSettings::validate() {
     version = current_version;
     window_width = std::clamp(window_width, 640, 7680);
@@ -241,6 +268,15 @@ void PcSettings::validate() {
     master_volume = std::clamp(master_volume, 0.0F, 1.0F);
     music_volume = std::clamp(music_volume, 0.0F, 1.0F);
     effects_volume = std::clamp(effects_volume, 0.0F, 1.0F);
+    std::array<std::string, recent_rom_capacity> deduplicated{};
+    std::size_t output = 0;
+    for (const std::string& recent : recent_rom_paths) {
+        if (recent.empty()) continue;
+        const bool duplicate = std::find(deduplicated.begin(), deduplicated.begin() + output,
+                                         recent) != deduplicated.begin() + output;
+        if (!duplicate && output < deduplicated.size()) deduplicated[output++] = recent;
+    }
+    recent_rom_paths = std::move(deduplicated);
     for (PlayerSettings& player : players) {
         player.deadzone = std::clamp(player.deadzone, 0.0F, 0.95F);
         player.sensitivity = std::clamp(player.sensitivity, 0.1F, 3.0F);

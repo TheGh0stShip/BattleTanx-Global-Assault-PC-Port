@@ -19,14 +19,21 @@ representative GPU/controller combinations still need broader validation.
 1. Download and extract the Windows x64 ZIP from the repository's
    [Releases](https://github.com/TheGh0stShip/BattleTanx-Global-Assault-PC-Port/releases).
 2. Supply your own verified USA Rev 0 big-endian `.z64` ROM; it is not included.
-3. Double-click **Launch BattleTanx GA.cmd** or `BattleTanxGA.exe`, then choose
-   the ROM in the file picker. Dragging the ROM onto either file is also
+3. Double-click **Launch BattleTanx GA.cmd** to choose a ROM, or double-click
+   `BattleTanxGA.exe` to reuse the last verified ROM. On the first run the
+   executable opens the ROM picker. Dragging the ROM onto either file is also
    supported.
 
 The launcher passes the ROM directly to `BattleTanxGA.exe`; it does not copy,
 modify, upload, or bundle it. The runtime validates the ROM before starting and
 shows an error dialog for a wrong revision, bad dump, missing file, or startup
 failure instead of exiting silently.
+
+The last verified ROM and up to five recent ROM paths are remembered in
+`%LOCALAPPDATA%\BattleTanxGA\settings.ini`; the ROM itself is never copied.
+Run `BattleTanxGA.exe --choose-rom` (or use the CMD launcher) whenever you want
+to select a different dump. If a remembered file was moved, deleted, or no
+longer validates, the native picker opens again automatically.
 
 ## Controls
 
