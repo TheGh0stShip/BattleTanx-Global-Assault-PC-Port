@@ -1,24 +1,66 @@
-# BattleTanx: Global Assault PC runtime
+# BattleTanx: Global Assault native PC runtime
 
-This directory is the separate native-port consumer of the recovered game. It
-does not alter the matching N64 build and never embeds the ROM or extracted
-assets.
+This directory contains the Windows/Linux runtime for the recovered game. It
+uses N64Recomp for the original CPU code, RSPRecomp for the audio microcode,
+N64ModernRuntime for N64 services, RT64 for display-list rendering, and SDL2
+for audio, keyboard/controller input, and rumble. ROMs and generated translated
+code are local build inputs and are never committed.
 
-Current milestone: a cross-platform executable bring-up slice with strict local
-USA Rev 0 `.z64` verification, deterministic tank movement and firing, a
-software framebuffer, and native X11/Win32 presentation. It is infrastructure
-for the complete port, not yet the complete retail game.
+The current Windows build boots the USA Rev 0 ROM, renders through native
+Direct3D 12, plays SDL audio, accepts keyboard and SDL game-controller input,
+passes the original menus, and enters playable campaign gameplay. Linux uses
+RT64's Vulkan backend. This remains development software rather than a packaged
+release; save-data, long-session stability, every game mode, and representative
+GPU/controller combinations still need broader validation.
 
-```sh
-cmake -S port/pc -B build-pc -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-pc
-ctest --test-dir build-pc --output-on-failure
-./build-pc/battletanx_ga_pc /absolute/path/to/BattleTanxGA.z64
-./build-pc/battletanx_ga_pc --headless /absolute/path/to/BattleTanxGA.z64
+## Controls
+
+- WASD: analog stick
+- X / Z: N64 A / B
+- Left Shift: Z trigger
+- Enter: Start
+- Q / E: L / R
+- Arrow keys: D-pad
+- I / J / K / L: C buttons
+
+SDL game controllers use the left stick, face and shoulder buttons, left
+trigger, D-pad, and rumble.
+
+## Windows developer build
+
+Use a native Windows checkout on NTFS and run PowerShell—not the Linux binary
+through `wsl.exe`. Visual Studio's **Desktop development with C++** workload is
+required. After the pinned dependencies and locally generated recompilation
+inputs described in [`recomp/README.md`](recomp/README.md) are present:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+./port/pc/build-windows.ps1 -Rom 'C:\Games\BattleTanxGA.z64' -Run
 ```
 
-Controls: W/S drive, A/D turn, Space fires, Escape quits.
+The script configures an optimized x64 Ninja build, builds
+`BattleTanxGA.exe`, copies SDL2 and the DirectX Shader Compiler runtime beside
+it, and optionally launches it with the supplied local ROM. It rejects WSL UNC
+source paths because MSVC/Ninja dependency handling is unreliable there.
 
-The next integration steps are the verified extracted-resource reader, N64
-display-list translation, audio, and replacement of the bring-up simulation by
-the recovered gameplay entrypoints.
+The ROM must be the big-endian USA Rev 0 dump documented in the repository
+README. Runtime validation rejects any other file.
+
+## Headless and Linux development
+
+The translated runtime can still be exercised without a display using the
+bounded `--boot` mode. Linux RT64 builds use Vulkan:
+
+```sh
+cmake -S port/pc -B build-pc-rt64 -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBTGA_BUILD_RECOMP=ON \
+  -DBTGA_BUILD_RUNTIME_PROBE=ON \
+  -DBTGA_BUILD_RT64=ON
+cmake --build build-pc-rt64 --target btga_runtime_probe
+./build-pc-rt64/BattleTanxGA --play /absolute/path/to/BattleTanxGA.z64
+```
+
+The small `battletanx_ga_pc` target is an earlier native-engine bring-up
+harness. It is retained for portable core tests, but `BattleTanxGA` is the
+complete-game compatibility runtime.

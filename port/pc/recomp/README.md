@@ -62,20 +62,21 @@ thread, VI, display-list, screen-update, and RSP counts at the end of the run.
 The renderer, controller, and audio callbacks are deliberately headless test
 implementations at this stage.
 
-`runtime_patches.cpp` contains two required portability patches. The
-controller-read and scheduler-record busy-waits now cooperatively yield. Both
-original loops depend on R4300 interrupt preemption, which a cooperatively
-scheduled host thread cannot reproduce merely by translating instructions.
+`runtime_patches.cpp` contains required scheduler portability patches. The
+controller, scheduler-record, graphics-completion, and render-slot busy-waits
+now cooperatively yield. Those original loops depend on R4300 interrupt
+preemption, which a cooperatively scheduled host thread cannot reproduce merely
+by translating instructions.
 
 The audio microcode configuration uses its real IMEM load address (`0x1080`)
 and declares the command-dispatch table's indirect handler destinations. The
 generated implementation is derived locally from the verified ROM and remains
 ignored, like all other ROM-derived output.
 
-The configuration currently establishes the complete code-generation boundary.
-Runtime integration still requires a real renderer (RT64 or equivalent), audio
-output, input mapping, and a user-facing executable loop; this headless boot
-milestone is not presented as a playable build.
+The configuration establishes the complete code-generation boundary. The
+interactive runtime now supplies RT64 rendering, SDL audio, keyboard/controller
+input, rumble, and a user-facing executable loop. The headless path remains a
+bounded CI and diagnostics mode.
 
 `bootstrap_rt64.sh` pins the same RT64 revision used by the reference runtime
 integration. It applies a small recorded patch that supplies a non-interactive
@@ -85,7 +86,7 @@ to configure and build with `RT64_STATIC=ON`, `RT64_SDL_WINDOW_VULKAN=ON`, and
 `NFD_STUB=ON`. It is kept separate from the headless probe until the interactive
 SDL window and renderer adapter are enabled, so CI does not require a GPU.
 
-The optional adapter can be compile-checked with:
+The RT64 adapter can be built with:
 
 ```sh
 cmake -S port/pc -B build-pc-rt64 -G Ninja \
@@ -94,17 +95,17 @@ cmake -S port/pc -B build-pc-rt64 -G Ninja \
 cmake --build build-pc-rt64 --target btga_rt64_renderer
 ```
 
-This builds the full RT64 shader and Vulkan pipeline and the BattleTanx bridge
+This builds the full RT64 shader pipeline and the BattleTanx bridge
 that connects RDRAM, RDP/VI registers, microcode selection, display lists, and
-screen presentation. The remaining interactive step is the SDL window/input
-loop. With `BTGA_BUILD_RT64=ON`, that loop is included in
-`btga_runtime_probe` and can be launched with:
+screen presentation. Windows selects D3D12 and Linux selects Vulkan. With
+`BTGA_BUILD_RT64=ON`, the SDL window/input loop is included in the target and
+can be launched with:
 
 ```sh
-./build-pc-rt64/btga_runtime_probe --play /path/to/battletanx_ga.z64
+./build-pc-rt64/BattleTanxGA --play /path/to/battletanx_ga.z64
 ```
 
-The interactive mode creates a resizable Vulkan window, sends the game's
+The interactive mode creates a resizable native window, sends the game's
 display lists through RT64, queues stereo audio through SDL, and supplies a
 basic keyboard mapping: WASD for the analog stick, X/Z for A/B, left Shift for
 Z, Enter for Start, Q/E for L/R, arrows for the D-pad, and IJKL for C buttons.

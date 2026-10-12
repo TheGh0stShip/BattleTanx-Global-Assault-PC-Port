@@ -18,6 +18,15 @@ project's binary-evidence gates.
 
 No ROM or ROM-derived assets are included. Supply your own legally obtained dump.
 
+## Playable PC port demonstration
+
+[![BattleTanx: Global Assault native Windows port demonstration](https://img.youtube.com/vi/PrhwXBr1qJI/maxresdefault.jpg)](https://www.youtube.com/watch?v=PrhwXBr1qJI)
+
+The video above demonstrates the recovered game running as a native Windows
+executable through the `pc-port` runtime: original menus and campaign gameplay,
+RT64 Direct3D 12 rendering, SDL audio, and live keyboard input. Click the image
+to play the full demonstration on YouTube.
+
 ## Supported ROM
 
 - Title: `BATTLETANXGA`

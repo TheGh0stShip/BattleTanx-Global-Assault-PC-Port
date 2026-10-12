@@ -1,8 +1,15 @@
 #include "rt64_context.hpp"
 
+#if defined(_WIN32)
+#include <Windows.h>
+#include <objidl.h>
+#include <oleauto.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <iostream>
 
 #include "hle/rt64_application.h"
 #include "ultramodern/ultramodern.hpp"
@@ -70,7 +77,11 @@ public:
         RT64::ApplicationConfiguration configuration{};
         configuration.useConfigurationFile = false;
         app_ = std::make_unique<RT64::Application>(core, configuration);
+#if defined(_WIN32)
+        app_->userConfig.graphicsAPI = RT64::UserConfiguration::GraphicsAPI::D3D12;
+#else
         app_->userConfig.graphicsAPI = RT64::UserConfiguration::GraphicsAPI::Vulkan;
+#endif
         app_->userConfig.resolution = RT64::UserConfiguration::Resolution::WindowIntegerScale;
         app_->userConfig.aspectRatio = RT64::UserConfiguration::AspectRatio::Original;
         app_->userConfig.extAspectRatio = RT64::UserConfiguration::AspectRatio::Original;
@@ -95,7 +106,9 @@ public:
         app_->processDisplayLists(app_->core.RDRAM, task->t.data_ptr & 0x3FFFFFFU, 0, true);
     }
     void send_dummy_workload(std::uint32_t address) override { app_->processDisplayLists(app_->core.RDRAM, address, 0, true); }
-    void update_screen() override { app_->updateScreen(); }
+    void update_screen() override {
+        app_->updateScreen();
+    }
     void shutdown() override { if (app_) app_->end(); }
     std::uint32_t get_display_framerate() const override { return app_->presentQueue->ext.sharedResources->swapChainRate; }
     float get_resolution_scale() const override { return 1.0F; }

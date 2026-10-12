@@ -48,7 +48,8 @@ std::array<std::uint8_t, 32> sha256(std::span<const std::uint8_t> input) {
         h[0]+=a;h[1]+=b;h[2]+=c;h[3]+=d;h[4]+=e;h[5]+=f;h[6]+=g;h[7]+=hh;
     }
     std::array<std::uint8_t,32> out{};
-    for (std::size_t i=0;i<h.size();++i) for(int j=0;j<4;++j) out[i*4+j]=h[i]>>(24-j*8);
+    for (std::size_t i=0;i<h.size();++i) for(int j=0;j<4;++j)
+        out[i*4+j]=static_cast<std::uint8_t>(h[i]>>(24-j*8));
     return out;
 }
 

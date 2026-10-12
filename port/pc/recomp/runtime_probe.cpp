@@ -6,6 +6,7 @@
 #include <memory>
 #include <atomic>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 
 #include "funcs.h"
@@ -16,6 +17,9 @@
 #include "xxHash/xxh3.h"
 #ifdef BTGA_HAS_RT64
 #include <SDL.h>
+#if defined(_WIN32)
+#include <SDL_syswm.h>
+#endif
 #include "rt64_context.hpp"
 #endif
 
@@ -77,13 +81,31 @@ ultramodern::renderer::WindowHandle headless_window_handle() {
 #endif
 }
 
+#ifdef BTGA_HAS_RT64
+ultramodern::renderer::WindowHandle interactive_window_handle() {
+#if defined(_WIN32)
+    SDL_SysWMinfo info{};
+    SDL_VERSION(&info.version);
+    if (!SDL_GetWindowWMInfo(window, &info)) {
+        throw std::runtime_error{"SDL could not expose the native Win32 window handle"};
+    }
+    return {.window = info.info.win.window, .thread_id = GetCurrentThreadId()};
+#else
+    return window;
+#endif
+}
+#endif
+
 void discard_audio(std::int16_t*, std::size_t) {}
 std::size_t audio_frames_remaining() { return 0; }
 void set_audio_frequency(std::uint32_t) {}
 
 #ifdef BTGA_HAS_RT64
-void queue_audio(std::int16_t* samples, std::size_t frames) {
-    if (audio_device != 0) SDL_QueueAudio(audio_device, samples, static_cast<std::uint32_t>(frames * 4));
+void queue_audio(std::int16_t* samples, std::size_t sample_count) {
+    if (audio_device != 0) {
+        SDL_QueueAudio(audio_device, samples,
+                       static_cast<std::uint32_t>(sample_count * sizeof(*samples)));
+    }
 }
 std::size_t queued_audio_frames() { return audio_device == 0 ? 0 : SDL_GetQueuedAudioSize(audio_device) / 4; }
 void configure_audio(std::uint32_t frequency) {
@@ -94,7 +116,11 @@ void configure_audio(std::uint32_t frequency) {
     wanted.channels = 2;
     wanted.samples = 1024;
     audio_device = SDL_OpenAudioDevice(nullptr, 0, &wanted, nullptr, 0);
-    if (audio_device != 0) SDL_PauseAudioDevice(audio_device, 0);
+    if (audio_device != 0) {
+        SDL_PauseAudioDevice(audio_device, 0);
+    } else {
+        std::cerr << "SDL audio unavailable: " << SDL_GetError() << '\n';
+    }
 }
 #endif
 
@@ -297,7 +323,7 @@ int main(int argc, char** argv) {
         .project_version = {0, 1, 0},
         .window_handle = play
 #ifdef BTGA_HAS_RT64
-            ? window
+            ? interactive_window_handle()
 #endif
             : headless_window_handle(),
         .rsp_callbacks = {.get_rsp_microcode = select_rsp_microcode},

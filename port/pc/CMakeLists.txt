@@ -84,6 +84,16 @@ if(BTGA_BUILD_RECOMP)
         endif()
 
         add_subdirectory("${BTGA_N64_RUNTIME_ROOT}" "${CMAKE_BINARY_DIR}/N64ModernRuntime")
+        # N64ModernRuntime currently adds a GCC-style warning suppression
+        # unconditionally. MSVC parses it as /W... and rejects the build.
+        if(MSVC)
+            set_property(TARGET ultramodern PROPERTY COMPILE_OPTIONS "")
+            set_property(TARGET librecomp PROPERTY COMPILE_OPTIONS "")
+            # MSVC supports the C99 constructs used by o1heap but does not
+            # advertise __STDC_VERSION__ in C mode.
+            target_compile_definitions(librecomp PRIVATE
+                $<$<COMPILE_LANGUAGE:C>:__STDC_VERSION__=199901L>)
+        endif()
         if(BTGA_BUILD_RT64)
             set(BTGA_RT64_ROOT "${CMAKE_SOURCE_DIR}/../../.deps/rt64" CACHE PATH "Path to RT64")
             find_package(SDL2 CONFIG REQUIRED)
@@ -100,8 +110,9 @@ if(BTGA_BUILD_RECOMP)
                 "${BTGA_RT64_ROOT}/src/contrib/dxc/inc"
                 "${BTGA_N64_RUNTIME_ROOT}/ultramodern/include"
             )
-            target_link_libraries(btga_rt64_renderer PRIVATE rt64 ultramodern)
-            target_compile_definitions(btga_rt64_renderer PRIVATE RT64_SDL_WINDOW_VULKAN HLSL_CPU)
+            target_link_libraries(btga_rt64_renderer PRIVATE rt64 ultramodern SDL2::SDL2)
+            target_compile_definitions(btga_rt64_renderer PRIVATE
+                RT64_SDL_WINDOW_VULKAN HLSL_CPU NOMINMAX)
         endif()
         add_executable(btga_runtime_probe
             recomp/generated/n_aspMain.cpp
@@ -110,6 +121,7 @@ if(BTGA_BUILD_RECOMP)
             recomp/runtime_compat.cpp
             recomp/runtime_patches.cpp
         )
+        set_target_properties(btga_runtime_probe PROPERTIES OUTPUT_NAME "BattleTanxGA")
         target_include_directories(btga_runtime_probe PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/include"
             "${BTGA_RECOMP_DIR}"
@@ -127,6 +139,10 @@ if(BTGA_BUILD_RECOMP)
         if(BTGA_BUILD_RT64)
             target_link_libraries(btga_runtime_probe PRIVATE btga_rt64_renderer SDL2::SDL2)
             target_compile_definitions(btga_runtime_probe PRIVATE BTGA_HAS_RT64)
+            if(WIN32)
+                target_link_directories(btga_runtime_probe PRIVATE
+                    "${BTGA_RT64_ROOT}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64")
+            endif()
         endif()
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
             target_compile_options(btga_runtime_probe PRIVATE

@@ -23,6 +23,8 @@ void __udivdi3_recomp(uint8_t*, recomp_context*);
 void __umoddi3_recomp(uint8_t*, recomp_context*);
 void func_80098B40(uint8_t*, recomp_context*);
 void func_800A1384(uint8_t*, recomp_context*);
+void func_80079FF0(uint8_t*, recomp_context*);
+void func_8007A818(uint8_t*, recomp_context*);
 
 #ifdef __cplusplus
 }

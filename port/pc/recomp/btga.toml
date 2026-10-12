@@ -27,4 +27,6 @@ ignored = [
     # semantically equivalent yielding poll in runtime_patches.cpp.
     "func_80098B40",
     "func_800A1384",
+    "func_80079FF0",
+    "func_8007A818",
 ]
