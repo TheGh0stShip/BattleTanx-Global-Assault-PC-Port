@@ -831,6 +831,16 @@ private:
         const std::uint16_t remote = local == 0 ? 1 : 0;
         const std::uint32_t latest_local_tick = online_tick_ - 1;
         const std::uint32_t relative_tick = latest_local_tick - online_local_tick_origin_;
+        // This is also the simulation barrier.  Waiting only for the delayed
+        // input frame allowed one runtime to execute controller polls that the
+        // other runtime had not reached yet.  Both peers must acknowledge the
+        // current poll before either returns to N64 code, even while the first
+        // few delayed inputs are still neutral.
+        if (!online_inputs_.input_for(static_cast<std::uint8_t>(local), latest_local_tick) ||
+            !online_inputs_.input_for(static_cast<std::uint8_t>(remote),
+                                      online_remote_tick_origin_ + relative_tick)) {
+            return false;
+        }
         if (relative_tick < input_delay) {
             online_applied_inputs_.fill({});
             online_applied_inputs_valid_ = true;
@@ -980,6 +990,13 @@ private:
         online_lobby_id_ = std::move(preboot->lobby_id);
         online_host_secret_ = std::move(preboot->host_secret);
         online_state_synchronized_ = true;
+        // A pre-boot rendezvous has a stronger invariant than an in-game join:
+        // neither runtime has entered N64 code yet.  Its controller epoch is
+        // therefore exactly zero on both peers; discovering an origin later
+        // would discard whichever polls the faster machine completed first.
+        online_local_tick_origin_ = 0;
+        online_remote_tick_origin_ = 0;
+        online_tick_origins_valid_ = true;
         online_peer_seen_[preboot->host ? 1U : 0U] = true;
         online_status_ = "Cold-boot multiplayer synchronized.";
         online_trace_.open(pc_data_path / "btga-net-sync.log",
@@ -990,6 +1007,7 @@ private:
                           << " seed=" << preboot->seed << '\n';
             online_trace_.flush();
         }
+        trace_online_origin_locked(online_connection_->relay_slot());
         if (app_ && app_->appWindow && app_->appWindow->sdlWindow) {
             SDL_SetWindowTitle(app_->appWindow->sdlWindow, preboot->host
                 ? "BattleTanx GA - HOST" : "BattleTanx GA - CLIENT");
