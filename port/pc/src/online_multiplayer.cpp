@@ -1,6 +1,7 @@
 #include "btga/online_multiplayer.hpp"
 
 #include <array>
+#include <cstring>
 
 namespace btga {
 
@@ -66,6 +67,40 @@ bool OnlineMultiplayer::accept_relay_datagram(
     }
     state_ = OnlineState::Lobby;
     return true;
+}
+
+bool OnlineMultiplayer::poll_relay_binding() {
+    std::array<std::uint8_t, BTGA_RELAY_MAX_DATAGRAM_SIZE> datagram{};
+    if (state_ != OnlineState::RelayBinding) return false;
+    const std::size_t size = io_.receive_relay(datagram);
+    return size != 0 && accept_relay_datagram({datagram.data(), size});
+}
+
+bool OnlineMultiplayer::send_gameplay(
+    std::uint16_t destination_slot,
+    std::span<const std::uint8_t> inner_datagram) {
+    std::array<std::uint8_t, BTGA_RELAY_MAX_DATAGRAM_SIZE> relay_datagram{};
+    if (state_ != OnlineState::Lobby) return false;
+    const std::size_t size = btga_relay_client_wrap(
+        &relay_, destination_slot, inner_datagram.data(), inner_datagram.size(),
+        relay_datagram.data(), relay_datagram.size());
+    return size != 0 && io_.send_relay({relay_datagram.data(), size});
+}
+
+std::size_t OnlineMultiplayer::receive_gameplay(
+    std::span<std::uint8_t> destination, std::uint16_t& source_slot) {
+    std::array<std::uint8_t, BTGA_RELAY_MAX_DATAGRAM_SIZE> relay_datagram{};
+    const std::uint8_t* inner = nullptr;
+    std::size_t inner_size = 0;
+    if (state_ != OnlineState::Lobby) return 0;
+    const std::size_t size = io_.receive_relay(relay_datagram);
+    if (size == 0 || !btga_relay_client_unwrap(
+            &relay_, relay_datagram.data(), size, &inner, &inner_size, &source_slot) ||
+        inner_size > destination.size()) {
+        return 0;
+    }
+    std::memcpy(destination.data(), inner, inner_size);
+    return inner_size;
 }
 
 std::uint16_t OnlineMultiplayer::relay_slot() const noexcept {

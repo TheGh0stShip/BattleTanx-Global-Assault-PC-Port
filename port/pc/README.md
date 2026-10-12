@@ -238,7 +238,10 @@ complete-game compatibility runtime.
 
 The PC core compiles against a pinned GPL-3.0-only revision of the shared
 [BattleTanx: Global Assault networking project](https://github.com/TheGh0stShip/BattleTanx-Global-Assault-Networking).
-This is foundational integration, not a playable online mode yet. Networking
+The native PC transport now passes a public end-to-end test through the live
+master and Azure UDP relay: two independent PC client processes bind as host
+and client, then deliver and decode a protocol-valid gameplay datagram. This is
+transport validation, not a playable online mode yet. Networking
 starts offline and opens no socket or DNS request during normal startup. Only a
 future explicit **Online Multiplayer** action may opt in and initialize the
 master/relay path; leaving that flow returns the client fully offline.
@@ -253,3 +256,20 @@ NAT-PMP, inbound port forwarding, or expose a host's home connection. Each
 device renders its own full-screen player camera; synchronization begins in a
 host-authoritative roster and tank-selection lobby rather than by emulating
 local split-screen.
+
+The public service dashboard at
+[`btga.thegh0stship.com`](https://btga.thegh0stship.com/) shows active games,
+open lobbies, and players without exposing addresses or credentials. Developers
+can reproduce the live PC transport test on Linux with `curl`, `jq`, CMake, and
+a C++20 compiler:
+
+```sh
+./port/pc/scripts/test-live-multiplayer.sh
+```
+
+The script creates a temporary lobby, obtains separate signed host/client
+admission tokens, builds the native test client, binds both instances through
+the public relay, verifies client-to-host gameplay delivery, and removes the
+lobby even when the test fails. See
+[online multiplayer testing](../../docs/ONLINE_MULTIPLAYER.md) for scope and
+security details.

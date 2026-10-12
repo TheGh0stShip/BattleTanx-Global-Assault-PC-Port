@@ -6,7 +6,7 @@ include(FetchContent)
 set(BTGA_NET_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(btga_networking
     GIT_REPOSITORY https://github.com/TheGh0stShip/BattleTanx-Global-Assault-Networking.git
-    GIT_TAG 4016e3f052dc331f75414c75d87c3408136f1147)
+    GIT_TAG 0ff4d59f9f1efdfa33cd9bc5335f7cdb53bd923f)
 FetchContent_MakeAvailable(btga_networking)
 
 option(BTGA_BUILD_RECOMP "Compile locally generated N64Recomp output" OFF)
@@ -57,6 +57,9 @@ enable_testing()
 add_executable(btga_pc_tests tests/core_tests.cpp)
 target_link_libraries(btga_pc_tests PRIVATE btga_pc_core)
 add_test(NAME btga_pc_core COMMAND btga_pc_tests)
+
+add_executable(btga_pc_live_multiplayer_test tests/live_multiplayer_test.cpp)
+target_link_libraries(btga_pc_live_multiplayer_test PRIVATE btga_pc_core)
 
 if(BTGA_BUILD_RECOMP)
     set(BTGA_RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/recomp/generated/functions")

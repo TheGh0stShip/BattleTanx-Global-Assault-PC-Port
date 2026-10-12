@@ -49,6 +49,8 @@ to play the full demonstration on YouTube.
   `BTGA_RT64_DEVELOPER=1` and pressing F1.
 - Distribution packages are ROM-free; the player supplies a verified local
   USA Rev 0 `.z64` dump at launch.
+- Native PC host/client transport passes an automated public relay test. The
+  player-facing lobby UI and synchronized gameplay are still in development.
 
 This is still a development port. Long-session stability, every game mode,
 representative GPUs/controllers, in-game save-flow validation, and visual
@@ -243,8 +245,11 @@ Cross-platform multiplayer is developed independently in
 [BattleTanx-Global-Assault-Networking](https://github.com/TheGh0stShip/BattleTanx-Global-Assault-Networking).
 The portable GPLv3 protocol and relay client are pinned into this build but
 remain dormant: constructing or launching the game performs no network access.
-A future explicit **Online Multiplayer** action will open the network path;
-there is not yet a user-visible online mode or playable Internet multiplayer.
+The native PC transport has been tested end to end through the public master
+and relay, but a future explicit **Online Multiplayer** action is still needed
+to expose that path in the game. There is not yet a user-visible online mode or
+playable synchronized Internet match. Live service status is available at
+[`btga.thegh0stship.com`](https://btga.thegh0stship.com/).
 
 ## License
 

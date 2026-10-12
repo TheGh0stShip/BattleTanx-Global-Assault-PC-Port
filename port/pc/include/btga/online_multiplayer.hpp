@@ -42,6 +42,12 @@ public:
                                    std::span<const std::uint8_t> admission_token);
     [[nodiscard]] bool accept_relay_datagram(
         std::span<const std::uint8_t> datagram);
+    [[nodiscard]] bool poll_relay_binding();
+    [[nodiscard]] bool send_gameplay(
+        std::uint16_t destination_slot,
+        std::span<const std::uint8_t> inner_datagram);
+    [[nodiscard]] std::size_t receive_gameplay(
+        std::span<std::uint8_t> destination, std::uint16_t& source_slot);
     [[nodiscard]] std::uint16_t relay_slot() const noexcept;
 
 private:
