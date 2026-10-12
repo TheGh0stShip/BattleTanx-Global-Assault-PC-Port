@@ -89,6 +89,7 @@ int main() {
     CHECK(settings.players[3].controller_slot == 3);
     CHECK(!settings.mod_extended_visibility);
     CHECK(!settings.mod_independent_turret);
+    CHECK(settings.mouse_turret_sensitivity == 1.0F);
     settings.window_mode = btga::WindowMode::Borderless;
     settings.window_width = 2560;
     settings.window_height = 1440;
@@ -105,6 +106,7 @@ int main() {
     settings.controllers[1].c_left = "right_x_negative";
     settings.mod_extended_visibility = true;
     settings.mod_independent_turret = true;
+    settings.mouse_turret_sensitivity = 1.75F;
     settings.remember_rom("C:/Games/BattleTanx - Global Assault (USA).z64");
     settings.remember_rom("D:/ROMs/BattleTanxGA.z64");
     settings.save(settings_path);
@@ -122,6 +124,7 @@ int main() {
     CHECK(loaded.controllers[1].c_left == "right_x_negative");
     CHECK(loaded.mod_extended_visibility);
     CHECK(loaded.mod_independent_turret);
+    CHECK(loaded.mouse_turret_sensitivity == 1.75F);
     CHECK(loaded.last_rom_path == "D:/ROMs/BattleTanxGA.z64");
     CHECK(loaded.recent_rom_paths[0] == "D:/ROMs/BattleTanxGA.z64");
     CHECK(loaded.recent_rom_paths[1] == "C:/Games/BattleTanx - Global Assault (USA).z64");
@@ -134,10 +137,12 @@ int main() {
                   << "video.antialiasing=3\n"
                   << "audio.master_volume=9\n"
                   << "audio.music_volume=inf\n"
+                  << "mods.mouse_turret_sensitivity=99\n"
                   << "player1.deadzone=-5\n";
     }
     const btga::PcSettings validated = btga::PcSettings::load(settings_path);
     CHECK(validated.window_width == 640);
+    CHECK(validated.mouse_turret_sensitivity == 4.0F);
     CHECK(validated.render_scale == 2.0F);
     CHECK(validated.antialiasing == 0);
     CHECK(validated.master_volume == 1.0F);

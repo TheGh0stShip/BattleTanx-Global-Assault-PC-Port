@@ -323,19 +323,27 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
             *x = float(keys[keyboard.stick_right] - keys[keyboard.stick_left]);
             *y = float(keys[keyboard.stick_up] - keys[keyboard.stick_down]);
             if (pc_settings.mod_independent_turret) {
-                int mouse_x = 0;
-                const std::uint32_t mouse = SDL_GetRelativeMouseState(&mouse_x, nullptr);
+                const std::uint32_t mouse = SDL_GetMouseState(nullptr, nullptr);
                 const bool aiming = (mouse & SDL_BUTTON_RMASK) != 0;
-                mouse_turret_aiming.store(aiming, std::memory_order_relaxed);
-                SDL_SetRelativeMouseMode(aiming ? SDL_TRUE : SDL_FALSE);
+                const bool was_aiming = mouse_turret_aiming.exchange(aiming, std::memory_order_relaxed);
+                if (aiming != was_aiming) {
+                    SDL_SetRelativeMouseMode(aiming ? SDL_TRUE : SDL_FALSE);
+                }
+                int mouse_x = 0;
+                SDL_GetRelativeMouseState(&mouse_x, nullptr);
                 if ((mouse & SDL_BUTTON_LMASK) != 0) *buttons |= 0x8000;
-                if (aiming) {
-                    turret_stick_x[0].store(std::clamp(mouse_x * 0.025F, -1.0F, 1.0F),
+                if (aiming && was_aiming) {
+                    const float sensitivity = pc_settings.mouse_turret_sensitivity;
+                    turret_stick_x[0].store(std::clamp(mouse_x * 0.025F * sensitivity, -1.0F, 1.0F),
                                             std::memory_order_relaxed);
                 }
                 else {
                     turret_stick_x[0].store(0.0F, std::memory_order_relaxed);
                 }
+            }
+            else if (mouse_turret_aiming.exchange(false, std::memory_order_relaxed)) {
+                SDL_SetRelativeMouseMode(SDL_FALSE);
+                turret_stick_x[0].store(0.0F, std::memory_order_relaxed);
             }
         }
         SDL_GameController* gamepad = configured_gamepad(controller);

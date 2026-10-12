@@ -117,6 +117,7 @@ void apply_key(PcSettings& settings, std::string_view key, std::string_view valu
     else if (key == "audio.effects_volume") parse_number(value, settings.effects_volume);
     else if (key == "mods.extended_visibility") parse_bool(value, settings.mod_extended_visibility);
     else if (key == "mods.independent_turret") parse_bool(value, settings.mod_independent_turret);
+    else if (key == "mods.mouse_turret_sensitivity") parse_number(value, settings.mouse_turret_sensitivity);
     else if (key == "rom.last_path") assign_string(value, settings.last_rom_path);
     else if (key == "keyboard.stick_up") assign_string(value, settings.keyboard.stick_up);
     else if (key == "keyboard.stick_down") assign_string(value, settings.keyboard.stick_down);
@@ -237,6 +238,7 @@ void PcSettings::save(const std::filesystem::path& path) const {
     stream << "audio.effects_volume=" << clean.effects_volume << '\n';
     stream << "mods.extended_visibility=" << clean.mod_extended_visibility << '\n';
     stream << "mods.independent_turret=" << clean.mod_independent_turret << '\n';
+    stream << "mods.mouse_turret_sensitivity=" << clean.mouse_turret_sensitivity << '\n';
     stream << "rom.last_path=" << clean.last_rom_path << '\n';
     for (std::size_t i = 0; i < clean.recent_rom_paths.size(); ++i) {
         stream << "rom.recent" << i + 1 << '=' << clean.recent_rom_paths[i] << '\n';
@@ -318,6 +320,8 @@ void PcSettings::validate() {
     master_volume = std::clamp(master_volume, 0.0F, 1.0F);
     music_volume = std::clamp(music_volume, 0.0F, 1.0F);
     effects_volume = std::clamp(effects_volume, 0.0F, 1.0F);
+    if (!std::isfinite(mouse_turret_sensitivity)) mouse_turret_sensitivity = 1.0F;
+    mouse_turret_sensitivity = std::clamp(mouse_turret_sensitivity, 0.25F, 4.0F);
     std::array<std::string, recent_rom_capacity> deduplicated{};
     std::size_t output = 0;
     for (const std::string& recent : recent_rom_paths) {

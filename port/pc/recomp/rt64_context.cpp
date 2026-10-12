@@ -622,6 +622,10 @@ private:
                                     &draft_settings_.mod_independent_turret);
                     ImGui::TextWrapped("Turreted vehicles retain hull movement on the left stick while the right stick rotates the turret. Primary fire and turret-aimed weapons use the turret; deployables retain their original behavior.");
                     ImGui::TextWrapped("Mouse: WASD drives, left click fires, and holding right click captures the mouse for turret aiming.");
+                    ImGui::BeginDisabled(!draft_settings_.mod_independent_turret);
+                    ImGui::SliderFloat("Mouse turret sensitivity", &draft_settings_.mouse_turret_sensitivity,
+                                       0.25F, 4.0F, "%.2fx");
+                    ImGui::EndDisabled();
                     ImGui::TextDisabled("Both gameplay mods are disabled by default.");
                     ImGui::EndTabItem();
                 }

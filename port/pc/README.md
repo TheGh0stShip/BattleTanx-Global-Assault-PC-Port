@@ -87,7 +87,8 @@ installation retains the original game rules and presentation.
 
 For mouse and keyboard, WASD drives, left click supplies primary fire, and
 holding right click captures relative mouse movement for turret aiming. Release
-right click to return the cursor. Open F10 settings before changing windows or
+right click to return the cursor. Mouse turret sensitivity is adjustable in the
+Mods tab. Open F10 settings before changing windows or
 leaving the game; mouse capture is disabled while the settings overlay is open.
 
 ## Renderer diagnostics
