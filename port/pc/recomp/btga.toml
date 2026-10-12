@@ -43,6 +43,25 @@ text = """
     { extern void btga_online_seed_step(uint8_t *rdram, recomp_context *ctx); btga_online_seed_step(rdram, ctx); }
 """
 
+# Online peers must advance gameplay from the same emulated frame clock. The
+# retail update derives D_8021945C and D_80219488 from osGetTime(), which is
+# intentionally different on every host and therefore cannot be used by
+# deterministic netplay. Preserve offline timing and replace only the online
+# result with one 30 Hz game tick per active update.
+[[patches.hook]]
+func = "func_80099FE8"
+before_vram = 0x80099FE8
+text = """
+    { extern void btga_online_clock_begin(uint8_t *rdram, recomp_context *ctx); btga_online_clock_begin(rdram, ctx); }
+"""
+
+[[patches.hook]]
+func = "func_80099FE8"
+before_vram = 0x8009A4C0
+text = """
+    { extern void btga_online_clock_end(uint8_t *rdram, recomp_context *ctx); btga_online_clock_end(rdram, ctx); }
+"""
+
 # func_800F11D0 truncates the frame step before decrementing shield-hit flash
 # life. At an exact host 60 Hz that value can stay below 1.0, producing a zero
 # decrement and an accumulating shell of translucent polygons around vehicles.

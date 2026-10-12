@@ -6,6 +6,10 @@
 #include "recomp.h"
 #include "btga/online_bootstrap.hpp"
 
+namespace btga::renderer {
+bool online_simulation_frame_barrier();
+}
+
 extern "C" void yield_self_1ms(std::uint8_t* rdram);
 extern "C" bool btga_extended_visibility_enabled();
 extern "C" bool btga_independent_turret_enabled();
@@ -19,6 +23,13 @@ namespace {
 std::int32_t effects_master_requested = 0x7FFF;
 std::int32_t music_master_requested = 0x7FFF;
 
+struct OnlineClockSample {
+    std::uint8_t* rdram = nullptr;
+    std::uint32_t frame = 0;
+};
+
+thread_local OnlineClockSample online_clock_sample;
+
 float read_guest_float(std::uint8_t* rdram, std::uint32_t address) {
     const gpr guest_address = static_cast<gpr>(static_cast<std::int32_t>(address));
     return std::bit_cast<float>(static_cast<std::uint32_t>(MEM_W(0, guest_address)));
@@ -26,6 +37,26 @@ float read_guest_float(std::uint8_t* rdram, std::uint32_t address) {
 
 extern "C" void btga_online_seed_step(std::uint8_t*, recomp_context* ctx) {
     if (const auto seed = btga::preboot_online_seed()) ctx->r4 = *seed;
+}
+
+extern "C" void btga_online_clock_begin(std::uint8_t* rdram, recomp_context*) {
+    if (!btga::preboot_online_seed()) return;
+    (void)btga::renderer::online_simulation_frame_barrier();
+    constexpr gpr frame_counter = static_cast<gpr>(static_cast<std::int32_t>(0x8021945CU));
+    online_clock_sample.rdram = rdram;
+    online_clock_sample.frame = static_cast<std::uint32_t>(MEM_W(0, frame_counter));
+}
+
+extern "C" void btga_online_clock_end(std::uint8_t* rdram, recomp_context*) {
+    if (!btga::preboot_online_seed() || online_clock_sample.rdram != rdram) return;
+    constexpr gpr frame_counter = static_cast<gpr>(static_cast<std::int32_t>(0x8021945CU));
+    constexpr gpr frame_step = static_cast<gpr>(static_cast<std::int32_t>(0x80219488U));
+    constexpr gpr time_mode = static_cast<gpr>(static_cast<std::int32_t>(0x802195CCU));
+    const std::uint32_t mode = static_cast<std::uint32_t>(MEM_W(0, time_mode));
+    const bool paused = mode == 5U || mode == 6U || mode == 7U;
+    MEM_W(0, frame_counter) = static_cast<std::int32_t>(
+        online_clock_sample.frame + (paused ? 0U : 1U));
+    MEM_W(0, frame_step) = static_cast<std::int32_t>(std::bit_cast<std::uint32_t>(1.0F));
 }
 
 void apply_audio_bus_volumes(std::uint8_t* rdram) {

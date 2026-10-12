@@ -41,6 +41,8 @@ namespace {
 constexpr std::uint8_t online_state_version = 1;
 constexpr std::uint8_t online_state_ack_version = 2;
 constexpr std::size_t online_state_packet_size = 17;
+constexpr std::uint8_t online_frame_event_version = 0xF1;
+constexpr std::size_t online_frame_event_size = 9;
 constexpr std::size_t random_seed_offset = 0x00114C80U;
 constexpr std::size_t frame_counter_offset = 0x0021945CU;
 constexpr std::uint32_t online_state_checksum_salt = UINT32_C(0x42544741);
@@ -608,6 +610,68 @@ public:
         online_wait_traced_ = false;
     }
 
+    bool online_simulation_frame_barrier() {
+        std::unique_lock lock(online_mutex_);
+        // The game clock may execute before the renderer's first update. Adopt
+        // the cold-boot handoff here so no peer can run an unpaired first tick.
+        adopt_preboot_session();
+        if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby) {
+            return true;
+        }
+        const std::uint16_t local = online_connection_->relay_slot();
+        if (local > 1) return false;
+        const std::uint16_t destination = local == 0 ? 1 : 0;
+        const std::uint32_t frame = online_simulation_frame_++;
+
+        std::array<std::uint8_t, BTGA_NET_HEADER_SIZE + online_frame_event_size> packet{};
+        BtgaNetHeader header{};
+        header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
+        header.message_type = BTGA_NET_MSG_EVENT;
+        header.flags = static_cast<std::uint8_t>(BTGA_NET_FLAG_RELIABLE |
+                                                 BTGA_NET_FLAG_RELAYED);
+        header.session_id = online_session_id_;
+        header.sequence = online_sequence_++;
+        header.payload_size = static_cast<std::uint16_t>(online_frame_event_size);
+        header.peer_id = local;
+        if (btga_net_encode_header(packet.data(), packet.size(), &header) !=
+            BTGA_NET_HEADER_SIZE) return false;
+        std::uint8_t* payload = packet.data() + BTGA_NET_HEADER_SIZE;
+        payload[0] = online_frame_event_version;
+        put_u32_be(payload + 1, frame);
+        put_u32_be(payload + 5, frame ^ online_state_checksum_salt);
+
+        const auto send_frame = [&]() {
+            return online_connection_->send_gameplay(destination, packet);
+        };
+        (void)send_frame();
+        pump_online_inputs_locked();
+        // Frame zero is a strict common starting line. Afterwards permit the
+        // same four-frame lead as the input jitter buffer, stalling only when
+        // this peer would run farther ahead. This preserves bounded lockstep
+        // without paying one full relay trip for every game update.
+        constexpr std::uint32_t simulation_lead = 4;
+        const auto peer_ready = [&]() {
+            if (!online_remote_simulation_frame_) return false;
+            if (frame == 0) return *online_remote_simulation_frame_ >= frame;
+            return frame <= *online_remote_simulation_frame_ + simulation_lead;
+        };
+        while (!peer_ready()) {
+            if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby) {
+                return false;
+            }
+            (void)send_frame();
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            lock.lock();
+            pump_online_inputs_locked();
+        }
+        if (online_trace_ && (frame % 60U) == 0U) {
+            online_trace_ << "SIM_FRAME frame=" << frame << '\n';
+            online_trace_.flush();
+        }
+        return true;
+    }
+
 private:
     enum class OnlineTaskKind { Browse, Host, Join, Heartbeat };
     struct OnlineTaskResult {
@@ -709,6 +773,8 @@ private:
         online_remote_tick_origin_ = 0;
         online_last_traced_tick_.reset();
         online_wait_traced_ = false;
+        online_simulation_frame_ = 0;
+        online_remote_simulation_frame_.reset();
         online_trace_.close();
         online_trace_.open(pc_data_path / "btga-net-sync.log",
                            std::ios::out | std::ios::trunc);
@@ -727,6 +793,22 @@ private:
             const std::size_t size = online_connection_->receive_gameplay(packet, source);
             if (size == 0) break;
             BtgaNetHeader header{};
+            if (btga_net_decode_header(&header, packet.data(), size) &&
+                header.protocol_version == BTGA_NET_PROTOCOL_VERSION &&
+                header.message_type == BTGA_NET_MSG_EVENT &&
+                header.session_id == online_session_id_ && header.peer_id == source &&
+                header.payload_size == online_frame_event_size &&
+                size == BTGA_NET_HEADER_SIZE + online_frame_event_size) {
+                const std::uint8_t* payload = packet.data() + BTGA_NET_HEADER_SIZE;
+                const std::uint32_t frame = get_u32_be(payload + 1);
+                if (payload[0] == online_frame_event_version &&
+                    get_u32_be(payload + 5) == (frame ^ online_state_checksum_salt) &&
+                    (!online_remote_simulation_frame_ ||
+                     frame > *online_remote_simulation_frame_)) {
+                    online_remote_simulation_frame_ = frame;
+                }
+                continue;
+            }
             if (btga_net_decode_header(&header, packet.data(), size) &&
                 header.protocol_version == BTGA_NET_PROTOCOL_VERSION &&
                 header.message_type == BTGA_NET_MSG_SNAPSHOT &&
@@ -831,16 +913,6 @@ private:
         const std::uint16_t remote = local == 0 ? 1 : 0;
         const std::uint32_t latest_local_tick = online_tick_ - 1;
         const std::uint32_t relative_tick = latest_local_tick - online_local_tick_origin_;
-        // This is also the simulation barrier.  Waiting only for the delayed
-        // input frame allowed one runtime to execute controller polls that the
-        // other runtime had not reached yet.  Both peers must acknowledge the
-        // current poll before either returns to N64 code, even while the first
-        // few delayed inputs are still neutral.
-        if (!online_inputs_.input_for(static_cast<std::uint8_t>(local), latest_local_tick) ||
-            !online_inputs_.input_for(static_cast<std::uint8_t>(remote),
-                                      online_remote_tick_origin_ + relative_tick)) {
-            return false;
-        }
         if (relative_tick < input_delay) {
             online_applied_inputs_.fill({});
             online_applied_inputs_valid_ = true;
@@ -997,6 +1069,8 @@ private:
         online_local_tick_origin_ = 0;
         online_remote_tick_origin_ = 0;
         online_tick_origins_valid_ = true;
+        online_simulation_frame_ = 0;
+        online_remote_simulation_frame_.reset();
         online_peer_seen_[preboot->host ? 1U : 0U] = true;
         online_status_ = "Cold-boot multiplayer synchronized.";
         online_trace_.open(pc_data_path / "btga-net-sync.log",
@@ -1455,6 +1529,8 @@ private:
     std::ofstream online_trace_;
     std::optional<std::uint32_t> online_last_traced_tick_;
     bool online_wait_traced_ = false;
+    std::uint32_t online_simulation_frame_ = 0;
+    std::optional<std::uint32_t> online_remote_simulation_frame_;
     std::array<bool, btga::InputSynchronizer::max_players> online_peer_seen_{};
 };
 }
@@ -1507,4 +1583,9 @@ void btga::renderer::online_submit_local_input(std::uint16_t buttons, float x, f
     if (Context* context = active_context.load(std::memory_order_acquire)) {
         context->online_submit_local_input(buttons, x, y);
     }
+}
+
+bool btga::renderer::online_simulation_frame_barrier() {
+    Context* context = active_context.load(std::memory_order_acquire);
+    return context == nullptr || context->online_simulation_frame_barrier();
 }
