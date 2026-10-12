@@ -502,7 +502,9 @@ private:
     template <typename Operation>
     void start_online_task(OnlineTaskKind kind, Operation operation) {
         if (online_task_.valid() || !ensure_online_master()) return;
-        online_status_ = "Contacting multiplayer service...";
+        if (kind != OnlineTaskKind::Heartbeat) {
+            online_status_ = "Contacting multiplayer service...";
+        }
         online_task_ = std::async(std::launch::async,
             [kind, operation = std::move(operation)]() mutable {
                 OnlineTaskResult result;
@@ -664,6 +666,18 @@ private:
         const bool busy = online_task_.valid();
         const bool connected = online_connection_ &&
             online_connection_->state() != btga::OnlineState::Offline;
+        if (connected) {
+            const auto peers = std::count(
+                online_peer_seen_.begin(), online_peer_seen_.end(), true);
+            ImGui::Text("Relay slot: %u | Remote peers observed: %u",
+                        static_cast<unsigned>(online_connection_->relay_slot()),
+                        static_cast<unsigned>(peers));
+            if (online_is_host_ && peers == 0) {
+                ImGui::TextWrapped(
+                    "Keep this overlay open until a remote peer is observed. "
+                    "Then close F10 on every device before navigating the game menus.");
+            }
+        }
         ImGui::BeginDisabled(busy || connected);
         if (ImGui::Button("Refresh public lobbies")) browse_online();
         ImGui::SameLine();

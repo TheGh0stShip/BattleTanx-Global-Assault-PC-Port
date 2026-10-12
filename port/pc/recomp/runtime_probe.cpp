@@ -343,6 +343,15 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
                 mouse_turret_aiming.store(false, std::memory_order_relaxed);
                 turret_stick_x[0].store(0.0F, std::memory_order_relaxed);
             }
+            // Keep the relay session alive and establish peer readiness while
+            // both players are still in the Online overlay. This frame is
+            // intentionally neutral: UI input must never leak into the game,
+            // but the host needs proof that every peer is bound before it
+            // starts driving the retail multiplayer menus.
+            if (online_slot >= 0 &&
+                !online_input_presampled.exchange(false, std::memory_order_acq_rel)) {
+                btga::renderer::online_submit_local_input(0, 0.0F, 0.0F);
+            }
             return true;
         }
         if (input_controller == 0) {
