@@ -114,6 +114,10 @@ packs take precedence where they replace the same texture. The persistent
 **Enable texture packs** switch disables or restores the entire set without
 moving files. Packs are never copied into the installation or uploaded.
 
+On Windows, a packaged `.rtz` can also be dragged onto `BattleTanxGA.exe`.
+The runtime copies it into the per-user pack folder (updating a pack with the
+same filename) and then starts the remembered ROM.
+
 RT64 streams DDS replacements asynchronously. Pack authors should include its
 low-mipmap cache to avoid visible pop-in; PNG is accepted for pack development
 but is not recommended for distribution.

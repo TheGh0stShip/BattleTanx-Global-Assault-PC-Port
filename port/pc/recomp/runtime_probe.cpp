@@ -20,6 +20,7 @@
 #include "librecomp/game.hpp"
 #include "btga/rom.hpp"
 #include "btga/pc_settings.hpp"
+#include "btga/texture_packs.hpp"
 #include "ultramodern/renderer_context.hpp"
 #include "ultramodern/ultramodern.hpp"
 #include "xxHash/xxh3.h"
@@ -604,6 +605,15 @@ int runtime_main(int argc, char** argv) {
     const std::filesystem::path settings_path = config_path / "settings.ini";
     pc_settings = btga::PcSettings::load(settings_path);
     if (!std::filesystem::exists(settings_path)) pc_settings.save(settings_path);
+
+    if (argc == 2 && btga::is_packaged_texture_pack(std::filesystem::path{argv[1]})) {
+        const std::filesystem::path installed =
+            btga::install_texture_pack(std::filesystem::path{argv[1]}, config_path / "texture-packs");
+        std::cout << "Installed texture pack: " << installed << '\n';
+        // Continue as a normal launch so drag-and-drop both installs the pack
+        // and starts the remembered game without requiring a second action.
+        argc = 1;
+    }
 
     std::optional<std::filesystem::path> picked_rom;
 #if defined(_WIN32) && defined(BTGA_HAS_RT64)

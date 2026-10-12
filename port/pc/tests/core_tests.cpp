@@ -8,7 +8,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <memory>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -175,6 +177,43 @@ int main() {
     CHECK(packs.size() == 2);
     CHECK(packs[0].display_name == "Armor" && packs[0].packaged);
     CHECK(packs[1].display_name == "City Remaster" && !packs[1].packaged);
+
+    const std::filesystem::path incoming = settings_dir / "Incoming.RTZ";
+    {
+        std::ofstream stream{incoming, std::ios::binary};
+        stream << "replacement-pack";
+    }
+    const std::filesystem::path installed = btga::install_texture_pack(incoming, texture_dir);
+    CHECK(installed == texture_dir / "Incoming.RTZ");
+    {
+        std::ifstream stream{installed, std::ios::binary};
+        std::string contents{std::istreambuf_iterator<char>{stream}, {}};
+        CHECK(contents == "replacement-pack");
+    }
+    {
+        std::ofstream stream{incoming, std::ios::binary};
+        stream << "replacement-pack-v2";
+    }
+    CHECK(btga::install_texture_pack(incoming, texture_dir) == installed);
+    {
+        std::ifstream stream{installed, std::ios::binary};
+        std::string contents{std::istreambuf_iterator<char>{stream}, {}};
+        CHECK(contents == "replacement-pack-v2");
+    }
+
+    const std::filesystem::path invalid_pack = settings_dir / "not-a-pack.txt";
+    {
+        std::ofstream stream{invalid_pack};
+        stream << "not a texture pack";
+    }
+    bool rejected_non_pack = false;
+    try {
+        (void)btga::install_texture_pack(invalid_pack, texture_dir);
+    }
+    catch (const std::runtime_error&) {
+        rejected_non_pack = true;
+    }
+    CHECK(rejected_non_pack);
     std::filesystem::remove_all(settings_dir);
 
 }
