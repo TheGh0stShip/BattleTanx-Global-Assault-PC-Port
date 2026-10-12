@@ -3,6 +3,7 @@ project(BattleTanxGA_PC LANGUAGES C CXX)
 
 option(BTGA_BUILD_RECOMP "Compile locally generated N64Recomp output" OFF)
 option(BTGA_BUILD_RUNTIME_PROBE "Link the translated game against N64ModernRuntime" OFF)
+option(BTGA_BUILD_RT64 "Build the optional RT64 renderer adapter" OFF)
 set(BTGA_N64_RUNTIME_ROOT "${CMAKE_SOURCE_DIR}/../../.deps/N64ModernRuntime" CACHE PATH
     "Path to an N64ModernRuntime checkout")
 
@@ -83,6 +84,24 @@ if(BTGA_BUILD_RECOMP)
         endif()
 
         add_subdirectory("${BTGA_N64_RUNTIME_ROOT}" "${CMAKE_BINARY_DIR}/N64ModernRuntime")
+        if(BTGA_BUILD_RT64)
+            set(BTGA_RT64_ROOT "${CMAKE_SOURCE_DIR}/../../.deps/rt64" CACHE PATH "Path to RT64")
+            set(RT64_STATIC ON CACHE BOOL "" FORCE)
+            set(RT64_SDL_WINDOW_VULKAN ON CACHE BOOL "" FORCE)
+            set(NFD_STUB ON CACHE BOOL "" FORCE)
+            add_subdirectory("${BTGA_RT64_ROOT}" "${CMAKE_BINARY_DIR}/rt64")
+            add_library(btga_rt64_renderer recomp/rt64_context.cpp)
+            target_include_directories(btga_rt64_renderer PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}/recomp"
+                "${BTGA_RT64_ROOT}/src"
+                "${BTGA_RT64_ROOT}/src/contrib"
+                "${BTGA_RT64_ROOT}/src/contrib/hlslpp/include"
+                "${BTGA_RT64_ROOT}/src/contrib/dxc/inc"
+                "${BTGA_N64_RUNTIME_ROOT}/ultramodern/include"
+            )
+            target_link_libraries(btga_rt64_renderer PRIVATE rt64 ultramodern)
+            target_compile_definitions(btga_rt64_renderer PRIVATE RT64_SDL_WINDOW_VULKAN HLSL_CPU)
+        endif()
         add_executable(btga_runtime_probe
             recomp/generated/n_aspMain.cpp
             recomp/register_overlays.cpp

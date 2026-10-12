@@ -84,3 +84,17 @@ rendering must not require GTK or D-Bus. The renderer itself has been verified
 to configure and build with `RT64_STATIC=ON`, `RT64_SDL_WINDOW_VULKAN=ON`, and
 `NFD_STUB=ON`. It is kept separate from the headless probe until the interactive
 SDL window and renderer adapter are enabled, so CI does not require a GPU.
+
+The optional adapter can be compile-checked with:
+
+```sh
+cmake -S port/pc -B build-pc-rt64 -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DBTGA_BUILD_RECOMP=ON \
+  -DBTGA_BUILD_RUNTIME_PROBE=ON -DBTGA_BUILD_RT64=ON
+cmake --build build-pc-rt64 --target btga_rt64_renderer
+```
+
+This builds the full RT64 shader and Vulkan pipeline and the BattleTanx bridge
+that connects RDRAM, RDP/VI registers, microcode selection, display lists, and
+screen presentation. The remaining interactive step is the SDL window/input
+loop and linking this adapter into the player-facing executable.
