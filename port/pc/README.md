@@ -283,8 +283,11 @@ The currently validated experimental play flow is:
 The in-overlay Host/Join controls remain useful for transport development, but
 joining an already-running emulation session does not yet provide the same
 state guarantee as cold boot. Rollback/resimulation, disconnect recovery,
-long campaign/victory validation, and the full-screen local-camera conversion
-are still under development. Until those land, this is an experimental test
+longer multi-mission campaign validation, and the full-screen local-camera
+conversion are still under development. A native two-process test has now
+completed one two-player campaign mission, shown victory on both peers, and
+advanced both into the next mission with matching RNG and game-frame
+checkpoints. Until the remaining work lands, this is an experimental test
 path, not a finished public multiplayer mode.
 
 Developers can reproduce the fully native PC transport test with CMake and a

@@ -37,8 +37,11 @@ occupies port 2.
 
 The October 2026 Windows validation kept paired seed, game-frame and input
 checkpoints equal through title/menu transitions without the previous freeze.
-Automatic rollback/resimulation, disconnect recovery, long campaign/victory
-validation, and one full-screen local camera per device remain open.
+A subsequent native two-process test completed a two-player campaign mission:
+both peers reached victory and advanced into the next mission together, with
+the same input epoch, RNG seed and game-frame reset on each process. Automatic
+rollback/resimulation, disconnect recovery, longer multi-mission validation,
+and one full-screen local camera per device remain open.
 Accordingly, this is an experimental synchronization path rather than a claim
 that Internet multiplayer is release-ready.
 
