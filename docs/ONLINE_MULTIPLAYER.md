@@ -16,15 +16,29 @@ explicit opt-in actions.
 - No UPnP, NAT-PMP, inbound forwarding, or peer address disclosure.
 - Native asynchronous lobby discovery, hosting, joining, relay binding,
   heartbeat, and disconnect controls in **F10 → Online**.
-- Experimental two-player runtime input synchronization: host is original N64
-  controller port 1, joining player is port 2, and input is exchanged at the
-  controller-poll boundary with a bounded matching-tick wait.
+- Experimental two-player deterministic runtime synchronization: host is
+  original N64 controller port 1 and joining player is port 2. A pre-boot
+  rendezvous agrees on the ROM/session seed before either machine enters N64
+  code. Inputs use a four-poll jitter buffer, while the game update clock uses
+  a strict common frame zero and a bounded four-update lead window.
 
-The current runtime path requires both processes to begin at the same retail
-menu state. Host input then drives the original multiplayer menus on both
-processes, while the joining player's controller occupies port 2. Automatic
-state reconciliation, a formal ready/loading barrier, loss recovery, snapshots,
-disconnect recovery, and one full-screen local camera per device remain open.
+The validated runtime path connects before cold boot:
+
+```text
+BattleTanxGA.exe --online-host BattleTanxGA.z64
+BattleTanxGA.exe --online-join LOBBY_ID BattleTanxGA.z64
+```
+
+The host writes the generated ID to `online-lobby.txt` in its data directory.
+Both peers remain outside N64 execution until the signed relay handshake and a
+Hello/Start/Ack/Go rendezvous complete. Host input then drives the original
+multiplayer menus on both processes, while the joining player's controller
+occupies port 2.
+
+The October 2026 Windows validation kept paired seed, game-frame and input
+checkpoints equal through title/menu transitions without the previous freeze.
+Automatic rollback/resimulation, disconnect recovery, long campaign/victory
+validation, and one full-screen local camera per device remain open.
 Accordingly, this is an experimental synchronization path rather than a claim
 that Internet multiplayer is release-ready.
 

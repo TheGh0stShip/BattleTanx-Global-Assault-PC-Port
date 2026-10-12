@@ -242,8 +242,10 @@ The native PC transport passes a public end-to-end test through the live
 master and Azure UDP relay: two independent PC client processes bind as host
 and client, then exchange and decode controller frames in both directions.
 The translated runtime now assigns the host to original controller port 1 and
-the joining player to port 2, transmits input at the controller-poll boundary,
-and briefly waits for the matching remote simulation tick. Networking starts
+the joining player to port 2. Its validated cold-boot path completes the relay
+handshake before N64 execution, shares the initial seed and input epoch, buffers
+four controller polls, and bounds either simulation to four game updates ahead
+of its peer. Networking starts
 offline and opens no socket or DNS request during normal startup. Only a user
 action in **F10 → Online** opts in and initializes the master/relay path;
 leaving that flow returns the client fully offline.
@@ -267,20 +269,23 @@ a public lobby, join a listed lobby, authenticate with the relay, maintain the
 host lease, disconnect, and open the dashboard. Merely opening the tab performs
 no network access.
 
-The current experimental play flow is:
+The currently validated experimental play flow is:
 
-1. Both players launch the same verified USA Rev 0 ROM and remain at the same
-   title/main-menu state.
-2. One player selects **Host public lobby**. The other selects **Refresh public
-   lobbies**, then **Join**.
-3. Close F10 on both machines. Host input on controller port 1 drives the same
+1. The host runs `BattleTanxGA.exe --online-host BattleTanxGA.z64` and shares
+   the ID written to `online-lobby.txt`.
+2. The other player runs
+   `BattleTanxGA.exe --online-join LOBBY_ID BattleTanxGA.z64`.
+3. Both windows remain outside N64 code until the synchronized cold-boot
+   handshake completes. Host input on controller port 1 then drives the same
    retail multiplayer menu flow on both processes; the joining player's input
    is controller port 2.
 
-Automatic state recovery when peers connect from different screens, packet-loss
-recovery, disconnect recovery, and the full-screen local-camera conversion are
-still under development. Until those land, this is an experimental test path,
-not a finished public multiplayer mode.
+The in-overlay Host/Join controls remain useful for transport development, but
+joining an already-running emulation session does not yet provide the same
+state guarantee as cold boot. Rollback/resimulation, disconnect recovery,
+long campaign/victory validation, and the full-screen local-camera conversion
+are still under development. Until those land, this is an experimental test
+path, not a finished public multiplayer mode.
 
 Developers can reproduce the fully native PC transport test with CMake and a
 C++20 compiler:
