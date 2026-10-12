@@ -246,12 +246,12 @@ Cross-platform multiplayer is developed independently in
 The portable GPLv3 protocol and relay client are pinned into this build but
 remain dormant: constructing or launching the game performs no network access.
 The native PC transport has been tested end to end through the public master
-and relay, but a future explicit **Online Multiplayer** action is still needed
-to expose that path in the game. There is not yet a user-visible online mode or
-playable synchronized Internet match. Live service status is available at
+and relay. **F10 → Online** now browses, hosts, and joins real public relay
+lobbies, but there is not yet a playable synchronized Internet match. Live
+service status is available at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/).
-The F10 overlay also includes an **Online** tab linking to the live dashboard
-and multiplayer documentation. Opening that tab itself remains network-inert.
+Opening the Online tab itself remains network-inert; Refresh, Host, and Join are
+the explicit opt-in actions.
 
 ## License
 

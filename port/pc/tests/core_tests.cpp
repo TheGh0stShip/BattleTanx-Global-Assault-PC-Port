@@ -2,6 +2,7 @@
 #include "btga/controller_pak.hpp"
 #include "btga/pc_settings.hpp"
 #include "btga/online_multiplayer.hpp"
+#include "btga/master_client.hpp"
 #include "btga/sha256.hpp"
 #include "btga/texture_packs.hpp"
 #include "btga/udp_online_io.hpp"
@@ -25,6 +26,50 @@
     } while (false)
 
 int main() {
+    class TestHttpClient final : public btga::HttpClient {
+    public:
+        btga::HttpResponse request(std::string_view method, std::string_view path,
+                                   std::string_view body,
+                                   std::string_view bearer) override {
+            last_method = method;
+            last_path = path;
+            last_body = body;
+            last_bearer = bearer;
+            CHECK_INDEX();
+            return responses[index++];
+        }
+        void CHECK_INDEX() {
+            if (index >= responses.size()) throw std::runtime_error("unexpected HTTP request");
+        }
+        std::vector<btga::HttpResponse> responses;
+        std::size_t index = 0;
+        std::string last_method;
+        std::string last_path;
+        std::string last_body;
+        std::string last_bearer;
+    } http;
+    http.responses = {
+        {200, R"({"lobbies":[{"id":"lobby-1","name":"Desert Duel","build":"pc-port-v1","platform":"pc","region":"eastus","state":"lobby","capabilities":2,"max_players":4,"current_players":2}]})"},
+        {201, R"({"lobby":{"id":"hosted-1","name":"My Lobby","build":"pc-port-v1","platform":"pc","region":"eastus","state":"lobby","capabilities":2,"max_players":4,"current_players":1},"host_secret":"host-secret","session_id":"1020304050607080","relay":{"address":"relay.example","udp_port":30420},"relay_token":"host.token"})"},
+        {200, R"({"session_id":"1020304050607080","relay":{"address":"relay.example","udp_port":30420},"join_token":"join.token"})"},
+        {200, R"({"id":"hosted-1","name":"My Lobby","build":"pc-port-v1","platform":"pc","region":"eastus","state":"playing","capabilities":2,"max_players":4,"current_players":2,"expires_at":1800000090,"relay_token":"refreshed.token"})"},
+        {204, ""}
+    };
+    btga::MasterClient master{http};
+    const auto lobbies = master.list_lobbies();
+    CHECK(lobbies.size() == 1 && lobbies[0].current_players == 2);
+    CHECK(http.last_method == "GET" && http.last_path == "/lobbies?protocol=1&build=pc-port-v1");
+    const auto hosted = master.host("My Lobby", 4);
+    CHECK(hosted.session_id == UINT64_C(0x1020304050607080));
+    CHECK(hosted.relay.address == "relay.example" && hosted.relay.port == 30420);
+    CHECK(http.last_method == "POST" && http.last_path == "/lobbies");
+    const auto joined = master.join("hosted-1");
+    CHECK(joined.session_id == hosted.session_id && joined.join_token == "join.token");
+    master.heartbeat("hosted-1", "host-secret", 2, "playing");
+    CHECK(http.last_method == "PUT" && http.last_bearer == "host-secret");
+    master.remove("hosted-1", "host-secret");
+    CHECK(http.last_method == "DELETE" && http.last_bearer == "host-secret");
+
     class TestOnlineIo final : public btga::OnlineIo {
     public:
         bool open() override { ++open_calls; return open_result; }

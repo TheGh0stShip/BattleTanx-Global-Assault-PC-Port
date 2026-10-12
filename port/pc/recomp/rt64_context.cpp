@@ -11,15 +11,22 @@
 #include <atomic>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <cstdint>
 #include <iostream>
+#include <future>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <vector>
 
 #include "btga/texture_packs.hpp"
+#include "btga/master_client.hpp"
+#include "btga/online_multiplayer.hpp"
+#include "btga/udp_online_io.hpp"
 #include "hle/rt64_application.h"
 #include "imgui/imgui.h"
 #include "render/rt64_texture_cache.h"
@@ -344,6 +351,11 @@ public:
     }
 
     ~Context() override {
+        if (online_task_.valid()) online_task_.wait();
+        if (online_master_ && !online_lobby_id_.empty() && !online_host_secret_.empty()) {
+            online_master_->remove(online_lobby_id_, online_host_secret_);
+        }
+        if (online_connection_) online_connection_->leave_online();
         Context* expected = this;
         active_context.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
         if (app_) app_->customOverlayCallback = {};
@@ -361,6 +373,7 @@ public:
     }
     void send_dummy_workload(std::uint32_t address) override { app_->processDisplayLists(app_->core.RDRAM, address, 0, true); }
     void update_screen() override {
+        update_online();
         app_->updateScreen();
         if (apply_render_requested_.exchange(false, std::memory_order_acq_rel)) {
             apply_render_settings();
@@ -408,6 +421,203 @@ public:
     }
 
 private:
+    enum class OnlineTaskKind { Browse, Host, Join, Heartbeat };
+    struct OnlineTaskResult {
+        OnlineTaskKind kind = OnlineTaskKind::Browse;
+        std::vector<btga::OnlineLobby> lobbies;
+        std::optional<btga::HostRegistration> host;
+        std::optional<btga::JoinRegistration> join;
+        std::string error;
+    };
+
+    bool ensure_online_master() {
+        try {
+            if (!online_http_) {
+                online_http_ = btga::make_platform_http_client(
+                    "https://btga.thegh0stship.com/api/v1");
+                online_master_ = std::make_unique<btga::MasterClient>(*online_http_);
+            }
+            return true;
+        } catch (const std::exception& error) {
+            online_status_ = error.what();
+            return false;
+        }
+    }
+
+    template <typename Operation>
+    void start_online_task(OnlineTaskKind kind, Operation operation) {
+        if (online_task_.valid() || !ensure_online_master()) return;
+        online_status_ = "Contacting multiplayer service...";
+        online_task_ = std::async(std::launch::async,
+            [kind, operation = std::move(operation)]() mutable {
+                OnlineTaskResult result;
+                result.kind = kind;
+                try { operation(result); }
+                catch (const std::exception& error) { result.error = error.what(); }
+                return result;
+            });
+    }
+
+    void browse_online() {
+        btga::MasterClient* master = online_master_.get();
+        if (!master && !ensure_online_master()) return;
+        master = online_master_.get();
+        start_online_task(OnlineTaskKind::Browse, [master](OnlineTaskResult& result) {
+            result.lobbies = master->list_lobbies();
+        });
+    }
+
+    void host_online() {
+        if (!ensure_online_master()) return;
+        const std::string name = online_lobby_name_.data();
+        const std::uint16_t max_players = static_cast<std::uint16_t>(online_max_players_);
+        btga::MasterClient* master = online_master_.get();
+        start_online_task(OnlineTaskKind::Host,
+            [master, name, max_players](OnlineTaskResult& result) {
+                result.host = master->host(name, max_players);
+            });
+    }
+
+    void join_online(std::string lobby_id) {
+        if (!ensure_online_master()) return;
+        btga::MasterClient* master = online_master_.get();
+        online_pending_lobby_ = lobby_id;
+        start_online_task(OnlineTaskKind::Join,
+            [master, lobby_id = std::move(lobby_id)](OnlineTaskResult& result) {
+                result.join = master->join(lobby_id);
+            });
+    }
+
+    bool begin_online_relay(bool host, std::uint64_t session,
+                            const btga::RelayEndpoint& relay,
+                            std::string_view token) {
+        online_udp_ = std::make_unique<btga::UdpOnlineIo>(relay.address, relay.port);
+        online_connection_ = std::make_unique<btga::OnlineMultiplayer>(*online_udp_);
+        const auto bytes = std::span{
+            reinterpret_cast<const std::uint8_t*>(token.data()), token.size()};
+        if (!online_connection_->enter_online() ||
+            !online_connection_->begin_relay(host, session, bytes)) {
+            online_connection_.reset();
+            online_udp_.reset();
+            online_status_ = "Could not begin relay binding.";
+            return false;
+        }
+        online_status_ = "Authenticating with the gameplay relay...";
+        return true;
+    }
+
+    void disconnect_online() {
+        if (online_connection_) online_connection_->leave_online();
+        online_connection_.reset();
+        online_udp_.reset();
+        if (online_master_ && !online_lobby_id_.empty() && !online_host_secret_.empty() &&
+            !online_task_.valid()) {
+            const std::string lobby = online_lobby_id_;
+            const std::string secret = online_host_secret_;
+            btga::MasterClient* master = online_master_.get();
+            start_online_task(OnlineTaskKind::Heartbeat,
+                [master, lobby, secret](OnlineTaskResult&) { master->remove(lobby, secret); });
+        }
+        online_lobby_id_.clear();
+        online_host_secret_.clear();
+        online_is_host_ = false;
+        online_status_ = "Offline. No multiplayer sockets are open.";
+    }
+
+    void update_online() {
+        if (online_task_.valid() &&
+            online_task_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            OnlineTaskResult result = online_task_.get();
+            if (!result.error.empty()) {
+                online_status_ = result.error;
+            } else if (result.kind == OnlineTaskKind::Browse) {
+                online_lobbies_ = std::move(result.lobbies);
+                online_status_ = online_lobbies_.empty()
+                    ? "No compatible public lobbies are currently open."
+                    : "Compatible public lobbies refreshed.";
+            } else if (result.host) {
+                online_lobby_id_ = result.host->lobby.id;
+                online_host_secret_ = result.host->host_secret;
+                online_is_host_ = true;
+                if (!begin_online_relay(true, result.host->session_id, result.host->relay,
+                                        result.host->relay_token)) {
+                    disconnect_online();
+                }
+            } else if (result.join) {
+                online_lobby_id_ = online_pending_lobby_;
+                online_is_host_ = false;
+                if (!begin_online_relay(false, result.join->session_id, result.join->relay,
+                                        result.join->join_token)) {
+                    online_lobby_id_.clear();
+                }
+            } else {
+                online_next_heartbeat_ = std::chrono::steady_clock::now() +
+                    std::chrono::seconds(30);
+            }
+        }
+
+        if (online_connection_ &&
+            online_connection_->state() == btga::OnlineState::RelayBinding &&
+            online_connection_->poll_relay_binding()) {
+            online_status_ = online_is_host_
+                ? "Lobby online. Waiting for players."
+                : "Joined relay lobby. Waiting for synchronized match start.";
+            online_next_heartbeat_ = std::chrono::steady_clock::now() +
+                std::chrono::seconds(30);
+        }
+        if (online_is_host_ && online_connection_ &&
+            online_connection_->state() == btga::OnlineState::Lobby &&
+            !online_task_.valid() && std::chrono::steady_clock::now() >= online_next_heartbeat_) {
+            btga::MasterClient* master = online_master_.get();
+            const std::string lobby = online_lobby_id_;
+            const std::string secret = online_host_secret_;
+            start_online_task(OnlineTaskKind::Heartbeat,
+                [master, lobby, secret](OnlineTaskResult&) {
+                    master->heartbeat(lobby, secret, 1, "lobby");
+                });
+        }
+    }
+
+    void draw_online_tab() {
+        ImGui::SeparatorText("Online Multiplayer");
+        ImGui::TextWrapped("Networking remains offline until Refresh, Host, or Join is selected. Relay play requires no port forwarding or UPnP and does not disclose your address to other players.");
+        ImGui::TextWrapped("Status: %s", online_status_.c_str());
+        const bool busy = online_task_.valid();
+        const bool connected = online_connection_ &&
+            online_connection_->state() != btga::OnlineState::Offline;
+        ImGui::BeginDisabled(busy || connected);
+        if (ImGui::Button("Refresh public lobbies")) browse_online();
+        ImGui::SameLine();
+        if (ImGui::Button("Open service dashboard")) {
+            open_external_url("https://btga.thegh0stship.com/");
+        }
+        ImGui::InputText("Lobby name", online_lobby_name_.data(), online_lobby_name_.size());
+        ImGui::SliderInt("Maximum players", &online_max_players_, 2, 4);
+        if (ImGui::Button("Host public lobby")) host_online();
+        ImGui::EndDisabled();
+        if (connected) {
+            ImGui::SameLine();
+            if (ImGui::Button("Disconnect")) disconnect_online();
+        }
+        ImGui::SeparatorText("Compatible lobbies");
+        if (online_lobbies_.empty()) ImGui::TextDisabled("Select Refresh public lobbies.");
+        for (const btga::OnlineLobby& lobby : online_lobbies_) {
+            ImGui::PushID(lobby.id.c_str());
+            ImGui::Text("%s — %u/%u — %s — %s", lobby.name.c_str(),
+                        static_cast<unsigned>(lobby.current_players),
+                        static_cast<unsigned>(lobby.max_players),
+                        lobby.region.c_str(), lobby.state.c_str());
+            ImGui::SameLine();
+            const bool joinable = !busy && !connected && lobby.state == "lobby" &&
+                                  lobby.current_players < lobby.max_players;
+            ImGui::BeginDisabled(!joinable);
+            if (ImGui::Button("Join")) join_online(lobby.id);
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        }
+        ImGui::TextDisabled("Lobby and relay binding are operational. Match-state synchronization is the next milestone.");
+    }
+
     static int window_mode_index(btga::WindowMode mode) {
         return static_cast<int>(mode);
     }
@@ -645,7 +855,7 @@ private:
                 }
                 if (ImGui::BeginTabItem("Accessibility")) {
                     slider_percent("Screen shake", draft_settings_.screen_shake_intensity);
-                    ImGui::TextDisabled("0% removes random camera displacement while preserving gameplay recoil and timing.");
+                    ImGui::TextDisabled("0%% removes random camera displacement while preserving gameplay recoil and timing.");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Controllers")) {
@@ -698,19 +908,7 @@ private:
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Online")) {
-                    ImGui::SeparatorText("Online Multiplayer");
-                    ImGui::TextWrapped("The native PC transport has passed a public host/client relay test. Player-facing lobby browsing, hosting, and synchronized gameplay are still under active development.");
-                    ImGui::Spacing();
-                    ImGui::TextWrapped("Networking remains fully offline until you explicitly choose an online action. The relay path requires no port forwarding, UPnP, or NAT configuration and does not disclose your address to other players.");
-                    ImGui::Spacing();
-                    if (ImGui::Button("Open live multiplayer dashboard")) {
-                        open_external_url("https://btga.thegh0stship.com/");
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Multiplayer documentation")) {
-                        open_external_url("https://github.com/TheGh0stShip/BattleTanx-Global-Assault-PC-Port/blob/main/docs/ONLINE_MULTIPLAYER.md");
-                    }
-                    ImGui::TextDisabled("The dashboard opens in your system browser. Viewing this tab makes no network request.");
+                    draw_online_tab();
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("System")) {
@@ -776,6 +974,20 @@ private:
     std::string pending_controller_binding_;
     std::mutex controller_capture_mutex_;
     std::atomic_bool apply_render_requested_{false};
+    std::unique_ptr<btga::HttpClient> online_http_;
+    std::unique_ptr<btga::MasterClient> online_master_;
+    std::unique_ptr<btga::UdpOnlineIo> online_udp_;
+    std::unique_ptr<btga::OnlineMultiplayer> online_connection_;
+    std::future<OnlineTaskResult> online_task_;
+    std::vector<btga::OnlineLobby> online_lobbies_;
+    std::array<char, 49> online_lobby_name_{"BattleTanx Lobby"};
+    int online_max_players_ = 4;
+    std::string online_status_ = "Offline. No multiplayer sockets are open.";
+    std::string online_lobby_id_;
+    std::string online_pending_lobby_;
+    std::string online_host_secret_;
+    bool online_is_host_ = false;
+    std::chrono::steady_clock::time_point online_next_heartbeat_{};
 };
 }
 

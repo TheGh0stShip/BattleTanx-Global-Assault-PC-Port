@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install portable harness dependencies
-        run: sudo apt-get update && sudo apt-get install -y libx11-dev ninja-build
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev libx11-dev ninja-build
       - name: Configure
         run: cmake -S port/pc -B build-pc -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build

@@ -238,13 +238,13 @@ complete-game compatibility runtime.
 
 The PC core compiles against a pinned GPL-3.0-only revision of the shared
 [BattleTanx: Global Assault networking project](https://github.com/TheGh0stShip/BattleTanx-Global-Assault-Networking).
-The native PC transport now passes a public end-to-end test through the live
+The native PC transport passes a public end-to-end test through the live
 master and Azure UDP relay: two independent PC client processes bind as host
 and client, then deliver and decode a protocol-valid gameplay datagram. This is
-transport validation, not a playable online mode yet. Networking
-starts offline and opens no socket or DNS request during normal startup. Only a
-future explicit **Online Multiplayer** action may opt in and initialize the
-master/relay path; leaving that flow returns the client fully offline.
+transport validation, not a synchronized playable match yet. Networking starts
+offline and opens no socket or DNS request during normal startup. Only a user
+action in **F10 → Online** opts in and initializes the master/relay path;
+leaving that flow returns the client fully offline.
 
 The included Windows/Linux UDP adapter is also inert until that explicit
 transition. It resolves and opens the configured relay endpoint on demand,
@@ -260,20 +260,21 @@ local split-screen.
 The public service dashboard at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/) shows active games,
 open lobbies, and players without exposing addresses or credentials.
-The F10 settings overlay has an **Online** tab with links to the live dashboard
-and multiplayer documentation. Merely opening the tab performs no network
-access; the dashboard opens only after its button is selected.
+The F10 settings overlay's **Online** tab can refresh compatible lobbies, host
+a public lobby, join a listed lobby, authenticate with the relay, maintain the
+host lease, disconnect, and open the dashboard. Merely opening the tab performs
+no network access.
 
-Developers can reproduce the live PC transport test on Linux with `curl`, `jq`,
-CMake, and a C++20 compiler:
+Developers can reproduce the fully native PC transport test with CMake and a
+C++20 compiler:
 
 ```sh
 ./port/pc/scripts/test-live-multiplayer.sh
 ```
 
-The script creates a temporary lobby, obtains separate signed host/client
-admission tokens, builds the native test client, binds both instances through
-the public relay, verifies client-to-host gameplay delivery, and removes the
-lobby even when the test fails. See
+The script builds a native client that creates and discovers a temporary lobby,
+obtains separate signed host/client admission tokens, binds both endpoints,
+verifies gameplay delivery, updates the public game state, and removes the
+lobby through an authenticated cleanup guard. See
 [online multiplayer testing](../../docs/ONLINE_MULTIPLAYER.md) for scope and
 security details.

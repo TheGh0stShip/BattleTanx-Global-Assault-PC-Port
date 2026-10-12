@@ -9,6 +9,12 @@ FetchContent_Declare(btga_networking
     GIT_TAG 0ff4d59f9f1efdfa33cd9bc5335f7cdb53bd923f)
 FetchContent_MakeAvailable(btga_networking)
 
+FetchContent_Declare(nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+    GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(nlohmann_json)
+
 option(BTGA_BUILD_RECOMP "Compile locally generated N64Recomp output" OFF)
 option(BTGA_BUILD_RUNTIME_PROBE "Link the translated game against N64ModernRuntime" OFF)
 option(BTGA_BUILD_RT64 "Build the optional RT64 renderer adapter" OFF)
@@ -23,6 +29,7 @@ add_library(btga_pc_core
     src/controller_pak.cpp
     src/game.cpp
     src/lzari.cpp
+    src/master_client.cpp
     src/online_multiplayer.cpp
     src/pc_settings.cpp
     src/rom.cpp
@@ -33,8 +40,14 @@ add_library(btga_pc_core
 )
 target_include_directories(btga_pc_core PUBLIC include)
 target_link_libraries(btga_pc_core PUBLIC BattleTanxGA::NetProtocol)
+target_link_libraries(btga_pc_core PRIVATE nlohmann_json::nlohmann_json)
 if(WIN32)
-    target_link_libraries(btga_pc_core PUBLIC ws2_32)
+    target_sources(btga_pc_core PRIVATE src/http_client_win32.cpp)
+    target_link_libraries(btga_pc_core PUBLIC ws2_32 PRIVATE winhttp)
+else()
+    find_package(OpenSSL REQUIRED)
+    target_sources(btga_pc_core PRIVATE src/http_client_openssl.cpp)
+    target_link_libraries(btga_pc_core PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 endif()
 target_compile_options(btga_pc_core PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
@@ -60,6 +73,9 @@ add_test(NAME btga_pc_core COMMAND btga_pc_tests)
 
 add_executable(btga_pc_live_multiplayer_test tests/live_multiplayer_test.cpp)
 target_link_libraries(btga_pc_live_multiplayer_test PRIVATE btga_pc_core)
+
+add_executable(btga_pc_native_online_e2e tests/native_online_e2e.cpp)
+target_link_libraries(btga_pc_native_online_e2e PRIVATE btga_pc_core)
 
 if(BTGA_BUILD_RECOMP)
     set(BTGA_RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/recomp/generated/functions")
@@ -131,7 +147,8 @@ if(BTGA_BUILD_RECOMP)
                 "${BTGA_RT64_ROOT}/src/contrib/dxc/inc"
                 "${BTGA_N64_RUNTIME_ROOT}/ultramodern/include"
             )
-            target_link_libraries(btga_rt64_renderer PRIVATE rt64 ultramodern SDL2::SDL2)
+            target_link_libraries(btga_rt64_renderer PRIVATE
+                btga_pc_core rt64 ultramodern SDL2::SDL2)
             if(WIN32)
                 target_link_libraries(btga_rt64_renderer PRIVATE shell32)
             endif()
