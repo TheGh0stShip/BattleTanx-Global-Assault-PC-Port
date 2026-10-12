@@ -41,10 +41,10 @@ cmake --build build-pc-runtime --target btga_runtime_probe
 ./build-pc-runtime/btga_runtime_probe
 ```
 
-The probe registers the translated entrypoint but does not start the game. Ten
-libultra internals not supplied by the modern runtime currently fail loudly if
-reached; replacing those guards and providing renderer, RSP, audio and input
-callbacks are explicit remaining boot work.
+Without `--boot`, the probe registers the translated entrypoint and exits. Ten
+libultra internals not supplied by the modern runtime fail loudly if reached;
+replacing those guards and providing production renderer, audio, and input
+backends remain explicit porting work.
 
 An experimental headless boot path validates the local ROM again, registers it
 with N64ModernRuntime, and runs until the first unsupported runtime boundary or
@@ -55,11 +55,23 @@ for five seconds:
 ```
 
 The current boot probe reaches five game-created N64 threads and a steady 60 Hz
-VI loop. It reports thread, VI, display-list, screen-update and audio-RSP counts
-at the end of the window. The generated `n_aspMain` implementation is already
-registered for audio tasks; the current startup trace has not submitted its
-first display list or audio task yet.
+VI loop. Over the default five-second window it processes 300 VI events, four
+display lists, and four audio RSP tasks before exiting normally. It reports
+thread, VI, display-list, screen-update, and RSP counts at the end of the run.
+The renderer, controller, and audio callbacks are deliberately headless test
+implementations at this stage.
+
+`runtime_patches.cpp` contains two required portability patches. The
+controller-read and scheduler-record busy-waits now cooperatively yield. Both
+original loops depend on R4300 interrupt preemption, which a cooperatively
+scheduled host thread cannot reproduce merely by translating instructions.
+
+The audio microcode configuration uses its real IMEM load address (`0x1080`)
+and declares the command-dispatch table's indirect handler destinations. The
+generated implementation is derived locally from the verified ROM and remains
+ignored, like all other ROM-derived output.
 
 The configuration currently establishes the complete code-generation boundary.
-Runtime integration still requires N64ModernRuntime/RT64 service glue and RSP
-microcode recompilation; generated code alone is not presented as playable.
+Runtime integration still requires a real renderer (RT64 or equivalent), audio
+output, input mapping, and a user-facing executable loop; this headless boot
+milestone is not presented as a playable build.

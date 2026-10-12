@@ -88,6 +88,7 @@ if(BTGA_BUILD_RECOMP)
             recomp/register_overlays.cpp
             recomp/runtime_probe.cpp
             recomp/runtime_compat.cpp
+            recomp/runtime_patches.cpp
         )
         target_include_directories(btga_runtime_probe PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -103,5 +104,10 @@ if(BTGA_BUILD_RECOMP)
             librecomp
             ultramodern
         )
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+            target_compile_options(btga_runtime_probe PRIVATE
+                $<$<CXX_COMPILER_ID:GNU,Clang>:-msse4.1>
+            )
+        endif()
     endif()
 endif()

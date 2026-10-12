@@ -21,6 +21,8 @@ void __osRepairPackId_recomp(uint8_t*, recomp_context*);
 void __osSiCreateAccessQueue_recomp(uint8_t*, recomp_context*);
 void __udivdi3_recomp(uint8_t*, recomp_context*);
 void __umoddi3_recomp(uint8_t*, recomp_context*);
+void func_80098B40(uint8_t*, recomp_context*);
+void func_800A1384(uint8_t*, recomp_context*);
 
 #ifdef __cplusplus
 }

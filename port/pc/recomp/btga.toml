@@ -22,4 +22,9 @@ stubs = [
 ignored = [
     "__udivdi3_recomp",
     "__umoddi3_recomp",
+    # The original relies on interrupt preemption inside a conditional busy-wait.
+    # The host runtime schedules N64 threads cooperatively, so replace it with a
+    # semantically equivalent yielding poll in runtime_patches.cpp.
+    "func_80098B40",
+    "func_800A1384",
 ]
