@@ -31,6 +31,7 @@ add_library(btga_pc_core
     src/input_sync.cpp
     src/lzari.cpp
     src/master_client.cpp
+    src/online_bootstrap.cpp
     src/online_multiplayer.cpp
     src/pc_settings.cpp
     src/rom.cpp

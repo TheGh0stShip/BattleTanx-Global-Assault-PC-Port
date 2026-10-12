@@ -30,6 +30,7 @@
 #include "btga/master_client.hpp"
 #include "btga/input_sync.hpp"
 #include "btga/online_multiplayer.hpp"
+#include "btga/online_bootstrap.hpp"
 #include "btga/udp_online_io.hpp"
 #include "hle/rt64_application.h"
 #include "imgui/imgui.h"
@@ -387,6 +388,32 @@ public:
             app_->customOverlayCallback = [this]() { draw_settings_overlay(); };
             active_context.store(this, std::memory_order_release);
             if (environment_flag_enabled("BTGA_SETTINGS_OPEN")) app_->setCustomOverlayVisible(true);
+        }
+        if (auto preboot = btga::take_preboot_online_session()) {
+            online_udp_ = std::move(preboot->udp);
+            online_connection_ = std::move(preboot->connection);
+            online_session_id_ = preboot->session_id;
+            online_is_host_ = preboot->host;
+            online_lobby_id_ = std::move(preboot->lobby_id);
+            online_host_secret_ = std::move(preboot->host_secret);
+            online_state_synchronized_ = true;
+            online_peer_seen_[preboot->host ? 1U : 0U] = true;
+            online_status_ = "Cold-boot multiplayer synchronized.";
+            online_trace_.open(pc_data_path / "btga-net-sync.log",
+                               std::ios::out | std::ios::trunc);
+            if (online_trace_) {
+                online_trace_ << "BTGA net synchronization trace v2\n"
+                              << "PREBOOT slot=" << online_connection_->relay_slot()
+                              << " seed=" << preboot->seed << '\n';
+                online_trace_.flush();
+            }
+#if defined(_WIN32)
+            SetWindowTextW(window.window, preboot->host
+                ? L"BattleTanx GA - HOST" : L"BattleTanx GA - CLIENT");
+#else
+            SDL_SetWindowTitle(window, preboot->host
+                ? "BattleTanx GA - HOST" : "BattleTanx GA - CLIENT");
+#endif
         }
     }
 
@@ -944,7 +971,8 @@ private:
         }
         if (online_is_host_ && online_connection_ &&
             online_connection_->state() == btga::OnlineState::Lobby &&
-            !online_task_.valid() && std::chrono::steady_clock::now() >= online_next_heartbeat_) {
+            !online_task_.valid() && std::chrono::steady_clock::now() >= online_next_heartbeat_ &&
+            ensure_online_master()) {
             btga::MasterClient* master = online_master_.get();
             const std::string lobby = online_lobby_id_;
             const std::string secret = online_host_secret_;

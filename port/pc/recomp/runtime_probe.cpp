@@ -20,6 +20,8 @@
 #include "librecomp/game.hpp"
 #include "btga/rom.hpp"
 #include "btga/pc_settings.hpp"
+#include "btga/master_client.hpp"
+#include "btga/online_bootstrap.hpp"
 #include "btga/texture_packs.hpp"
 #include "ultramodern/renderer_context.hpp"
 #include "ultramodern/ultramodern.hpp"
@@ -65,6 +67,7 @@ std::mutex audio_mutex;
 std::uint32_t audio_frequency = 44100;
 std::array<SDL_GameController*, max_controllers> gamepads{};
 bool interactive = false;
+bool preboot_online_requested = false;
 
 struct KeyboardScancodes {
     SDL_Scancode stick_up = SDL_SCANCODE_W;
@@ -586,6 +589,10 @@ void drive_headless_runtime(void*) {
                 btga::renderer::toggle_settings_overlay();
             }
         }
+        if (preboot_online_requested && !btga::preboot_online_ready()) {
+            btga::poll_preboot_online();
+            return;
+        }
         if (!boot_requested) {
             boot_requested = true;
             recomp::start_game(std::u8string{game_id}, {});
@@ -709,14 +716,17 @@ int runtime_main(int argc, char** argv) {
 #else
     const bool choose_requested = false;
 #endif
+    const bool online_host = argc == 3 && std::string_view{argv[1]} == "--online-host";
+    const bool online_join = argc == 4 && std::string_view{argv[1]} == "--online-join";
     bool boot = argc == 3 && std::string_view{argv[1]} == "--boot";
     bool timed_boot = argc == 4 && std::string_view{argv[1]} == "--boot-seconds";
-    bool play = picked_rom.has_value() ||
+    bool play = online_host || online_join || picked_rom.has_value() ||
                 (argc == 3 && std::string_view{argv[1]} == "--play") ||
                 (argc == 2 && std::string_view{argv[1]}.starts_with("-") == false);
     if (argc != 1 && !choose_requested && !boot && !timed_boot && !play) {
         std::cerr << "Usage: " << argv[0]
-                  << " [ROM | --choose-rom | --boot ROM | --boot-seconds SECONDS ROM | --play ROM]\n";
+                  << " [ROM | --choose-rom | --boot ROM | --boot-seconds SECONDS ROM | --play ROM"
+                     " | --online-host ROM | --online-join LOBBY_ID ROM]\n";
         return 2;
     }
 
@@ -737,6 +747,8 @@ int runtime_main(int argc, char** argv) {
     std::filesystem::path rom_path;
     if (boot || timed_boot || play) {
         if (picked_rom) rom_path = *picked_rom;
+        else if (online_host) rom_path = argv[2];
+        else if (online_join) rom_path = argv[3];
         else if (timed_boot) rom_path = argv[3];
         else if (argc == 2) rom_path = argv[1];
         else rom_path = argv[2];
@@ -771,6 +783,31 @@ int runtime_main(int argc, char** argv) {
         return 1;
     }
 
+    if (online_host || online_join) {
+        auto http = btga::make_platform_http_client(
+            "https://btga.thegh0stship.com/api/v1");
+        btga::MasterClient master{*http};
+        if (online_host) {
+            const btga::HostRegistration registration = master.host("Cold Boot Test", 2);
+            if (!btga::begin_preboot_online(true, registration.session_id,
+                                            registration.relay, registration.relay_token,
+                                            registration.lobby.id, registration.host_secret)) {
+                throw std::runtime_error{"Could not bind the pre-boot host relay"};
+            }
+            std::ofstream{config_path / "online-lobby.txt", std::ios::trunc}
+                << registration.lobby.id << '\n';
+            std::cout << "ONLINE_LOBBY_ID=" << registration.lobby.id << '\n';
+        } else {
+            const btga::JoinRegistration registration = master.join(argv[2]);
+            if (!btga::begin_preboot_online(false, registration.session_id,
+                                            registration.relay, registration.join_token,
+                                            argv[2])) {
+                throw std::runtime_error{"Could not bind the pre-boot client relay"};
+            }
+        }
+        preboot_online_requested = true;
+    }
+
 #ifdef BTGA_HAS_RT64
     if (play) {
         interactive = true;
@@ -789,6 +826,8 @@ int runtime_main(int argc, char** argv) {
                                   SDL_WINDOWPOS_CENTERED, pc_settings.window_width,
                                   pc_settings.window_height, window_flags);
         if (!window) { std::cerr << "Window creation failed: " << SDL_GetError() << '\n'; return 1; }
+        if (online_host) SDL_SetWindowTitle(window, "BattleTanx GA - HOST (waiting to cold boot)");
+        if (online_join) SDL_SetWindowTitle(window, "BattleTanx GA - CLIENT (waiting to cold boot)");
         // Populate ports before libultra's initial controller query. Hot-plug
         // changes are picked up by the same routine during normal polling.
         poll_input();

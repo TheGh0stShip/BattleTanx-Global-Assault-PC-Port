@@ -4,6 +4,7 @@
 #include <unordered_map>
 
 #include "recomp.h"
+#include "btga/online_bootstrap.hpp"
 
 extern "C" void yield_self_1ms(std::uint8_t* rdram);
 extern "C" bool btga_extended_visibility_enabled();
@@ -21,6 +22,10 @@ std::int32_t music_master_requested = 0x7FFF;
 float read_guest_float(std::uint8_t* rdram, std::uint32_t address) {
     const gpr guest_address = static_cast<gpr>(static_cast<std::int32_t>(address));
     return std::bit_cast<float>(static_cast<std::uint32_t>(MEM_W(0, guest_address)));
+}
+
+extern "C" void btga_online_seed_step(std::uint8_t*, recomp_context* ctx) {
+    if (const auto seed = btga::preboot_online_seed()) ctx->r4 = *seed;
 }
 
 void apply_audio_bus_volumes(std::uint8_t* rdram) {
