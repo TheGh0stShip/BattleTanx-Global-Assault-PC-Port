@@ -14,6 +14,10 @@
 #include "ultramodern/renderer_context.hpp"
 #include "ultramodern/ultramodern.hpp"
 #include "xxHash/xxh3.h"
+#ifdef BTGA_HAS_RT64
+#include <SDL.h>
+#include "rt64_context.hpp"
+#endif
 
 gpr get_entrypoint_address();
 void btga_register_overlays();
@@ -27,6 +31,11 @@ std::atomic_uint32_t display_lists{0};
 std::atomic_uint32_t screen_updates{0};
 std::atomic_uint32_t vi_events{0};
 std::atomic_uint32_t rsp_requests{0};
+#ifdef BTGA_HAS_RT64
+SDL_Window* window = nullptr;
+SDL_AudioDeviceID audio_device = 0;
+bool interactive = false;
+#endif
 
 class HeadlessRenderer final : public ultramodern::renderer::RendererContext {
 public:
@@ -71,14 +80,40 @@ void discard_audio(std::int16_t*, std::size_t) {}
 std::size_t audio_frames_remaining() { return 0; }
 void set_audio_frequency(std::uint32_t) {}
 
+#ifdef BTGA_HAS_RT64
+void queue_audio(std::int16_t* samples, std::size_t frames) {
+    if (audio_device != 0) SDL_QueueAudio(audio_device, samples, static_cast<std::uint32_t>(frames * 4));
+}
+std::size_t queued_audio_frames() { return audio_device == 0 ? 0 : SDL_GetQueuedAudioSize(audio_device) / 4; }
+void configure_audio(std::uint32_t frequency) {
+    if (audio_device != 0) SDL_CloseAudioDevice(audio_device);
+    SDL_AudioSpec wanted{};
+    wanted.freq = static_cast<int>(frequency);
+    wanted.format = AUDIO_S16SYS;
+    wanted.channels = 2;
+    wanted.samples = 1024;
+    audio_device = SDL_OpenAudioDevice(nullptr, 0, &wanted, nullptr, 0);
+    if (audio_device != 0) SDL_PauseAudioDevice(audio_device, 0);
+}
+#endif
+
 void poll_input() {}
 bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
     if (controller != 0) {
         return false;
     }
-    *buttons = 0;
-    *x = 0.0F;
-    *y = 0.0F;
+#ifdef BTGA_HAS_RT64
+    if (interactive) {
+        const auto* keys = SDL_GetKeyboardState(nullptr);
+        *buttons = (keys[SDL_SCANCODE_X] ? 0x8000 : 0) | (keys[SDL_SCANCODE_Z] ? 0x4000 : 0) |
+                   (keys[SDL_SCANCODE_RETURN] ? 0x1000 : 0) | (keys[SDL_SCANCODE_Q] ? 0x20 : 0) |
+                   (keys[SDL_SCANCODE_E] ? 0x10 : 0);
+        *x = float(keys[SDL_SCANCODE_D] - keys[SDL_SCANCODE_A]);
+        *y = float(keys[SDL_SCANCODE_W] - keys[SDL_SCANCODE_S]);
+        return true;
+    }
+#endif
+    *buttons = 0; *x = 0.0F; *y = 0.0F;
     return true;
 }
 void set_rumble(int, bool) {}
@@ -106,6 +141,19 @@ bool boot_requested = false;
 std::chrono::steady_clock::time_point boot_started;
 
 void drive_headless_runtime(void*) {
+#ifdef BTGA_HAS_RT64
+    if (interactive) {
+        SDL_Event event{};
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) std::_Exit(EXIT_SUCCESS);
+        }
+        if (!boot_requested) {
+            boot_requested = true;
+            recomp::start_game(std::u8string{game_id}, {});
+        }
+        return;
+    }
+#endif
     if (!boot_requested) {
         boot_requested = true;
         boot_started = std::chrono::steady_clock::now();
@@ -141,14 +189,15 @@ recomp::GameEntry make_game(std::uint64_t rom_hash) {
 
 int main(int argc, char** argv) {
     bool boot = argc == 3 && std::string_view{argv[1]} == "--boot";
-    if (argc != 1 && !boot) {
-        std::cerr << "Usage: " << argv[0] << " [--boot /path/to/battletanx_ga.z64]\n";
+    bool play = argc == 3 && std::string_view{argv[1]} == "--play";
+    if (argc != 1 && !boot && !play) {
+        std::cerr << "Usage: " << argv[0] << " [--boot|--play /path/to/battletanx_ga.z64]\n";
         return 2;
     }
 
     std::uint64_t rom_hash = 0;
     std::filesystem::path rom_path;
-    if (boot) {
+    if (boot || play) {
         rom_path = argv[2];
         const btga::Rom rom = btga::Rom::load_verified(rom_path);
         rom_hash = XXH3_64bits(rom.bytes().data(), rom.bytes().size());
@@ -165,7 +214,7 @@ int main(int argc, char** argv) {
     std::cout << "Registered all translated game code at entrypoint 0x"
               << std::hex << static_cast<std::uint32_t>(game.entrypoint_address) << '\n';
 
-    if (!boot) {
+    if (!boot && !play) {
         return 0;
     }
 
@@ -178,17 +227,53 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+#ifdef BTGA_HAS_RT64
+    if (play) {
+        interactive = true;
+        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
+            std::cerr << "SDL initialization failed: " << SDL_GetError() << '\n';
+            return 1;
+        }
+        window = SDL_CreateWindow("BattleTanx: Global Assault", SDL_WINDOWPOS_CENTERED,
+                                  SDL_WINDOWPOS_CENTERED, 960, 720,
+                                  SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+        if (!window) { std::cerr << "Window creation failed: " << SDL_GetError() << '\n'; return 1; }
+    }
+#else
+    if (play) { std::cerr << "This build does not include RT64\n"; return 1; }
+#endif
+
     recomp::Configuration config{
         .argc = 0,
         .argv = nullptr,
         .project_version = {0, 1, 0},
-        .window_handle = headless_window_handle(),
+        .window_handle = play
+#ifdef BTGA_HAS_RT64
+            ? window
+#endif
+            : headless_window_handle(),
         .rsp_callbacks = {.get_rsp_microcode = select_rsp_microcode},
-        .renderer_callbacks = {.create_render_context = create_headless_renderer},
+        .renderer_callbacks = {.create_render_context =
+#ifdef BTGA_HAS_RT64
+            play ? btga::renderer::create_rt64_context :
+#endif
+            create_headless_renderer},
         .audio_callbacks = {
-            .queue_samples = discard_audio,
-            .get_frames_remaining = audio_frames_remaining,
-            .set_frequency = set_audio_frequency,
+            .queue_samples = play
+#ifdef BTGA_HAS_RT64
+                ? queue_audio
+#endif
+                : discard_audio,
+            .get_frames_remaining = play
+#ifdef BTGA_HAS_RT64
+                ? queued_audio_frames
+#endif
+                : audio_frames_remaining,
+            .set_frequency = play
+#ifdef BTGA_HAS_RT64
+                ? configure_audio
+#endif
+                : set_audio_frequency,
         },
         .input_callbacks = {
             .poll_input = poll_input,

@@ -97,4 +97,14 @@ cmake --build build-pc-rt64 --target btga_rt64_renderer
 This builds the full RT64 shader and Vulkan pipeline and the BattleTanx bridge
 that connects RDRAM, RDP/VI registers, microcode selection, display lists, and
 screen presentation. The remaining interactive step is the SDL window/input
-loop and linking this adapter into the player-facing executable.
+loop. With `BTGA_BUILD_RT64=ON`, that loop is included in
+`btga_runtime_probe` and can be launched with:
+
+```sh
+./build-pc-rt64/btga_runtime_probe --play /path/to/battletanx_ga.z64
+```
+
+The interactive mode creates a resizable Vulkan window, sends the game's
+display lists through RT64, queues stereo audio through SDL, and supplies a
+basic keyboard mapping: WASD for the analog stick, X/Z for A/B, Enter for
+Start, and Q/E for L/R. The bounded `--boot` mode remains headless for CI.

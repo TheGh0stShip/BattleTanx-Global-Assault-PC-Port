@@ -86,6 +86,7 @@ if(BTGA_BUILD_RECOMP)
         add_subdirectory("${BTGA_N64_RUNTIME_ROOT}" "${CMAKE_BINARY_DIR}/N64ModernRuntime")
         if(BTGA_BUILD_RT64)
             set(BTGA_RT64_ROOT "${CMAKE_SOURCE_DIR}/../../.deps/rt64" CACHE PATH "Path to RT64")
+            find_package(SDL2 CONFIG REQUIRED)
             set(RT64_STATIC ON CACHE BOOL "" FORCE)
             set(RT64_SDL_WINDOW_VULKAN ON CACHE BOOL "" FORCE)
             set(NFD_STUB ON CACHE BOOL "" FORCE)
@@ -123,6 +124,10 @@ if(BTGA_BUILD_RECOMP)
             librecomp
             ultramodern
         )
+        if(BTGA_BUILD_RT64)
+            target_link_libraries(btga_runtime_probe PRIVATE btga_rt64_renderer SDL2::SDL2)
+            target_compile_definitions(btga_runtime_probe PRIVATE BTGA_HAS_RT64)
+        endif()
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
             target_compile_options(btga_runtime_probe PRIVATE
                 $<$<CXX_COMPILER_ID:GNU,Clang>:-msse4.1>
