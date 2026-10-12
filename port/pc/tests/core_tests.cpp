@@ -87,6 +87,17 @@ int main() {
     const std::filesystem::path settings_dir =
         std::filesystem::temp_directory_path() / ("btga-settings-test-" + std::to_string(unique));
     const std::filesystem::path settings_path = settings_dir / "settings.ini";
+
+    const std::filesystem::path portable_dir = settings_dir / "portable-install";
+    std::filesystem::create_directories(portable_dir);
+    {
+        std::ofstream marker{portable_dir / "portable.txt"};
+        marker << "BattleTanxGA portable mode\n";
+    }
+    btga::configure_pc_user_data_directory(portable_dir / "BattleTanxGA.exe");
+    CHECK(btga::pc_user_data_directory() == portable_dir / "userdata");
+    btga::configure_pc_user_data_directory({});
+
     btga::PcSettings settings = btga::PcSettings::defaults();
     CHECK(settings.players[0].controller_slot == 0);
     CHECK(settings.players[3].controller_slot == 3);

@@ -43,6 +43,13 @@ open the per-user save/settings directory, or open the project's support page.
 ROM changes intentionally take effect after restarting so no live N64 state is
 carried between different cartridge images.
 
+For a self-contained USB or removable-drive installation, create an empty
+file named `portable.txt` beside `BattleTanxGA.exe` before launching it. The
+runtime then stores settings, Controller Pak images, crash logs, and texture
+packs under a local `userdata` folder beside the executable instead of using
+`%LOCALAPPDATA%`. Removing the marker restores the normal per-user location.
+Advanced launchers can set `BTGA_DATA_DIR` to choose an explicit data folder.
+
 ## Controls
 
 - WASD: analog stick

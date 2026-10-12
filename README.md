@@ -85,6 +85,10 @@ Controls, optional gameplay mods, RT64 texture packs, Linux/headless commands,
 save locations, renderer diagnostics, and packaging contents are documented in
 the [PC runtime guide](port/pc/README.md).
 
+Portable installations are supported by placing an empty `portable.txt` next
+to `BattleTanxGA.exe`; all writable data then stays in a neighboring
+`userdata` directory.
+
 ## Supported ROM
 
 - Title: `BATTLETANXGA`

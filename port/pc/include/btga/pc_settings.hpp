@@ -102,6 +102,7 @@ struct PcSettings {
 };
 
 std::filesystem::path pc_user_data_directory();
+void configure_pc_user_data_directory(const std::filesystem::path& executable_path);
 const char* window_mode_name(WindowMode mode);
 const char* aspect_ratio_mode_name(AspectRatioMode mode);
 

@@ -14,6 +14,8 @@
 namespace btga {
 namespace {
 
+std::optional<std::filesystem::path> user_data_directory_override;
+
 std::optional<std::string> environment_value(const char* name) {
 #if defined(_WIN32)
     char* value = nullptr;
@@ -385,6 +387,10 @@ void PcSettings::validate() {
 }
 
 std::filesystem::path pc_user_data_directory() {
+    if (const auto explicit_directory = environment_value("BTGA_DATA_DIR")) {
+        return std::filesystem::path{*explicit_directory};
+    }
+    if (user_data_directory_override) return *user_data_directory_override;
 #if defined(_WIN32)
     if (const auto local_app_data = environment_value("LOCALAPPDATA")) {
         return std::filesystem::path{*local_app_data} / "BattleTanxGA";
@@ -401,6 +407,19 @@ std::filesystem::path pc_user_data_directory() {
     }
 #endif
     return std::filesystem::temp_directory_path() / "BattleTanxGA";
+}
+
+void configure_pc_user_data_directory(const std::filesystem::path& executable_path) {
+    user_data_directory_override.reset();
+    if (executable_path.empty()) return;
+
+    std::error_code error;
+    std::filesystem::path executable = std::filesystem::absolute(executable_path, error);
+    if (error) executable = executable_path;
+    const std::filesystem::path directory = executable.parent_path();
+    if (!directory.empty() && std::filesystem::is_regular_file(directory / "portable.txt", error)) {
+        user_data_directory_override = directory / "userdata";
+    }
 }
 
 const char* window_mode_name(WindowMode mode) {

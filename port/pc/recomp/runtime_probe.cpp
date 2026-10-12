@@ -600,6 +600,9 @@ void patch_screen_edge_scissors(std::uint8_t*, recomp_context*) {
 }
 
 int runtime_main(int argc, char** argv) {
+    if (argc > 0 && argv != nullptr && argv[0] != nullptr) {
+        btga::configure_pc_user_data_directory(std::filesystem::path{argv[0]});
+    }
     const std::filesystem::path config_path = btga::pc_user_data_directory();
     std::filesystem::create_directories(config_path);
     const std::filesystem::path settings_path = config_path / "settings.ini";
