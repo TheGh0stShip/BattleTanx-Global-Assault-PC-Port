@@ -69,6 +69,8 @@ The current verified Windows package is available from the
 | N64 L / R | **Q / E** | Left / right shoulder |
 | D-pad | Arrow keys | D-pad |
 | C buttons | **I J K L** | Right stick |
+| Aim down turret / capture mouse | **Hold right mouse button** | Move right stick |
+| Fire while aiming | **Left mouse button** | A button |
 | Open or close PC settings | **F10** | — |
 
 The settings overlay can also be closed with its **Close** button or window
@@ -84,6 +86,37 @@ the same time.
 See the [complete controls guide](docs/CONTROLS.md) for menu operation,
 controller defaults, multiplayer assignments, rebinding, and the distinction
 between the F10 settings overlay and the optional F1 renderer inspector.
+
+## Optional gameplay mods
+
+Open **F10 → Mods** to enable these features. Both are **off by default**, so
+the game retains its original Nintendo 64 behavior until you opt in.
+
+### No Fog / Increased Draw Distance
+
+Enable **Extended visibility** to remove the game's distance fog and raise its
+world-culling and projection distance. This exposes substantially more of each
+level at once. Some distant geometry may become visible that the original game
+never expected to draw simultaneously.
+
+### Aim-Down-Turret / Independent Turret Aiming
+
+Enable **Independent dual-stick turret aiming** to control a rotating turret
+separately from the vehicle hull:
+
+- **Mouse and keyboard:** hold **right mouse button** to enter aim-down-turret
+  mode, move the mouse to rotate the turret, and press **left mouse button** to
+  fire. Release right mouse to leave aim mode.
+- **Controller:** drive with the left stick and aim the turret with the right
+  stick.
+- While aim mode is held, W/S move along the hull heading and A/D turn the
+  hull. A turret aimed east does not force a north-facing hull to turn east.
+- Mines, gun buddies, bouncing betties, and other deployables preserve their
+  original behavior rather than following turret aim.
+
+Sensitivity and inversion options are available under **F10 → Controllers**.
+See the [complete controls guide](docs/CONTROLS.md#independent-turret-aiming-mod)
+for full details.
 
 ## Build and run the PC port
 

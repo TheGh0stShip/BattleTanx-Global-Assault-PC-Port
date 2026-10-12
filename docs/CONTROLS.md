@@ -59,6 +59,9 @@ The overlay supports mouse, keyboard, and controller navigation. Its
 This optional mod is disabled by default and only affects player-controlled
 vehicles with rotating turrets.
 
+Enable it from **F10 → Mods → Independent dual-stick turret aiming**. This is
+also described as **Aim-Down-Turret** mode in the player-facing documentation.
+
 ### Mouse and keyboard
 
 - Hold **right mouse button** to enter turret-aim mode and capture relative

@@ -96,11 +96,13 @@ widescreen milestone is considered complete.
 The **Mods** tab contains two opt-in changes. Both default to off, so a new
 installation retains the original game rules and presentation.
 
-- **Extended visibility** raises the game's projection and world-culling range
+- **No Fog / Increased Draw Distance** (**Extended visibility**) raises the
+  game's projection and world-culling range
   to its safe signed limit and omits the frame's fog geometry mode, fog colour,
   and fog-position commands. Levels may reveal distant geometry that retail
   never intended to draw simultaneously.
-- **Independent dual-stick turret aiming** applies only to player-controlled
+- **Aim-Down-Turret / Independent Turret Aiming** (**Independent dual-stick
+  turret aiming**) applies only to player-controlled
   vehicles whose tank definition has a rotating turret. The left stick keeps
   the original hull movement, while the right stick rotates the turret. W/S
   move along the hull's heading and A/D turn the hull; turret or camera heading
