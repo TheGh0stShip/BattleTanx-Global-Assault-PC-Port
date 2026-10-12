@@ -81,6 +81,13 @@ Create a ROM-free distributable ZIP with:
 ./port/pc/package-windows.ps1 -BuildDirectory build-pc-windows -Version 0.2.1
 ```
 
+Add `-Portable` to create a separately named USB-ready archive containing the
+portable-mode marker:
+
+```powershell
+./port/pc/package-windows.ps1 -BuildDirectory build-pc-windows -Version 0.2.1 -Portable
+```
+
 Controls, optional gameplay mods, RT64 texture packs, Linux/headless commands,
 save locations, renderer diagnostics, and packaging contents are documented in
 the [PC runtime guide](port/pc/README.md).

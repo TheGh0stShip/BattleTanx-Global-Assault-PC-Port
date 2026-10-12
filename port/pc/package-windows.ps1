@@ -2,7 +2,8 @@
 param(
     [string] $BuildDirectory = "build-pc-windows",
     [string] $OutputDirectory = "dist",
-    [string] $Version = "dev"
+    [string] $Version = "dev",
+    [switch] $Portable
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,7 +19,7 @@ $output = if ([IO.Path]::IsPathRooted($OutputDirectory)) {
     Join-Path $root $OutputDirectory
 }
 
-$packageName = "BattleTanxGA-$Version-windows-x64"
+$packageName = "BattleTanxGA-$Version-windows-x64" + $(if ($Portable) { "-portable" } else { "" })
 $staging = Join-Path $output $packageName
 $archive = Join-Path $output "$packageName.zip"
 $required = @(
@@ -50,6 +51,11 @@ Copy-Item (Join-Path $build "dxil.dll") $staging
 Copy-Item (Join-Path $root "port\pc\launch-windows.cmd") (Join-Path $staging "Launch BattleTanx GA.cmd")
 Copy-Item (Join-Path $root "COPYING") (Join-Path $staging "COPYING.txt")
 Copy-Item (Join-Path $root "port\pc\README.md") (Join-Path $staging "README.md")
+if ($Portable) {
+    # The runtime treats this marker as an opt-in request to keep every
+    # writable file beside the executable under userdata\.
+    Set-Content -LiteralPath (Join-Path $staging "portable.txt") -Value "BattleTanxGA portable mode" -NoNewline
+}
 
 if (Test-Path -LiteralPath $archive) {
     Remove-Item -LiteralPath $archive -Force

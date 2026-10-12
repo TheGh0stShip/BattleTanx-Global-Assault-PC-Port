@@ -173,6 +173,10 @@ Create a redistributable, ROM-free ZIP after building:
 ./port/pc/package-windows.ps1 -BuildDirectory build-pc-windows -Version 0.2.1
 ```
 
+Pass `-Portable` to produce a separately named USB-ready ZIP with
+`portable.txt` already included. Its settings, Controller Pak, logs, and
+texture packs will remain inside `userdata` after extraction.
+
 The archive contains the executable, launcher, required DLLs, license, and PC runtime
 instructions. It deliberately contains no ROM, extracted assets, generated
 translation output, save data, or developer diagnostics.
