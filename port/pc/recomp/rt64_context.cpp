@@ -12,6 +12,7 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <cstdint>
 #include <iostream>
@@ -29,6 +30,7 @@
 #include "btga/master_client.hpp"
 #include "btga/input_sync.hpp"
 #include "btga/online_multiplayer.hpp"
+#include "btga/state_sync.hpp"
 #include "btga/udp_online_io.hpp"
 #include "hle/rt64_application.h"
 #include "imgui/imgui.h"
@@ -36,6 +38,33 @@
 #include "ultramodern/ultramodern.hpp"
 
 namespace {
+constexpr std::size_t online_snapshot_offset = 0x00100000U;
+constexpr std::size_t online_snapshot_size = 0x00300000U;
+constexpr std::uint8_t online_snapshot_ack_version = 2;
+
+void put_u32_be(std::uint8_t* output, std::uint32_t value) {
+    output[0] = static_cast<std::uint8_t>(value >> 24);
+    output[1] = static_cast<std::uint8_t>(value >> 16);
+    output[2] = static_cast<std::uint8_t>(value >> 8);
+    output[3] = static_cast<std::uint8_t>(value);
+}
+
+void put_u64_be(std::uint8_t* output, std::uint64_t value) {
+    put_u32_be(output, static_cast<std::uint32_t>(value >> 32));
+    put_u32_be(output + 4, static_cast<std::uint32_t>(value));
+}
+
+std::uint32_t get_u32_be(const std::uint8_t* input) {
+    return (static_cast<std::uint32_t>(input[0]) << 24) |
+           (static_cast<std::uint32_t>(input[1]) << 16) |
+           (static_cast<std::uint32_t>(input[2]) << 8) | input[3];
+}
+
+std::uint64_t get_u64_be(const std::uint8_t* input) {
+    return (static_cast<std::uint64_t>(get_u32_be(input)) << 32) |
+           get_u32_be(input + 4);
+}
+
 btga::PcSettings pc_settings = btga::PcSettings::defaults();
 std::filesystem::path pc_data_path;
 std::mutex settings_update_mutex;
@@ -452,7 +481,7 @@ public:
         // authority and binds its next tick to the latest client tick it has
         // actually observed; that exact pair is repeated in every host packet.
         pump_online_inputs_locked();
-        if (local == 0 && !online_tick_origins_valid_) {
+        if (local == 0 && online_state_synchronized_ && !online_tick_origins_valid_) {
             const auto remote_tick = online_inputs_.latest_tick_for(1);
             if (remote_tick) {
                 online_local_tick_origin_ = online_tick_;
@@ -494,6 +523,37 @@ public:
             (void)sent;
         }
         pump_online_inputs_locked();
+        if (!online_state_synchronized_) {
+            const auto resend = std::span<const std::uint8_t>{packet.data(), size};
+            while (!online_state_synchronized_) {
+                if (!online_connection_ ||
+                    online_connection_->state() != btga::OnlineState::Lobby) return;
+                if (local == 0 && online_peer_seen_[1]) {
+                    send_host_snapshot_fragments_locked(destination);
+                } else if (size != 0) {
+                    // Until the first snapshot fragment arrives, the client's
+                    // readiness input is the host's only proof that it reached
+                    // this controller-read barrier. Repeat it across UDP loss.
+                    (void)online_connection_->send_gameplay(destination, resend);
+                }
+                lock.unlock();
+                // Keep snapshot traffic below the public relay's bounded
+                // egress budget instead of turning synchronization into a UDP
+                // burst. One near-MTU fragment per 10 ms is about 110 KiB/s.
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                lock.lock();
+                pump_online_inputs_locked();
+            }
+            // Readiness traffic belongs to the pre-snapshot world. Both peers
+            // begin a fresh input epoch on their next controller read.
+            online_inputs_ = {};
+            online_tick_ = 0;
+            online_tick_origins_valid_ = false;
+            online_applied_inputs_valid_ = false;
+            online_local_tick_origin_ = 0;
+            online_remote_tick_origin_ = 0;
+            return;
+        }
         if (!online_tick_origins_valid_) return;
 
         const auto wait_started = std::chrono::steady_clock::now();
@@ -622,6 +682,13 @@ private:
         online_remote_tick_origin_ = 0;
         online_last_traced_tick_.reset();
         online_wait_traced_ = false;
+        online_state_synchronized_ = false;
+        online_snapshot_transfer_id_ = 0;
+        online_restored_snapshot_checksum_ = 0;
+        online_restored_snapshot_valid_ = false;
+        online_snapshot_next_fragment_ = 0;
+        online_snapshot_compressed_.clear();
+        online_snapshot_receiver_.reset();
         online_trace_.close();
         online_trace_.open(pc_data_path / "btga-net-sync.log",
                            std::ios::out | std::ios::trunc);
@@ -632,6 +699,130 @@ private:
         return true;
     }
 
+    std::size_t wrap_snapshot_packet_locked(std::span<std::uint8_t> packet,
+                                            std::span<const std::uint8_t> payload) {
+        if (!online_connection_ || payload.empty() ||
+            packet.size() < BTGA_NET_HEADER_SIZE + payload.size()) return 0;
+        BtgaNetHeader header{};
+        header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
+        header.message_type = BTGA_NET_MSG_SNAPSHOT;
+        header.flags = BTGA_NET_FLAG_RELAYED | BTGA_NET_FLAG_RELIABLE;
+        header.session_id = online_session_id_;
+        header.sequence = online_sequence_++;
+        header.payload_size = static_cast<std::uint16_t>(payload.size());
+        header.peer_id = online_connection_->relay_slot();
+        if (btga_net_encode_header(packet.data(), packet.size(), &header) !=
+            BTGA_NET_HEADER_SIZE) return 0;
+        std::copy(payload.begin(), payload.end(), packet.begin() + BTGA_NET_HEADER_SIZE);
+        return BTGA_NET_HEADER_SIZE + payload.size();
+    }
+
+    void send_snapshot_ack_locked(std::uint16_t destination) {
+        std::array<std::uint8_t, 13> payload{};
+        payload[0] = online_snapshot_ack_version;
+        put_u32_be(payload.data() + 1, online_snapshot_receiver_.transfer_id());
+        if (!online_restored_snapshot_valid_) return;
+        put_u64_be(payload.data() + 5, online_restored_snapshot_checksum_);
+        std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
+        const std::size_t size = wrap_snapshot_packet_locked(packet, payload);
+        if (size != 0) (void)online_connection_->send_gameplay(
+            destination, {packet.data(), size});
+    }
+
+    bool handle_snapshot_packet_locked(std::span<const std::uint8_t> packet,
+                                       std::uint16_t source) {
+        BtgaNetHeader header{};
+        if (!btga_net_decode_header(&header, packet.data(), packet.size()) ||
+            header.protocol_version != BTGA_NET_PROTOCOL_VERSION ||
+            header.message_type != BTGA_NET_MSG_SNAPSHOT ||
+            header.session_id != online_session_id_ || header.peer_id != source ||
+            header.payload_size != packet.size() - BTGA_NET_HEADER_SIZE) return false;
+        const auto payload = packet.subspan(BTGA_NET_HEADER_SIZE);
+        const std::uint16_t local = online_connection_->relay_slot();
+        if (local == 0) {
+            if (payload.size() != 13 || payload[0] != online_snapshot_ack_version) return true;
+            const std::uint32_t transfer = get_u32_be(payload.data() + 1);
+            const std::uint64_t checksum = get_u64_be(payload.data() + 5);
+            if (transfer == online_snapshot_transfer_id_ &&
+                checksum == online_snapshot_checksum_) {
+                online_state_synchronized_ = true;
+                online_status_ = "Authoritative game state synchronized.";
+            }
+            return true;
+        }
+        if (local != 1 || !online_snapshot_receiver_.accept(payload)) return true;
+        if (online_snapshot_receiver_.complete() && !online_state_synchronized_) {
+            const auto restored = online_snapshot_receiver_.restore();
+            if (restored && restored->size() == online_snapshot_size) {
+                std::memcpy(rdram_ + online_snapshot_offset, restored->data(), restored->size());
+                online_restored_snapshot_checksum_ =
+                    btga::StateSynchronizer::checksum(*restored);
+                online_restored_snapshot_valid_ = true;
+                online_state_synchronized_ = true;
+                online_status_ = "Authoritative host state restored.";
+                if (online_trace_) {
+                    online_trace_ << "STATE_RESTORED transfer="
+                                  << online_snapshot_receiver_.transfer_id()
+                                  << " checksum=" << online_restored_snapshot_checksum_
+                                  << '\n';
+                    online_trace_.flush();
+                }
+            }
+        }
+        if (online_state_synchronized_) send_snapshot_ack_locked(source);
+        return true;
+    }
+
+    void prepare_host_snapshot_locked() {
+        if (!online_snapshot_compressed_.empty()) return;
+        const auto state = std::span<const std::uint8_t>{
+            rdram_ + online_snapshot_offset, online_snapshot_size};
+        online_snapshot_checksum_ = btga::StateSynchronizer::checksum(state);
+        online_snapshot_compressed_ = btga::StateSynchronizer::compress(state);
+        ++online_snapshot_transfer_id_;
+        if (online_snapshot_transfer_id_ == 0) ++online_snapshot_transfer_id_;
+        online_snapshot_fragment_count_ = static_cast<std::uint16_t>(
+            (online_snapshot_compressed_.size() + btga::StateSynchronizer::max_fragment_bytes - 1U) /
+            btga::StateSynchronizer::max_fragment_bytes);
+        online_status_ = "Synchronizing authoritative host state...";
+        if (online_trace_) {
+            online_trace_ << "STATE_SEND transfer=" << online_snapshot_transfer_id_
+                          << " raw=" << online_snapshot_size
+                          << " compressed=" << online_snapshot_compressed_.size()
+                          << " fragments=" << online_snapshot_fragment_count_
+                          << " checksum=" << online_snapshot_checksum_ << '\n';
+            online_trace_.flush();
+        }
+    }
+
+    void send_host_snapshot_fragments_locked(std::uint16_t destination) {
+        prepare_host_snapshot_locked();
+        constexpr std::size_t fragments_per_round = 1;
+        for (std::size_t sent = 0; sent < fragments_per_round; ++sent) {
+            const std::uint16_t index = online_snapshot_next_fragment_++ %
+                                        online_snapshot_fragment_count_;
+            const std::size_t offset = static_cast<std::size_t>(index) *
+                                       btga::StateSynchronizer::max_fragment_bytes;
+            const std::size_t bytes = std::min(
+                btga::StateSynchronizer::max_fragment_bytes,
+                online_snapshot_compressed_.size() - offset);
+            std::array<std::uint8_t, BTGA_NET_MAX_PAYLOAD_SIZE> payload{};
+            const btga::StateFragment fragment{
+                online_snapshot_transfer_id_, static_cast<std::uint32_t>(online_snapshot_size),
+                static_cast<std::uint32_t>(online_snapshot_compressed_.size()),
+                online_snapshot_checksum_, index, online_snapshot_fragment_count_,
+                std::span<const std::uint8_t>{online_snapshot_compressed_}.subspan(offset, bytes),
+            };
+            const std::size_t payload_size = btga::StateSynchronizer::encode_fragment(
+                payload, fragment);
+            std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
+            const std::size_t packet_size = wrap_snapshot_packet_locked(
+                packet, {payload.data(), payload_size});
+            if (packet_size != 0) (void)online_connection_->send_gameplay(
+                destination, {packet.data(), packet_size});
+        }
+    }
+
     void pump_online_inputs_locked() {
         if (!online_connection_) return;
         for (;;) {
@@ -639,6 +830,7 @@ private:
             std::uint16_t source = 0;
             const std::size_t size = online_connection_->receive_gameplay(packet, source);
             if (size == 0) break;
+            if (handle_snapshot_packet_locked({packet.data(), size}, source)) continue;
             const bool accepted = online_inputs_.accept(
                 {packet.data(), size}, online_session_id_, source);
             if (accepted && source < online_peer_seen_.size()) {
@@ -694,9 +886,9 @@ private:
         online_trace_.flush();
     }
 
-    std::uint64_t rdram_hash() const {
+    std::uint64_t memory_hash(std::size_t offset, std::size_t size) const {
         std::uint64_t hash = UINT64_C(1469598103934665603);
-        for (std::size_t index = 0; index < 8U * 1024U * 1024U; ++index) {
+        for (std::size_t index = offset; index < offset + size; ++index) {
             hash ^= rdram_[index];
             hash *= UINT64_C(1099511628211);
         }
@@ -718,7 +910,9 @@ private:
                       << " p1=" << p1.buttons << ',' << static_cast<int>(p1.stick_x)
                       << ',' << static_cast<int>(p1.stick_y);
         if ((relative_tick % 60U) == 0U) {
-            online_trace_ << " rdram_fnv64=" << rdram_hash();
+            online_trace_ << " rdram_fnv64=" << memory_hash(0, 8U * 1024U * 1024U)
+                          << " state_fnv64="
+                          << memory_hash(online_snapshot_offset, online_snapshot_size);
         }
         online_trace_ << '\n';
         online_trace_.flush();
@@ -1226,6 +1420,15 @@ private:
     std::chrono::steady_clock::time_point online_next_heartbeat_{};
     std::recursive_mutex online_mutex_;
     btga::InputSynchronizer online_inputs_;
+    btga::StateSynchronizer online_snapshot_receiver_;
+    std::vector<std::uint8_t> online_snapshot_compressed_;
+    std::uint64_t online_snapshot_checksum_ = 0;
+    std::uint64_t online_restored_snapshot_checksum_ = 0;
+    bool online_restored_snapshot_valid_ = false;
+    std::uint32_t online_snapshot_transfer_id_ = 0;
+    std::uint16_t online_snapshot_fragment_count_ = 0;
+    std::uint16_t online_snapshot_next_fragment_ = 0;
+    bool online_state_synchronized_ = false;
     std::uint64_t online_session_id_ = 0;
     std::uint32_t online_sequence_ = 1;
     std::uint32_t online_tick_ = 0;

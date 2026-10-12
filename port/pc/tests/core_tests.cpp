@@ -5,6 +5,7 @@
 #include "btga/online_multiplayer.hpp"
 #include "btga/master_client.hpp"
 #include "btga/sha256.hpp"
+#include "btga/state_sync.hpp"
 #include "btga/texture_packs.hpp"
 #include "btga/udp_online_io.hpp"
 
@@ -32,6 +33,52 @@ extern "C" {
     } while (false)
 
 int main() {
+    {
+        std::vector<std::uint8_t> state(196733);
+        for (std::size_t i = 0; i < state.size(); ++i) {
+            state[i] = (i / 4096U) % 3U == 0U ? 0U :
+                static_cast<std::uint8_t>((i * 37U + i / 11U) & 0xFFU);
+        }
+        const auto compressed = btga::StateSynchronizer::compress(state);
+        CHECK(!compressed.empty());
+        CHECK(btga::StateSynchronizer::decompress(compressed, state.size()) == state);
+        CHECK(!btga::StateSynchronizer::decompress(compressed, state.size() + 1).has_value());
+
+        const std::uint16_t count = static_cast<std::uint16_t>(
+            (compressed.size() + btga::StateSynchronizer::max_fragment_bytes - 1U) /
+            btga::StateSynchronizer::max_fragment_bytes);
+        btga::StateSynchronizer receiver;
+        std::vector<std::vector<std::uint8_t>> packets;
+        for (std::uint16_t index = 0; index < count; ++index) {
+            const std::size_t offset = static_cast<std::size_t>(index) *
+                                       btga::StateSynchronizer::max_fragment_bytes;
+            const std::size_t bytes = std::min(
+                btga::StateSynchronizer::max_fragment_bytes, compressed.size() - offset);
+            std::vector<std::uint8_t> packet(
+                btga::StateSynchronizer::fragment_header_size + bytes);
+            const btga::StateFragment fragment{
+                0x12345678U, static_cast<std::uint32_t>(state.size()),
+                static_cast<std::uint32_t>(compressed.size()),
+                btga::StateSynchronizer::checksum(state), index, count,
+                std::span<const std::uint8_t>{compressed}.subspan(offset, bytes),
+            };
+            CHECK(btga::StateSynchronizer::encode_fragment(packet, fragment) == packet.size());
+            packets.push_back(std::move(packet));
+        }
+        for (auto it = packets.rbegin(); it != packets.rend(); ++it) CHECK(receiver.accept(*it));
+        CHECK(receiver.accept(packets.front())); // Duplicate fragments are idempotent.
+        CHECK(receiver.complete());
+        CHECK(receiver.transfer_id() == 0x12345678U);
+        CHECK(receiver.restore() == state);
+
+        auto corrupt = packets.front();
+        corrupt.back() ^= 0x80U;
+        btga::StateSynchronizer corrupt_receiver;
+        CHECK(corrupt_receiver.accept(corrupt));
+        for (std::size_t i = 1; i < packets.size(); ++i) CHECK(corrupt_receiver.accept(packets[i]));
+        CHECK(corrupt_receiver.complete());
+        CHECK(!corrupt_receiver.restore().has_value());
+    }
     {
         btga::InputSynchronizer sender;
         btga::InputSynchronizer receiver;

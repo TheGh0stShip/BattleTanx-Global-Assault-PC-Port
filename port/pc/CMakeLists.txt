@@ -35,6 +35,7 @@ add_library(btga_pc_core
     src/pc_settings.cpp
     src/rom.cpp
     src/sha256.cpp
+    src/state_sync.cpp
     src/texture_packs.cpp
     src/udp_online_io.cpp
     src/world.cpp
