@@ -16,6 +16,18 @@ The current catalogue generates all 1,879 functions into 38 translation units.
 Six N64-only cache/exception routines are explicitly stubbed; their services
 belong to the host runtime rather than translated game code.
 
+Compile-check every generated translation unit against the runtime ABI:
+
+```sh
+cmake -S port/pc -B build-pc-recomp -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DBTGA_BUILD_RECOMP=ON
+cmake --build build-pc-recomp --target btga_recompiled_game
+```
+
+This produces a host static library and deliberately does not embed the ROM or
+generated files in the repository. The ordinary native prototype build keeps
+`BTGA_BUILD_RECOMP` disabled and therefore has no dependency on these inputs.
+
 The configuration currently establishes the complete code-generation boundary.
 Runtime integration still requires N64ModernRuntime/RT64 service glue and RSP
 microcode recompilation; generated code alone is not presented as playable.
