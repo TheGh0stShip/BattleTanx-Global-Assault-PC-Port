@@ -1,0 +1,71 @@
+#pragma once
+
+#include <array>
+#include <filesystem>
+#include <string>
+
+namespace btga {
+
+enum class WindowMode {
+    Windowed,
+    Borderless,
+    Fullscreen,
+};
+
+struct PlayerSettings {
+    float deadzone = 0.15F;
+    float sensitivity = 1.0F;
+    bool invert_x = false;
+    bool invert_y = false;
+    float rumble_strength = 1.0F;
+    int controller_slot = -1;
+};
+
+struct KeyboardBindings {
+    std::string stick_up = "W";
+    std::string stick_down = "S";
+    std::string stick_left = "A";
+    std::string stick_right = "D";
+    std::string button_a = "X";
+    std::string button_b = "Z";
+    std::string button_z = "Left Shift";
+    std::string button_start = "Return";
+    std::string button_l = "Q";
+    std::string button_r = "E";
+    std::string dpad_up = "Up";
+    std::string dpad_down = "Down";
+    std::string dpad_left = "Left";
+    std::string dpad_right = "Right";
+    std::string c_up = "I";
+    std::string c_down = "K";
+    std::string c_left = "J";
+    std::string c_right = "L";
+};
+
+struct PcSettings {
+    static constexpr int current_version = 1;
+
+    int version = current_version;
+    WindowMode window_mode = WindowMode::Windowed;
+    int window_width = 960;
+    int window_height = 720;
+    float render_scale = 1.0F;
+    bool vsync = true;
+    int frame_limit = 0;
+    int antialiasing = 0;
+    float master_volume = 1.0F;
+    float music_volume = 1.0F;
+    float effects_volume = 1.0F;
+    KeyboardBindings keyboard{};
+    std::array<PlayerSettings, 4> players{};
+
+    static PcSettings defaults();
+    static PcSettings load(const std::filesystem::path& path);
+    void save(const std::filesystem::path& path) const;
+    void validate();
+};
+
+std::filesystem::path pc_user_data_directory();
+const char* window_mode_name(WindowMode mode);
+
+} // namespace btga

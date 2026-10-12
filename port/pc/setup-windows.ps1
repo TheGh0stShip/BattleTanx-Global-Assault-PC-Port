@@ -103,7 +103,8 @@ if ($LASTEXITCODE -eq 0) {
 $recompBuild = Join-Path $n64Recomp "build"
 Invoke-Checked $cmake @(
     "-S", $n64Recomp, "-B", $recompBuild, "-G", "Ninja",
-    "-DCMAKE_MAKE_PROGRAM=$ninja", "-DCMAKE_BUILD_TYPE=Release"
+    "-DCMAKE_MAKE_PROGRAM=$ninja", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+    "-DCMAKE_BUILD_TYPE=Release"
 ) "Configuring N64Recomp"
 Invoke-Checked $cmake @("--build", $recompBuild, "--target", "N64RecompCLI", "RSPRecomp", "--parallel") "Building N64Recomp"
 

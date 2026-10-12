@@ -39,6 +39,7 @@ Import-Module $devShell
 Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64" | Out-Null
 
 $cmake = Join-Path $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+$ctest = Join-Path $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe"
 $ninja = Join-Path $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
 $source = Join-Path $root "port\pc"
 $build = if ([IO.Path]::IsPathRooted($BuildDirectory)) {
@@ -50,6 +51,7 @@ $sdl = Join-Path $rt64 "src\contrib\mupen64plus-win32-deps\SDL2-2.26.3"
 
 & $cmake -S $source -B $build -G Ninja `
     "-DCMAKE_MAKE_PROGRAM=$ninja" `
+    "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" `
     -DCMAKE_BUILD_TYPE=Release `
     -DBTGA_BUILD_RECOMP=ON `
     -DBTGA_BUILD_RUNTIME_PROBE=ON `
@@ -59,8 +61,11 @@ $sdl = Join-Path $rt64 "src\contrib\mupen64plus-win32-deps\SDL2-2.26.3"
     "-DSDL2_DIR=$(Join-Path $sdl 'cmake')"
 if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed." }
 
-& $cmake --build $build --target btga_runtime_probe --parallel
+& $cmake --build $build --target btga_runtime_probe btga_pc_tests --parallel
 if ($LASTEXITCODE -ne 0) { throw "Native build failed." }
+
+& $ctest --test-dir $build --output-on-failure
+if ($LASTEXITCODE -ne 0) { throw "Native tests failed." }
 
 Copy-Item (Join-Path $sdl "lib\x64\SDL2.dll") $build -Force
 Copy-Item (Join-Path $rt64 "src\contrib\dxc\bin\x64\dxcompiler.dll") $build -Force

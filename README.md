@@ -73,7 +73,7 @@ manual and Linux setup paths are in
 Create a ROM-free distributable ZIP with:
 
 ```powershell
-./port/pc/package-windows.ps1 -BuildDirectory build-pc-windows -Version 0.2.0
+./port/pc/package-windows.ps1 -BuildDirectory build-pc-windows -Version 0.2.1
 ```
 
 Controls, Linux/headless commands, save locations, renderer diagnostics, and
@@ -150,6 +150,11 @@ See also the [reusable decompilation toolkit](docs/DECOMPKIT.md),
 [library fingerprints](docs/LIBRARIES.md), [asset formats](docs/ASSET_FORMATS.md),
 [compiler notes](docs/COMPILER.md), and
 [research provenance](docs/PROVENANCE.md).
+
+Cross-platform multiplayer is developed independently in
+[BattleTanx-Global-Assault-Networking](https://github.com/TheGh0stShip/BattleTanx-Global-Assault-Networking).
+This repository will consume a tagged protocol release when gameplay
+replication is ready for integration.
 
 ## License
 

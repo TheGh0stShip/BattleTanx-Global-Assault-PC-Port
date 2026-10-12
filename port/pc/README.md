@@ -19,11 +19,14 @@ representative GPU/controller combinations still need broader validation.
 1. Download and extract the Windows x64 ZIP from the repository's
    [Releases](https://github.com/TheGh0stShip/BattleTanx-Global-Assault-PC-Port/releases).
 2. Supply your own verified USA Rev 0 big-endian `.z64` ROM; it is not included.
-3. Drag the ROM onto **Launch BattleTanx GA.cmd**, or open that launcher and
-   paste the ROM path when prompted.
+3. Double-click **Launch BattleTanx GA.cmd** or `BattleTanxGA.exe`, then choose
+   the ROM in the file picker. Dragging the ROM onto either file is also
+   supported.
 
 The launcher passes the ROM directly to `BattleTanxGA.exe`; it does not copy,
-modify, upload, or bundle it. The runtime validates the ROM before starting.
+modify, upload, or bundle it. The runtime validates the ROM before starting and
+shows an error dialog for a wrong revision, bad dump, missing file, or startup
+failure instead of exiting silently.
 
 ## Controls
 
@@ -80,7 +83,7 @@ source paths because MSVC/Ninja dependency handling is unreliable there.
 Create a redistributable, ROM-free ZIP after building:
 
 ```powershell
-./port/pc/package-windows.ps1 -BuildDirectory build-pc-windows -Version 0.2.0
+./port/pc/package-windows.ps1 -BuildDirectory build-pc-windows -Version 0.2.1
 ```
 
 The archive contains the executable, launcher, required DLLs, license, and PC runtime

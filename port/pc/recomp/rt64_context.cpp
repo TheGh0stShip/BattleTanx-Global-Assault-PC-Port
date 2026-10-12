@@ -17,6 +17,9 @@
 #include "ultramodern/ultramodern.hpp"
 
 namespace {
+btga::PcSettings pc_settings = btga::PcSettings::defaults();
+std::filesystem::path pc_data_path;
+
 bool environment_flag_enabled(const char* name) {
     const char* value = std::getenv(name);
     if (value == nullptr) {
@@ -88,6 +91,9 @@ public:
         core.VI_Y_SCALE_REG = &vi->VI_Y_SCALE_REG;
 
         RT64::ApplicationConfiguration configuration{};
+        configuration.appId = "BattleTanxGA";
+        configuration.dataPath = pc_data_path;
+        configuration.detectDataPath = pc_data_path.empty();
         configuration.useConfigurationFile = false;
         app_ = std::make_unique<RT64::Application>(core, configuration);
 #if defined(_WIN32)
@@ -95,10 +101,24 @@ public:
 #else
         app_->userConfig.graphicsAPI = RT64::UserConfiguration::GraphicsAPI::Vulkan;
 #endif
-        app_->userConfig.resolution = RT64::UserConfiguration::Resolution::WindowIntegerScale;
+        app_->userConfig.resolution = RT64::UserConfiguration::Resolution::Manual;
+        app_->userConfig.resolutionMultiplier = pc_settings.render_scale;
         app_->userConfig.aspectRatio = RT64::UserConfiguration::AspectRatio::Original;
         app_->userConfig.extAspectRatio = RT64::UserConfiguration::AspectRatio::Original;
-        app_->userConfig.antialiasing = RT64::UserConfiguration::Antialiasing::None;
+        switch (pc_settings.antialiasing) {
+        case 2:
+            app_->userConfig.antialiasing = RT64::UserConfiguration::Antialiasing::MSAA2X;
+            break;
+        case 4:
+            app_->userConfig.antialiasing = RT64::UserConfiguration::Antialiasing::MSAA4X;
+            break;
+        case 8:
+            app_->userConfig.antialiasing = RT64::UserConfiguration::Antialiasing::MSAA8X;
+            break;
+        default:
+            app_->userConfig.antialiasing = RT64::UserConfiguration::Antialiasing::None;
+            break;
+        }
         app_->userConfig.refreshRate = RT64::UserConfiguration::RefreshRate::Original;
         app_->userConfig.internalColorFormat = RT64::UserConfiguration::InternalColorFormat::Standard;
         app_->userConfig.displayBuffering = RT64::UserConfiguration::DisplayBuffering::Triple;
@@ -133,6 +153,12 @@ public:
 private:
     std::unique_ptr<RT64::Application> app_;
 };
+}
+
+void btga::renderer::configure_rt64(const PcSettings& settings,
+                                    const std::filesystem::path& data_path) {
+    pc_settings = settings;
+    pc_data_path = data_path;
 }
 
 std::unique_ptr<ultramodern::renderer::RendererContext> btga::renderer::create_rt64_context(

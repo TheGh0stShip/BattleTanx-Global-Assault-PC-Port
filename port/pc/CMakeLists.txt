@@ -15,6 +15,7 @@ add_library(btga_pc_core
     src/controller_pak.cpp
     src/game.cpp
     src/lzari.cpp
+    src/pc_settings.cpp
     src/rom.cpp
     src/sha256.cpp
     src/world.cpp
@@ -104,6 +105,7 @@ if(BTGA_BUILD_RECOMP)
             add_subdirectory("${BTGA_RT64_ROOT}" "${CMAKE_BINARY_DIR}/rt64")
             add_library(btga_rt64_renderer recomp/rt64_context.cpp)
             target_include_directories(btga_rt64_renderer PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}/include"
                 "${CMAKE_CURRENT_SOURCE_DIR}/recomp"
                 "${BTGA_RT64_ROOT}/src"
                 "${BTGA_RT64_ROOT}/src/contrib"
@@ -138,6 +140,9 @@ if(BTGA_BUILD_RECOMP)
             librecomp
             ultramodern
         )
+        if(WIN32)
+            target_link_libraries(btga_runtime_probe PRIVATE comdlg32 user32)
+        endif()
         if(BTGA_BUILD_RT64)
             target_link_libraries(btga_runtime_probe PRIVATE btga_rt64_renderer SDL2::SDL2)
             target_compile_definitions(btga_runtime_probe PRIVATE BTGA_HAS_RT64)

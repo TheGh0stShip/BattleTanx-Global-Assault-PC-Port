@@ -1,7 +1,11 @@
 #include "btga/game.hpp"
 #include "btga/controller_pak.hpp"
+#include "btga/pc_settings.hpp"
 #include "btga/sha256.hpp"
 
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string_view>
@@ -75,4 +79,51 @@ int main() {
     CHECK(restored.remove(name) == btga::ControllerPak::Error::none);
     CHECK(restored.files_used() == 0);
     CHECK(restored.free_bytes() == 123 * btga::ControllerPak::page_size);
+
+    const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path settings_dir =
+        std::filesystem::temp_directory_path() / ("btga-settings-test-" + std::to_string(unique));
+    const std::filesystem::path settings_path = settings_dir / "settings.ini";
+    btga::PcSettings settings = btga::PcSettings::defaults();
+    CHECK(settings.players[0].controller_slot == 0);
+    CHECK(settings.players[3].controller_slot == 3);
+    settings.window_mode = btga::WindowMode::Borderless;
+    settings.window_width = 2560;
+    settings.window_height = 1440;
+    settings.render_scale = 2.0F;
+    settings.antialiasing = 4;
+    settings.master_volume = 0.625F;
+    settings.players[1].deadzone = 0.25F;
+    settings.players[1].invert_y = true;
+    settings.players[1].controller_slot = 3;
+    settings.keyboard.button_a = "Space";
+    settings.save(settings_path);
+    const btga::PcSettings loaded = btga::PcSettings::load(settings_path);
+    CHECK(loaded.window_mode == btga::WindowMode::Borderless);
+    CHECK(loaded.window_width == 2560 && loaded.window_height == 1440);
+    CHECK(loaded.render_scale == 2.0F && loaded.antialiasing == 4);
+    CHECK(loaded.master_volume == 0.625F);
+    CHECK(loaded.players[1].deadzone == 0.25F);
+    CHECK(loaded.players[1].invert_y && loaded.players[1].controller_slot == 3);
+    CHECK(loaded.keyboard.button_a == "Space");
+
+    {
+        std::ofstream malformed{settings_path, std::ios::app};
+        malformed << "unknown.future_option=kept-compatible\n"
+                  << "video.window_width=20\n"
+                  << "video.render_scale=nan\n"
+                  << "video.antialiasing=3\n"
+                  << "audio.master_volume=9\n"
+                  << "audio.music_volume=inf\n"
+                  << "player1.deadzone=-5\n";
+    }
+    const btga::PcSettings validated = btga::PcSettings::load(settings_path);
+    CHECK(validated.window_width == 640);
+    CHECK(validated.render_scale == 2.0F);
+    CHECK(validated.antialiasing == 0);
+    CHECK(validated.master_volume == 1.0F);
+    CHECK(validated.music_volume == 1.0F);
+    CHECK(validated.players[0].deadzone == 0.0F);
+    std::filesystem::remove_all(settings_dir);
+
 }

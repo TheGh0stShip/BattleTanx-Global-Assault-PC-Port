@@ -1,20 +1,22 @@
 @echo off
-setlocal
+setlocal DisableDelayedExpansion
+
+if "%~1"=="" goto picker
 set "ROM=%~1"
-
-if not defined ROM (
-    echo BattleTanx: Global Assault requires your own USA Rev 0 .z64 ROM.
-    echo You can also drag the ROM onto this launcher.
-    set /p "ROM=ROM path: "
-)
-
-if not exist "%ROM%" (
-    echo ROM not found: %ROM%
-    pause
-    exit /b 2
-)
-
+if not exist "%ROM%" goto missing
 "%~dp0BattleTanxGA.exe" --play "%ROM%"
+goto finished
+
+:picker
+"%~dp0BattleTanxGA.exe"
+goto finished
+
+:missing
+echo ROM not found: "%ROM%"
+pause
+exit /b 2
+
+:finished
 set "RESULT=%ERRORLEVEL%"
 if not "%RESULT%"=="0" pause
 exit /b %RESULT%
