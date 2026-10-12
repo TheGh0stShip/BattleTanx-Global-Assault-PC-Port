@@ -5,7 +5,7 @@
 [![Functions: 1879/1879](https://img.shields.io/badge/functions-1879%2F1879-brightgreen)](https://decomp.dev/TheGh0stShip/BattleTanx-Global-Assault)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](COPYING)
 
-This branch contains a playable native PC port of **BattleTanx: Global
+This repository is the definitive native PC port of **BattleTanx: Global
 Assault**, built from the completed matching Nintendo 64 decompilation. The
 Windows runtime boots the original game, renders through RT64/Direct3D 12,
 plays audio through SDL2, supports keyboard and SDL game controllers, and has
@@ -16,7 +16,11 @@ The port uses N64Recomp for the recovered CPU program, RSPRecomp for audio
 microcode, N64ModernRuntime for N64 operating-system services, and RT64 for
 display-list rendering. It is a native host executable—not an emulator bundle.
 The completed byte-matching decompilation remains in this repository as the
-auditable source and compatibility foundation.
+auditable source and compatibility foundation. Matching-decompilation work is
+developed upstream in
+[TheGh0stShip/BattleTanx-Global-Assault](https://github.com/TheGh0stShip/BattleTanx-Global-Assault);
+this repository owns the PC runtime, compatibility patches, packaging, and PC
+release validation.
 
 No ROM or ROM-derived assets are included. Supply your own legally obtained dump.
 
@@ -25,7 +29,7 @@ No ROM or ROM-derived assets are included. Supply your own legally obtained dump
 [![BattleTanx: Global Assault native Windows port demonstration](https://img.youtube.com/vi/PrhwXBr1qJI/maxresdefault.jpg)](https://www.youtube.com/watch?v=PrhwXBr1qJI)
 
 The video above demonstrates the game running as a native Windows executable
-from this branch: original menus and campaign gameplay,
+from this repository: original menus and campaign gameplay,
 RT64 Direct3D 12 rendering, SDL audio, and live keyboard input. Click the image
 to play the full demonstration on YouTube.
 

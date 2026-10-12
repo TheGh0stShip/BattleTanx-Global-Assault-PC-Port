@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 if ($root.StartsWith("\\")) {
-    throw "Build from a native Windows checkout (for example C:\src\BattleTanx-Global-Assault), not a WSL UNC path."
+    throw "Build from a native Windows checkout (for example C:\src\BattleTanx-Global-Assault-PC-Port), not a WSL UNC path."
 }
 
 $runtime = Join-Path $root ".deps\N64ModernRuntime"

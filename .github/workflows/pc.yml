@@ -1,0 +1,21 @@
+name: PC port
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  portable-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S port/pc -B build-pc -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build-pc --parallel
+      - name: Test
+        run: ctest --test-dir build-pc --output-on-failure
+      - name: Repository safety
+        run: python3 tools/check_repository.py

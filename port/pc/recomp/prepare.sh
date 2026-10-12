@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
-matching="${BTGA_MATCHING_ROOT:-/home/steve/projects/VitaTanxGA}"
+matching="${BTGA_MATCHING_ROOT:-$root}"
 recomp="${N64RECOMP:-$root/.deps/N64Recomp/build/N64Recomp}"
 rsp_recomp="${RSPRECOMP:-$root/.deps/N64Recomp/build/RSPRecomp}"
 
