@@ -10,6 +10,7 @@ Bootstrap the pinned official recompiler, then generate the compatibility C:
 ```sh
 port/pc/recomp/bootstrap.sh
 port/pc/recomp/bootstrap_runtime.sh
+port/pc/recomp/bootstrap_rt64.sh
 port/pc/recomp/prepare.sh
 ```
 
@@ -75,3 +76,11 @@ The configuration currently establishes the complete code-generation boundary.
 Runtime integration still requires a real renderer (RT64 or equivalent), audio
 output, input mapping, and a user-facing executable loop; this headless boot
 milestone is not presented as a playable build.
+
+`bootstrap_rt64.sh` pins the same RT64 revision used by the reference runtime
+integration. It is kept separate from the headless probe until the interactive
+SDL window and renderer adapter are enabled, so CI does not require a GPU.
+On Debian/Ubuntu, configuring that optional renderer currently requires the
+development packages for SDL2, Vulkan, and either GTK3 or D-Bus (when CMake is
+configured with `-DNFD_PORTAL=ON`). The bootstrap does not install system
+packages or request elevated privileges.
