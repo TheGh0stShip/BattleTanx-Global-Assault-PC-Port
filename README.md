@@ -57,6 +57,34 @@ effects remain part of the release validation matrix.
 The current verified Windows package is available from the
 [latest GitHub Release](https://github.com/TheGh0stShip/BattleTanx-Global-Assault-PC-Port/releases/latest).
 
+## Controls
+
+| Action | Keyboard / mouse | Controller |
+|---|---|---|
+| Drive / steer | **W A S D** | Left stick |
+| N64 A / primary fire | **X** or **left mouse button** | A button |
+| N64 B | **Z** | X button |
+| N64 Z trigger | **Left Shift** | Left trigger |
+| Start / pause | **Enter** | Start |
+| N64 L / R | **Q / E** | Left / right shoulder |
+| D-pad | Arrow keys | D-pad |
+| C buttons | **I J K L** | Right stick |
+| Open or close PC settings | **F10** | — |
+
+The settings overlay can also be closed with its **Close** button or window
+**X**. After closing it, press **F10** again to reopen it. Controls can be
+rebound from **F10 → Controllers**.
+
+With the optional independent-turret mod enabled, hold **right mouse button**
+and move the mouse to aim the turret; **left mouse button** fires. The right
+stick aims the turret on a controller. Releasing right mouse returns to the
+selected retail control behavior. Keyboard and controller input can be used at
+the same time.
+
+See the [complete controls guide](docs/CONTROLS.md) for menu operation,
+controller defaults, multiplayer assignments, rebinding, and the distinction
+between the F10 settings overlay and the optional F1 renderer inspector.
+
 ## Build and run the PC port
 
 The complete native-runtime guide is in [port/pc/README.md](port/pc/README.md).
@@ -88,9 +116,9 @@ portable-mode marker:
 ./port/pc/package-windows.ps1 -BuildDirectory build-pc-windows -Version 0.2.1 -Portable
 ```
 
-Controls, optional gameplay mods, RT64 texture packs, Linux/headless commands,
-save locations, renderer diagnostics, and packaging contents are documented in
-the [PC runtime guide](port/pc/README.md).
+Optional gameplay mods, RT64 texture packs, Linux/headless commands, save
+locations, renderer diagnostics, and packaging contents are documented in the
+[PC runtime guide](port/pc/README.md).
 
 Portable installations are supported by placing an empty `portable.txt` next
 to `BattleTanxGA.exe`; all writable data then stays in a neighboring

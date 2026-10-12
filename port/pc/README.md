@@ -52,6 +52,10 @@ Advanced launchers can set `BTGA_DATA_DIR` to choose an explicit data folder.
 
 ## Controls
 
+For the complete player-facing reference, including menu operation, controller
+defaults, rebinding, simultaneous mouse/controller input, and independent
+turret aiming, see [../../docs/CONTROLS.md](../../docs/CONTROLS.md).
+
 - WASD: analog stick
 - X / Z: N64 A / B
 - Left Shift: Z trigger
