@@ -433,7 +433,7 @@ public:
         if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby ||
             player < 0 || player > 1) return false;
         pump_online_inputs_locked();
-        prepare_applied_inputs_locked();
+        (void)prepare_applied_inputs_locked();
         if (!online_applied_inputs_valid_) return false;
         const auto& input = online_applied_inputs_[static_cast<std::size_t>(player)];
         buttons = input.buttons;
@@ -443,7 +443,7 @@ public:
     }
 
     void online_submit_local_input(std::uint16_t buttons, float x, float y) {
-        const std::lock_guard lock(online_mutex_);
+        std::unique_lock lock(online_mutex_);
         if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby) return;
         const std::uint16_t local = online_connection_->relay_slot();
         if (local > 1) return; // Two-player synchronization milestone.
@@ -492,7 +492,30 @@ public:
             (void)sent;
         }
         pump_online_inputs_locked();
-        prepare_applied_inputs_locked();
+        if (!online_tick_origins_valid_) return;
+
+        const auto wait_started = std::chrono::steady_clock::now();
+        while (!prepare_applied_inputs_locked()) {
+            // A deterministic simulation must never substitute a different
+            // pair merely because one UDP datagram is late. Re-send the same
+            // redundant batch while yielding the mutex so UI disconnect and
+            // shutdown remain available. With the four-poll jitter buffer,
+            // this loop is normally never entered.
+            if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby) {
+                return;
+            }
+            const bool resent = online_connection_->send_gameplay(
+                destination, {packet.data(), size});
+            (void)resent;
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            lock.lock();
+            pump_online_inputs_locked();
+            if (std::chrono::steady_clock::now() - wait_started >=
+                std::chrono::milliseconds(250)) {
+                online_status_ = "Waiting for a confirmed synchronized input frame...";
+            }
+        }
     }
 
 private:
@@ -618,28 +641,29 @@ private:
         }
     }
 
-    void prepare_applied_inputs_locked() {
-        if (!online_connection_ || !online_tick_origins_valid_ || online_tick_ == 0) return;
+    bool prepare_applied_inputs_locked() {
+        if (!online_connection_ || !online_tick_origins_valid_ || online_tick_ == 0) return false;
         constexpr std::uint32_t input_delay = 4;
         const std::uint16_t local = online_connection_->relay_slot();
-        if (local > 1) return;
+        if (local > 1) return false;
         const std::uint16_t remote = local == 0 ? 1 : 0;
         const std::uint32_t latest_local_tick = online_tick_ - 1;
         const std::uint32_t relative_tick = latest_local_tick - online_local_tick_origin_;
         if (relative_tick < input_delay) {
             online_applied_inputs_.fill({});
             online_applied_inputs_valid_ = true;
-            return;
+            return true;
         }
         const std::uint32_t delayed = relative_tick - input_delay;
         const auto local_input = online_inputs_.input_for(
             static_cast<std::uint8_t>(local), online_local_tick_origin_ + delayed);
         const auto remote_input = online_inputs_.input_for(
             static_cast<std::uint8_t>(remote), online_remote_tick_origin_ + delayed);
-        if (!local_input || !remote_input) return;
+        if (!local_input || !remote_input) return false;
         online_applied_inputs_[local] = *local_input;
         online_applied_inputs_[remote] = *remote_input;
         online_applied_inputs_valid_ = true;
+        return true;
     }
 
     void disconnect_online() {
