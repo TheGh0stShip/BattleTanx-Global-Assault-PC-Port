@@ -96,6 +96,12 @@ test can make distant geometry flicker. A guarded hook substitutes 32767 only
 when the requested far plane is not beyond the fixed near plane of 16; all
 valid scripted and gameplay distances remain untouched.
 
+The live segment-1 viewport display lists are also corrected at their six
+outer-screen scissor words. Retail uses exclusive lower-right bounds of
+319×239, leaving the final row and column undrawn on a modern display; the
+runtime changes only exact known words to 320×240 and preserves split-screen
+interior seams.
+
 The audio microcode configuration uses its real IMEM load address (`0x1080`)
 and declares the command-dispatch table's indirect handler destinations. The
 generated implementation is derived locally from the verified ROM and remains

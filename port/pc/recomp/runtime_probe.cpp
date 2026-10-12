@@ -302,6 +302,8 @@ void drive_headless_runtime(void*) {
     }
 }
 
+void patch_screen_edge_scissors(std::uint8_t*, recomp_context*);
+
 recomp::GameEntry make_game(std::uint64_t rom_hash) {
     return {
         .rom_hash = rom_hash,
@@ -317,7 +319,45 @@ recomp::GameEntry make_game(std::uint64_t rom_hash) {
         .is_enabled = true,
         .entrypoint_address = get_entrypoint_address(),
         .entrypoint = recomp_entrypoint,
+        .on_init_callback = patch_screen_edge_scissors,
     };
+}
+
+void patch_screen_edge_scissors(std::uint8_t*, recomp_context*) {
+    // Patch the runtime's private ROM copy before any N64 threads start. The
+    // game later DMAs this segment-1 block into its live display-list buffer,
+    // avoiding a race with RT64 reading that buffer. The user's ROM file is
+    // never modified. All six replacements are exact-value guarded.
+    struct Fix { std::size_t offset; std::uint32_t original; std::uint32_t replacement; };
+    constexpr Fix fixes[] = {
+        {0xB7F74, 0x004FC3BCU, 0x005003C0U},
+        {0xB7F8C, 0x004FC1DCU, 0x005001DCU},
+        {0xB7FA4, 0x004FC3BCU, 0x005003C0U},
+        {0xB7FD4, 0x004FC1DCU, 0x005001DCU},
+        {0xB7FEC, 0x0027C3BCU, 0x0027C3C0U},
+        {0xB8004, 0x004FC3BCU, 0x005003C0U},
+    };
+    const auto source = recomp::get_rom();
+    std::vector<std::uint8_t> patched(source.begin(), source.end());
+    for (const Fix& fix : fixes) {
+        if (fix.offset + 4 > patched.size()) {
+            std::cerr << "Runtime ROM is too small for the viewport compatibility patch\n";
+            std::abort();
+        }
+        const std::uint32_t word = (static_cast<std::uint32_t>(patched[fix.offset]) << 24) |
+                                   (static_cast<std::uint32_t>(patched[fix.offset + 1]) << 16) |
+                                   (static_cast<std::uint32_t>(patched[fix.offset + 2]) << 8) |
+                                   patched[fix.offset + 3];
+        if (word != fix.original) {
+            std::cerr << "Verified ROM did not contain the expected viewport display lists\n";
+            std::abort();
+        }
+        patched[fix.offset] = static_cast<std::uint8_t>(fix.replacement >> 24);
+        patched[fix.offset + 1] = static_cast<std::uint8_t>(fix.replacement >> 16);
+        patched[fix.offset + 2] = static_cast<std::uint8_t>(fix.replacement >> 8);
+        patched[fix.offset + 3] = static_cast<std::uint8_t>(fix.replacement);
+    }
+    recomp::set_rom_contents(std::move(patched));
 }
 }
 
