@@ -5,6 +5,7 @@ extern "C" {
 }
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <mutex>
@@ -38,6 +39,7 @@ struct BootstrapState {
 std::mutex bootstrap_mutex;
 std::optional<BootstrapState> bootstrap;
 std::optional<std::uint32_t> negotiated_seed;
+std::atomic_bool boot_released{false};
 
 void put_u32(std::uint8_t* output, std::uint32_t value) {
     output[0] = static_cast<std::uint8_t>(value >> 24);
@@ -121,6 +123,7 @@ bool begin_preboot_online(bool host, std::uint64_t session_id,
         return false;
     }
     bootstrap.emplace(std::move(state));
+    boot_released.store(false, std::memory_order_release);
     negotiated_seed = bootstrap_seed;
     return true;
 }
@@ -180,6 +183,15 @@ void poll_preboot_online() {
 bool preboot_online_ready() {
     std::lock_guard lock(bootstrap_mutex);
     return bootstrap && bootstrap->ready;
+}
+
+bool preboot_online_waiting() {
+    std::lock_guard lock(bootstrap_mutex);
+    return negotiated_seed.has_value() && !boot_released.load(std::memory_order_acquire);
+}
+
+void release_preboot_online_boot() {
+    boot_released.store(true, std::memory_order_release);
 }
 
 std::string preboot_online_status() {

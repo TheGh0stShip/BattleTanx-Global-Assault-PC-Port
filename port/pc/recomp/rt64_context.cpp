@@ -389,32 +389,7 @@ public:
             active_context.store(this, std::memory_order_release);
             if (environment_flag_enabled("BTGA_SETTINGS_OPEN")) app_->setCustomOverlayVisible(true);
         }
-        if (auto preboot = btga::take_preboot_online_session()) {
-            online_udp_ = std::move(preboot->udp);
-            online_connection_ = std::move(preboot->connection);
-            online_session_id_ = preboot->session_id;
-            online_is_host_ = preboot->host;
-            online_lobby_id_ = std::move(preboot->lobby_id);
-            online_host_secret_ = std::move(preboot->host_secret);
-            online_state_synchronized_ = true;
-            online_peer_seen_[preboot->host ? 1U : 0U] = true;
-            online_status_ = "Cold-boot multiplayer synchronized.";
-            online_trace_.open(pc_data_path / "btga-net-sync.log",
-                               std::ios::out | std::ios::trunc);
-            if (online_trace_) {
-                online_trace_ << "BTGA net synchronization trace v2\n"
-                              << "PREBOOT slot=" << online_connection_->relay_slot()
-                              << " seed=" << preboot->seed << '\n';
-                online_trace_.flush();
-            }
-#if defined(_WIN32)
-            SetWindowTextW(window.window, preboot->host
-                ? L"BattleTanx GA - HOST" : L"BattleTanx GA - CLIENT");
-#else
-            SDL_SetWindowTitle(window, preboot->host
-                ? "BattleTanx GA - HOST" : "BattleTanx GA - CLIENT");
-#endif
-        }
+        adopt_preboot_session();
     }
 
     ~Context() override {
@@ -438,7 +413,14 @@ public:
                                        task->t.ucode_data & 0x3FFFFFFU, true);
         app_->processDisplayLists(app_->core.RDRAM, task->t.data_ptr & 0x3FFFFFFU, 0, true);
     }
-    void send_dummy_workload(std::uint32_t address) override { app_->processDisplayLists(app_->core.RDRAM, address, 0, true); }
+    void send_dummy_workload(std::uint32_t address) override {
+        // The renderer thread normally submits a harmless dummy display list while
+        // the N64 thread starts.  During an online pre-boot rendezvous RDRAM has not
+        // been initialized yet, so interpreting that address would dereference
+        // uninitialized emulated memory.
+        if (btga::preboot_online_waiting()) return;
+        app_->processDisplayLists(app_->core.RDRAM, address, 0, true);
+    }
     void update_screen() override {
         update_online();
         app_->updateScreen();
@@ -929,6 +911,7 @@ private:
 
     void update_online() {
         const std::lock_guard lock(online_mutex_);
+        adopt_preboot_session();
         if (online_task_.valid() &&
             online_task_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             OnlineTaskResult result = online_task_.get();
@@ -983,6 +966,33 @@ private:
                     master->heartbeat(lobby, secret, players,
                                       players > 1 ? "playing" : "lobby");
                 });
+        }
+    }
+
+    void adopt_preboot_session() {
+        if (online_connection_) return;
+        auto preboot = btga::take_preboot_online_session();
+        if (!preboot) return;
+        online_udp_ = std::move(preboot->udp);
+        online_connection_ = std::move(preboot->connection);
+        online_session_id_ = preboot->session_id;
+        online_is_host_ = preboot->host;
+        online_lobby_id_ = std::move(preboot->lobby_id);
+        online_host_secret_ = std::move(preboot->host_secret);
+        online_state_synchronized_ = true;
+        online_peer_seen_[preboot->host ? 1U : 0U] = true;
+        online_status_ = "Cold-boot multiplayer synchronized.";
+        online_trace_.open(pc_data_path / "btga-net-sync.log",
+                           std::ios::out | std::ios::trunc);
+        if (online_trace_) {
+            online_trace_ << "BTGA net synchronization trace v2\n"
+                          << "PREBOOT slot=" << online_connection_->relay_slot()
+                          << " seed=" << preboot->seed << '\n';
+            online_trace_.flush();
+        }
+        if (app_ && app_->appWindow && app_->appWindow->sdlWindow) {
+            SDL_SetWindowTitle(app_->appWindow->sdlWindow, preboot->host
+                ? "BattleTanx GA - HOST" : "BattleTanx GA - CLIENT");
         }
     }
 

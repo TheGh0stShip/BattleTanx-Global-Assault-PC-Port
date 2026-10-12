@@ -27,6 +27,8 @@ bool begin_preboot_online(bool host, std::uint64_t session_id,
                           std::string lobby_id = {}, std::string host_secret = {});
 void poll_preboot_online();
 [[nodiscard]] bool preboot_online_ready();
+[[nodiscard]] bool preboot_online_waiting();
+void release_preboot_online_boot();
 [[nodiscard]] std::string preboot_online_status();
 [[nodiscard]] std::optional<std::uint32_t> preboot_online_seed();
 [[nodiscard]] std::optional<PrebootOnlineSession> take_preboot_online_session();

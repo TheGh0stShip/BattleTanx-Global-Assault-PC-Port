@@ -595,6 +595,7 @@ void drive_headless_runtime(void*) {
         }
         if (!boot_requested) {
             boot_requested = true;
+            if (preboot_online_requested) btga::release_preboot_online_boot();
             recomp::start_game(std::u8string{game_id}, {});
         }
         return;
