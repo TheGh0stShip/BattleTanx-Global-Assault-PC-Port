@@ -29,10 +29,14 @@ add_library(btga_pc_core
     src/rom.cpp
     src/sha256.cpp
     src/texture_packs.cpp
+    src/udp_online_io.cpp
     src/world.cpp
 )
 target_include_directories(btga_pc_core PUBLIC include)
 target_link_libraries(btga_pc_core PUBLIC BattleTanxGA::NetProtocol)
+if(WIN32)
+    target_link_libraries(btga_pc_core PUBLIC ws2_32)
+endif()
 target_compile_options(btga_pc_core PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
     $<$<CXX_COMPILER_ID:MSVC>:/W4;/WX>

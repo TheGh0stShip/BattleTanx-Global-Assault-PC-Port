@@ -24,6 +24,7 @@ public:
     virtual bool open() = 0;
     virtual void close() = 0;
     virtual bool send_relay(std::span<const std::uint8_t> datagram) = 0;
+    virtual std::size_t receive_relay(std::span<std::uint8_t> datagram) = 0;
 };
 
 class OnlineMultiplayer {

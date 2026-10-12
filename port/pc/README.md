@@ -237,6 +237,11 @@ starts offline and opens no socket or DNS request during normal startup. Only a
 future explicit **Online Multiplayer** action may opt in and initialize the
 master/relay path; leaving that flow returns the client fully offline.
 
+The included Windows/Linux UDP adapter is also inert until that explicit
+transition. It resolves and opens the configured relay endpoint on demand,
+uses bounded nonblocking datagrams, and closes the platform socket completely
+when the online flow ends.
+
 The design is relay-first and uses outbound UDP only. It does not use UPnP,
 NAT-PMP, inbound port forwarding, or expose a host's home connection. Each
 device renders its own full-screen player camera; synchronization begins in a

@@ -4,6 +4,7 @@
 #include "btga/online_multiplayer.hpp"
 #include "btga/sha256.hpp"
 #include "btga/texture_packs.hpp"
+#include "btga/udp_online_io.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -33,6 +34,7 @@ int main() {
             last_packet.assign(packet.begin(), packet.end());
             return send_result;
         }
+        std::size_t receive_relay(std::span<std::uint8_t>) override { return 0; }
         bool open_result = true;
         bool send_result = true;
         int open_calls = 0;
@@ -69,6 +71,13 @@ int main() {
         CHECK(online_io.close_calls == 1);
     }
     CHECK(online_io.close_calls == 1);
+
+    btga::UdpOnlineIo udp_io{"127.0.0.1", 9};
+    CHECK(!udp_io.is_open());
+    CHECK(udp_io.open());
+    CHECK(udp_io.is_open());
+    udp_io.close();
+    CHECK(!udp_io.is_open());
 
     constexpr std::string_view abc = "abc";
     const auto* bytes = reinterpret_cast<const std::uint8_t*>(abc.data());
