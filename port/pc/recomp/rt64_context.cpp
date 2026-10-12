@@ -434,18 +434,14 @@ public:
             player < 0 || player >= static_cast<int>(btga::InputSynchronizer::max_players) ||
             player == static_cast<int>(online_connection_->relay_slot())) return false;
         const std::uint32_t requested_tick = online_tick_ == 0 ? 0 : online_tick_ - 1;
+        pump_online_inputs_locked();
         auto input = online_inputs_.input_for(
             static_cast<std::uint8_t>(player), requested_tick);
-        const auto deadline = std::chrono::steady_clock::now() +
-            std::chrono::milliseconds(100);
-        while (!input && std::chrono::steady_clock::now() < deadline) {
-            pump_online_inputs_locked();
-            input = online_inputs_.input_for(
-                static_cast<std::uint8_t>(player), requested_tick);
-            if (!input) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        // During initial connection the peers can have a small tick offset.
-        // Latest input keeps menus responsive until the first matching tick.
+        // Never stall the emulation/audio thread on network latency. The
+        // peers can have a small tick offset, and controller polling can run
+        // more than once per rendered frame. Use the newest validated frame
+        // until the requested tick is present; a later synchronization layer
+        // can reconcile simulation state without blocking this callback.
         if (!input) {
             input = online_inputs_.latest_input_for(static_cast<std::uint8_t>(player));
         }
