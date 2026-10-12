@@ -69,6 +69,19 @@ now cooperatively yield. Those original loops depend on R4300 interrupt
 preemption, which a cooperatively scheduled host thread cannot reproduce merely
 by translating instructions.
 
+It also corrects the shield-hit flash lifetime at its truncation boundary. The
+original subtracts the integer part of a frame step that is just over 1.0 on
+N64 hardware; at an exact host 60 Hz it can remain just below 1.0 and truncate
+to zero. Without the site-specific fractional-step hook, translucent shield
+impact shards never expire and accumulate around vehicles. The diagnosis was
+independently confirmed against the GPL-3.0 `wootbeer/btgarecomp` compatibility
+work (commit `12dfa75`).
+
+The same frame-step boundary affects one AI turn limit, one tracking deadline,
+and four results-screen counters. Their narrowly located hooks retain the real
+fractional elapsed time (carrying fractions for the integer deadline) so host
+timing cannot freeze those systems when a cast would otherwise produce zero.
+
 The audio microcode configuration uses its real IMEM load address (`0x1080`)
 and declares the command-dispatch table's indirect handler destinations. The
 generated implementation is derived locally from the verified ROM and remains

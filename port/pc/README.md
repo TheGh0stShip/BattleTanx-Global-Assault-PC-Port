@@ -79,6 +79,11 @@ Save data is stored outside the installation directory. Windows uses
 window requests an orderly runtime shutdown so pending EEPROM writes are
 flushed before the process exits.
 
+The SDL audio queue keeps a small scheduling cushion but caps accumulated
+latency. If a skipped cutscene or transition produces audio faster than real
+time, the runtime drains or resynchronizes the surplus instead of allowing all
+later effects to play seconds late.
+
 ## Headless and Linux development
 
 The translated runtime can still be exercised without a display using the

@@ -1,8 +1,53 @@
+#include <algorithm>
+#include <bit>
 #include <cstdint>
+#include <unordered_map>
 
 #include "recomp.h"
 
 extern "C" void yield_self_1ms(std::uint8_t* rdram);
+
+namespace {
+float read_guest_float(std::uint8_t* rdram, std::uint32_t address) {
+    const gpr guest_address = static_cast<gpr>(static_cast<std::int32_t>(address));
+    return std::bit_cast<float>(static_cast<std::uint32_t>(MEM_W(0, guest_address)));
+}
+}
+
+extern "C" void btga_shield_flash_step(std::uint8_t* rdram, recomp_context* ctx) {
+    // The retail routine truncates the frame step before subtracting it from
+    // the shield-hit flash lifetime. On N64 the step is just over 1.0; at an
+    // exact host 60 Hz it can be just under 1.0 and truncate to zero, leaving
+    // every translucent shield shard alive forever. Preserve the intended
+    // elapsed-time behavior by supplying the original fractional step.
+    constexpr std::uint32_t frame_step_address = 0x80219488U;
+    ctx->f2.fl = read_guest_float(rdram, frame_step_address);
+}
+
+extern "C" void btga_turn_step(std::uint8_t* rdram, recomp_context* ctx) {
+    constexpr std::uint32_t frame_step_address = 0x80219488U;
+    const float step = read_guest_float(rdram, frame_step_address);
+    const std::int32_t amount = step > 0.0F ? static_cast<std::int32_t>(step * 1024.0F) : 0;
+    ctx->r6 = std::min(amount, 0xFFFF);
+}
+
+extern "C" void btga_deadline_step(std::uint8_t* rdram, recomp_context* ctx) {
+    constexpr std::uint32_t frame_step_address = 0x80219488U;
+    static std::unordered_map<std::uint32_t, float> fractional_steps;
+    float& remainder = fractional_steps[static_cast<std::uint32_t>(ctx->r20)];
+    const float total = read_guest_float(rdram, frame_step_address) + remainder;
+    const std::int32_t whole = total > 0.0F ? static_cast<std::int32_t>(total) : 0;
+    remainder = total - static_cast<float>(whole);
+    ctx->r3 = whole;
+}
+
+extern "C" void btga_score_count_step(std::uint8_t* rdram, recomp_context* ctx) {
+    constexpr std::uint32_t hud_step_address = 0x803A5948U;
+    const float step = read_guest_float(rdram, hud_step_address);
+    if (static_cast<std::int32_t>(ctx->r3) == 0 && step > 0.0F) {
+        ctx->r3 = 1;
+    }
+}
 
 extern "C" void func_80098B40(std::uint8_t* rdram, recomp_context*) {
     constexpr gpr controller_read_pending = static_cast<gpr>(static_cast<std::int32_t>(0x80219230U));

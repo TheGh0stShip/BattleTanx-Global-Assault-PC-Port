@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <atomic>
 #include <span>
 #include <stdexcept>
@@ -38,6 +39,8 @@ std::atomic_uint32_t rsp_requests{0};
 #ifdef BTGA_HAS_RT64
 SDL_Window* window = nullptr;
 SDL_AudioDeviceID audio_device = 0;
+std::mutex audio_mutex;
+std::uint32_t audio_frequency = 44100;
 SDL_GameController* gamepad = nullptr;
 bool interactive = false;
 #endif
@@ -102,13 +105,39 @@ void set_audio_frequency(std::uint32_t) {}
 
 #ifdef BTGA_HAS_RT64
 void queue_audio(std::int16_t* samples, std::size_t sample_count) {
-    if (audio_device != 0) {
-        SDL_QueueAudio(audio_device, samples,
-                       static_cast<std::uint32_t>(sample_count * sizeof(*samples)));
+    std::lock_guard<std::mutex> lock{audio_mutex};
+    if (audio_device == 0) {
+        return;
     }
+
+    constexpr std::size_t channels = 2;
+    constexpr std::size_t soft_cap_ms = 200;
+    constexpr std::size_t hard_cap_ms = 500;
+    const std::size_t bytes_per_ms =
+        static_cast<std::size_t>(audio_frequency) * channels * sizeof(*samples) / 1000;
+    const std::size_t queued_bytes = SDL_GetQueuedAudioSize(audio_device);
+    if (queued_bytes > hard_cap_ms * bytes_per_ms) {
+        std::cerr << "Audio queue reached " << queued_bytes / bytes_per_ms
+                  << " ms; resynchronizing\n";
+        SDL_ClearQueuedAudio(audio_device);
+    } else if (queued_bytes > soft_cap_ms * bytes_per_ms) {
+        return;
+    }
+
+    SDL_QueueAudio(audio_device, samples,
+                   static_cast<std::uint32_t>(sample_count * sizeof(*samples)));
 }
-std::size_t queued_audio_frames() { return audio_device == 0 ? 0 : SDL_GetQueuedAudioSize(audio_device) / 4; }
+std::size_t queued_audio_frames() {
+    std::lock_guard<std::mutex> lock{audio_mutex};
+    if (audio_device == 0) {
+        return 0;
+    }
+    const std::size_t queued = SDL_GetQueuedAudioSize(audio_device) / 4;
+    const std::size_t scheduling_headroom = audio_frequency / 30;
+    return queued > scheduling_headroom ? queued - scheduling_headroom : 0;
+}
 void configure_audio(std::uint32_t frequency) {
+    std::lock_guard<std::mutex> lock{audio_mutex};
     if (audio_device != 0) SDL_CloseAudioDevice(audio_device);
     SDL_AudioSpec wanted{};
     wanted.freq = static_cast<int>(frequency);
@@ -116,6 +145,7 @@ void configure_audio(std::uint32_t frequency) {
     wanted.channels = 2;
     wanted.samples = 1024;
     audio_device = SDL_OpenAudioDevice(nullptr, 0, &wanted, nullptr, 0);
+    audio_frequency = frequency;
     if (audio_device != 0) {
         SDL_PauseAudioDevice(audio_device, 0);
     } else {
