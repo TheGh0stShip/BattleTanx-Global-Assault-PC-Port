@@ -127,6 +127,7 @@ void apply_key(PcSettings& settings, std::string_view key, std::string_view valu
     else if (key == "audio.master_volume") parse_number(value, settings.master_volume);
     else if (key == "audio.music_volume") parse_number(value, settings.music_volume);
     else if (key == "audio.effects_volume") parse_number(value, settings.effects_volume);
+    else if (key == "textures.enabled") parse_bool(value, settings.texture_packs_enabled);
     else if (key == "mods.extended_visibility") parse_bool(value, settings.mod_extended_visibility);
     else if (key == "mods.independent_turret") parse_bool(value, settings.mod_independent_turret);
     else if (key == "mods.mouse_turret_sensitivity") parse_number(value, settings.mouse_turret_sensitivity);
@@ -249,6 +250,7 @@ void PcSettings::save(const std::filesystem::path& path) const {
     stream << "audio.master_volume=" << clean.master_volume << '\n';
     stream << "audio.music_volume=" << clean.music_volume << '\n';
     stream << "audio.effects_volume=" << clean.effects_volume << '\n';
+    stream << "textures.enabled=" << clean.texture_packs_enabled << '\n';
     stream << "mods.extended_visibility=" << clean.mod_extended_visibility << '\n';
     stream << "mods.independent_turret=" << clean.mod_independent_turret << '\n';
     stream << "mods.mouse_turret_sensitivity=" << clean.mouse_turret_sensitivity << '\n';

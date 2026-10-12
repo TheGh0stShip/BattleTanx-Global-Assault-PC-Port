@@ -2,6 +2,7 @@
 #include "btga/controller_pak.hpp"
 #include "btga/pc_settings.hpp"
 #include "btga/sha256.hpp"
+#include "btga/texture_packs.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -90,6 +91,7 @@ int main() {
     CHECK(!settings.mod_extended_visibility);
     CHECK(!settings.mod_independent_turret);
     CHECK(settings.mouse_turret_sensitivity == 1.0F);
+    CHECK(settings.texture_packs_enabled);
     settings.window_mode = btga::WindowMode::Borderless;
     settings.window_width = 2560;
     settings.window_height = 1440;
@@ -99,6 +101,7 @@ int main() {
     settings.master_volume = 0.625F;
     settings.music_volume = 0.5F;
     settings.effects_volume = 0.75F;
+    settings.texture_packs_enabled = false;
     settings.players[1].deadzone = 0.25F;
     settings.players[1].invert_y = true;
     settings.players[1].controller_slot = 3;
@@ -119,6 +122,7 @@ int main() {
     CHECK(loaded.master_volume == 0.625F);
     CHECK(loaded.music_volume == 0.5F);
     CHECK(loaded.effects_volume == 0.75F);
+    CHECK(!loaded.texture_packs_enabled);
     CHECK(loaded.players[1].deadzone == 0.25F);
     CHECK(loaded.players[1].invert_y && loaded.players[1].controller_slot == 3);
     CHECK(loaded.keyboard.button_a == "Space");
@@ -155,6 +159,22 @@ int main() {
     invalid_enum.aspect_ratio = static_cast<btga::AspectRatioMode>(99);
     invalid_enum.validate();
     CHECK(invalid_enum.aspect_ratio == btga::AspectRatioMode::Original);
+
+    const std::filesystem::path texture_dir = settings_dir / "texture-packs";
+    std::filesystem::create_directories(texture_dir / "City Remaster");
+    std::filesystem::create_directories(texture_dir / "Not A Pack");
+    {
+        std::ofstream manifest{texture_dir / "City Remaster" / "rt64.json"};
+        manifest << "{}";
+        std::ofstream archive{texture_dir / "Armor.RTZ", std::ios::binary};
+        archive << "test";
+        std::ofstream ignored{texture_dir / "notes.txt"};
+        ignored << "ignored";
+    }
+    const std::vector<btga::TexturePackInfo> packs = btga::discover_texture_packs(texture_dir);
+    CHECK(packs.size() == 2);
+    CHECK(packs[0].display_name == "Armor" && packs[0].packaged);
+    CHECK(packs[1].display_name == "City Remaster" && !packs[1].packaged);
     std::filesystem::remove_all(settings_dir);
 
 }

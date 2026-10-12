@@ -98,6 +98,26 @@ right click to return the cursor. Mouse turret sensitivity is adjustable in the
 Mods tab. Open F10 settings before changing windows or
 leaving the game; mouse capture is disabled while the settings overlay is open.
 
+### Texture packs
+
+The **Textures** tab discovers RT64 texture packs under the per-user
+`texture-packs` directory. On Windows this is
+`%LOCALAPPDATA%\BattleTanxGA\texture-packs`; on Linux it is
+`$XDG_DATA_HOME/BattleTanxGA/texture-packs` (or
+`~/.local/share/BattleTanxGA/texture-packs`). Use **Open texture-packs folder**
+to create and open the correct location.
+
+Copy either a packaged `.rtz` file or an unpacked directory containing
+`rt64.json` into that folder, select **Rescan now**, and then select
+**Apply & Save**. All discovered packs load together in filename order; later
+packs take precedence where they replace the same texture. The persistent
+**Enable texture packs** switch disables or restores the entire set without
+moving files. Packs are never copied into the installation or uploaded.
+
+RT64 streams DDS replacements asynchronously. Pack authors should include its
+low-mipmap cache to avoid visible pop-in; PNG is accepted for pack development
+but is not recommended for distribution.
+
 ## Renderer diagnostics
 
 RT64's developer inspector can be enabled for renderer debugging without

@@ -18,6 +18,7 @@ add_library(btga_pc_core
     src/pc_settings.cpp
     src/rom.cpp
     src/sha256.cpp
+    src/texture_packs.cpp
     src/world.cpp
 )
 target_include_directories(btga_pc_core PUBLIC include)

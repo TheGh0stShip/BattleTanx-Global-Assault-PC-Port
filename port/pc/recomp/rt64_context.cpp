@@ -17,9 +17,12 @@
 #include <mutex>
 #include <optional>
 #include <string_view>
+#include <vector>
 
+#include "btga/texture_packs.hpp"
 #include "hle/rt64_application.h"
 #include "imgui/imgui.h"
+#include "render/rt64_texture_cache.h"
 #include "ultramodern/ultramodern.hpp"
 
 namespace {
@@ -75,16 +78,16 @@ void open_external_url(const char* url) {
     }
 }
 
-void open_data_folder() {
-    std::filesystem::create_directories(pc_data_path);
+void open_folder(const std::filesystem::path& folder_path) {
+    std::filesystem::create_directories(folder_path);
 #if defined(_WIN32)
-    const std::wstring folder = pc_data_path.wstring();
+    const std::wstring folder = folder_path.wstring();
     if (reinterpret_cast<std::intptr_t>(
             ShellExecuteW(nullptr, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) <= 32) {
-        std::cerr << "Could not open data folder: " << pc_data_path << '\n';
+        std::cerr << "Could not open folder: " << folder_path << '\n';
     }
 #else
-    std::string path = pc_data_path.generic_string();
+    std::string path = folder_path.generic_string();
     std::string encoded;
     encoded.reserve(path.size() + 16);
     constexpr char hex[] = "0123456789ABCDEF";
@@ -100,6 +103,10 @@ void open_data_folder() {
     }
     open_external_url(("file://" + encoded).c_str());
 #endif
+}
+
+void open_data_folder() {
+    open_folder(pc_data_path);
 }
 
 std::string controller_input_name(std::string_view input) {
@@ -329,6 +336,7 @@ public:
         }
         if (app_) {
             if (app_->swapChain != nullptr) app_->swapChain->setVsyncEnabled(pc_settings.vsync);
+            reload_texture_packs();
             app_->customOverlayCallback = [this]() { draw_settings_overlay(); };
             active_context.store(this, std::memory_order_release);
             if (environment_flag_enabled("BTGA_SETTINGS_OPEN")) app_->setCustomOverlayVisible(true);
@@ -441,6 +449,7 @@ private:
             app_->userConfig.refreshRateTarget = draft_settings_.frame_limit;
         }
         app_->updateUserConfig(true);
+        reload_texture_packs();
 
         SDL_Window* window = app_->appWindow->sdlWindow;
         if (window != nullptr) {
@@ -451,6 +460,31 @@ private:
             if (flags == 0) SDL_SetWindowSize(window, draft_settings_.window_width, draft_settings_.window_height);
         }
 
+    }
+
+    void reload_texture_packs() {
+        texture_packs_ = btga::discover_texture_packs(pc_data_path / "texture-packs");
+        texture_pack_status_.clear();
+        if (app_ == nullptr || app_->textureCache == nullptr) return;
+        if (!draft_settings_.texture_packs_enabled || texture_packs_.empty()) {
+            app_->textureCache->clearReplacementDirectories();
+            texture_pack_status_ = texture_packs_.empty() ? "No texture packs found." :
+                "Texture packs are disabled.";
+            return;
+        }
+
+        std::vector<RT64::ReplacementDirectory> directories;
+        directories.reserve(texture_packs_.size());
+        for (const btga::TexturePackInfo& pack : texture_packs_) {
+            directories.emplace_back(pack.path);
+        }
+        if (app_->textureCache->loadReplacementDirectories(directories)) {
+            texture_pack_status_ = "Loaded " + std::to_string(texture_packs_.size()) +
+                (texture_packs_.size() == 1 ? " texture pack." : " texture packs.");
+        }
+        else {
+            texture_pack_status_ = "One or more texture packs failed to load. See the log for details.";
+        }
     }
 
     void draw_binding(const char* label, std::string& binding, int index) {
@@ -572,6 +606,35 @@ private:
                     ImGui::TextDisabled("Both gameplay mods are disabled by default.");
                     ImGui::EndTabItem();
                 }
+                if (ImGui::BeginTabItem("Textures")) {
+                    ImGui::Checkbox("Enable texture packs", &draft_settings_.texture_packs_enabled);
+                    ImGui::TextWrapped("Place RT64 .rtz packs or unpacked pack directories containing rt64.json in:");
+                    ImGui::TextWrapped("%s", (pc_data_path / "texture-packs").string().c_str());
+                    if (ImGui::Button("Open texture-packs folder")) {
+                        open_folder(pc_data_path / "texture-packs");
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Rescan now")) reload_texture_packs();
+                    ImGui::SeparatorText("Discovered packs");
+                    if (texture_packs_.empty()) {
+                        ImGui::TextDisabled("No .rtz files or unpacked RT64 packs found.");
+                    }
+                    else {
+                        for (const btga::TexturePackInfo& pack : texture_packs_) {
+                            ImGui::BulletText("%s (%s)", pack.display_name.c_str(),
+                                              pack.packaged ? ".rtz" : "directory");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("%s", pack.path.string().c_str());
+                            }
+                        }
+                    }
+                    if (!texture_pack_status_.empty()) {
+                        ImGui::Separator();
+                        ImGui::TextWrapped("%s", texture_pack_status_.c_str());
+                    }
+                    ImGui::TextDisabled("Apply & Save reloads all discovered packs. DDS packs with a low-mip cache provide the smoothest streaming.");
+                    ImGui::EndTabItem();
+                }
                 if (ImGui::BeginTabItem("Audio")) {
                     slider_percent("Master volume", draft_settings_.master_volume);
                     slider_percent("Music volume", draft_settings_.music_volume);
@@ -681,6 +744,8 @@ private:
 
     std::unique_ptr<RT64::Application> app_;
     btga::PcSettings draft_settings_;
+    std::vector<btga::TexturePackInfo> texture_packs_;
+    std::string texture_pack_status_;
     int capture_binding_ = -1;
     int controller_capture_player_ = -1;
     int controller_capture_binding_ = -1;
