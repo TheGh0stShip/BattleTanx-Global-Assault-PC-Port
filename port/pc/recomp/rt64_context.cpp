@@ -2,6 +2,7 @@
 
 #if defined(_WIN32)
 #include <Windows.h>
+#include <shellapi.h>
 #include <objidl.h>
 #include <oleauto.h>
 #endif
@@ -39,6 +40,39 @@ bool environment_flag_enabled(const char* name) {
     const std::string_view text{value};
     return !text.empty() && text != "0" && text != "false" && text != "FALSE" &&
            text != "off" && text != "OFF";
+}
+
+void open_external_url(const char* url) {
+    if (SDL_OpenURL(url) != 0) {
+        std::cerr << "Could not open " << url << ": " << SDL_GetError() << '\n';
+    }
+}
+
+void open_data_folder() {
+    std::filesystem::create_directories(pc_data_path);
+#if defined(_WIN32)
+    const std::wstring folder = pc_data_path.wstring();
+    if (reinterpret_cast<std::intptr_t>(
+            ShellExecuteW(nullptr, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) <= 32) {
+        std::cerr << "Could not open data folder: " << pc_data_path << '\n';
+    }
+#else
+    std::string path = pc_data_path.generic_string();
+    std::string encoded;
+    encoded.reserve(path.size() + 16);
+    constexpr char hex[] = "0123456789ABCDEF";
+    for (const unsigned char c : path) {
+        if (std::isalnum(c) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~') {
+            encoded.push_back(static_cast<char>(c));
+        }
+        else {
+            encoded.push_back('%');
+            encoded.push_back(hex[c >> 4]);
+            encoded.push_back(hex[c & 0xF]);
+        }
+    }
+    open_external_url(("file://" + encoded).c_str());
+#endif
 }
 
 std::string controller_input_name(std::string_view input) {
@@ -540,6 +574,43 @@ private:
                         {"C left", &k.c_left}, {"C right", &k.c_right},
                     }};
                     for (std::size_t i = 0; i < bindings.size(); ++i) draw_binding(bindings[i].first, *bindings[i].second, static_cast<int>(i));
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("System")) {
+                    ImGui::SeparatorText("ROM startup");
+                    if (draft_settings_.last_rom_path.empty()) {
+                        ImGui::TextWrapped("The native ROM picker will open on the next launch.");
+                    }
+                    else {
+                        ImGui::TextWrapped("Next launch: %s", draft_settings_.last_rom_path.c_str());
+                    }
+                    if (ImGui::Button("Open ROM picker next launch")) {
+                        draft_settings_.last_rom_path.clear();
+                    }
+                    bool has_recent = false;
+                    for (std::size_t i = 0; i < draft_settings_.recent_rom_paths.size(); ++i) {
+                        const std::string& recent = draft_settings_.recent_rom_paths[i];
+                        if (recent.empty()) continue;
+                        has_recent = true;
+                        ImGui::PushID(static_cast<int>(i));
+                        const std::u8string encoded(
+                            reinterpret_cast<const char8_t*>(recent.data()), recent.size());
+                        const std::filesystem::path path{encoded};
+                        const std::string filename = path.filename().string();
+                        if (ImGui::Button(("Use " + filename + " next launch").c_str())) {
+                            draft_settings_.last_rom_path = recent;
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", recent.c_str());
+                        ImGui::PopID();
+                    }
+                    if (!has_recent) ImGui::TextDisabled("No recently verified ROM paths yet.");
+                    ImGui::TextDisabled("Changing ROMs takes effect after restarting the game.");
+                    ImGui::SeparatorText("Support and files");
+                    if (ImGui::Button("Open saves and settings folder")) open_data_folder();
+                    ImGui::SameLine();
+                    if (ImGui::Button("Open support page")) {
+                        open_external_url("https://github.com/TheGh0stShip/BattleTanx-Global-Assault-PC-Port/issues");
+                    }
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Mods")) {

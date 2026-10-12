@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -452,6 +453,19 @@ void show_error(const char* message) {
     std::cerr << "Runtime error: " << message << '\n';
 }
 
+std::filesystem::path write_failure_log(const char* message) {
+    const std::filesystem::path directory = btga::pc_user_data_directory();
+    const std::filesystem::path path = directory / "crash.log";
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    std::ofstream log{path, std::ios::app};
+    if (log) {
+        const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        log << "\n[" << now << "] BattleTanxGA runtime failure\n" << message << '\n';
+    }
+    return path;
+}
+
 #if defined(_WIN32) && defined(BTGA_HAS_RT64)
 std::optional<std::filesystem::path> choose_rom() {
     wchar_t file[MAX_PATH]{};
@@ -760,8 +774,10 @@ int main(int argc, char** argv) {
     try {
         return runtime_main(argc, argv);
     } catch (const std::exception& error) {
-        std::cerr << "BattleTanx: Global Assault could not start: " << error.what() << '\n';
-        show_startup_error(error.what());
+        const std::filesystem::path log = write_failure_log(error.what());
+        const std::string detail = std::string{error.what()} + "\n\nDiagnostic log:\n" + log.string();
+        std::cerr << "BattleTanx: Global Assault could not start: " << detail << '\n';
+        show_startup_error(detail.c_str());
         return 1;
     }
 }

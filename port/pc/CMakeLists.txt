@@ -114,6 +114,9 @@ if(BTGA_BUILD_RECOMP)
                 "${BTGA_N64_RUNTIME_ROOT}/ultramodern/include"
             )
             target_link_libraries(btga_rt64_renderer PRIVATE rt64 ultramodern SDL2::SDL2)
+            if(WIN32)
+                target_link_libraries(btga_rt64_renderer PRIVATE shell32)
+            endif()
             target_compile_definitions(btga_rt64_renderer PRIVATE
                 RT64_SDL_WINDOW_VULKAN HLSL_CPU NOMINMAX)
         endif()

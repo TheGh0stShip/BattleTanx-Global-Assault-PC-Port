@@ -27,13 +27,21 @@ representative GPU/controller combinations still need broader validation.
 The launcher passes the ROM directly to `BattleTanxGA.exe`; it does not copy,
 modify, upload, or bundle it. The runtime validates the ROM before starting and
 shows an error dialog for a wrong revision, bad dump, missing file, or startup
-failure instead of exiting silently.
+failure instead of exiting silently. Unexpected startup failures are appended
+to `crash.log` in the per-user data directory, and the dialog displays that
+path so it can be included in a support report.
 
 The last verified ROM and up to five recent ROM paths are remembered in
 `%LOCALAPPDATA%\BattleTanxGA\settings.ini`; the ROM itself is never copied.
 Run `BattleTanxGA.exe --choose-rom` (or use the CMD launcher) whenever you want
 to select a different dump. If a remembered file was moved, deleted, or no
 longer validates, the native picker opens again automatically.
+
+The F10 overlay's **System** tab lists recently verified ROM paths and lets you
+choose which one should be used on the next launch, request the native picker,
+open the per-user save/settings directory, or open the project's support page.
+ROM changes intentionally take effect after restarting so no live N64 state is
+carried between different cartridge images.
 
 ## Controls
 
