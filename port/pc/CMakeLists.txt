@@ -79,16 +79,20 @@ if(BTGA_BUILD_RECOMP)
 
         add_subdirectory("${BTGA_N64_RUNTIME_ROOT}" "${CMAKE_BINARY_DIR}/N64ModernRuntime")
         add_executable(btga_runtime_probe
+            recomp/register_overlays.cpp
             recomp/runtime_probe.cpp
             recomp/runtime_compat.cpp
         )
         target_include_directories(btga_runtime_probe PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
             "${BTGA_RECOMP_DIR}"
             "${BTGA_N64_RUNTIME_ROOT}/librecomp/include"
             "${BTGA_N64_RUNTIME_ROOT}/N64Recomp/include"
+            "${BTGA_N64_RUNTIME_ROOT}/thirdparty"
             "${BTGA_N64_RUNTIME_ROOT}/ultramodern/include"
         )
         target_link_libraries(btga_runtime_probe PRIVATE
+            btga_pc_core
             btga_recompiled_game
             librecomp
             ultramodern

@@ -45,6 +45,14 @@ libultra internals not supplied by the modern runtime currently fail loudly if
 reached; replacing those guards and providing renderer, RSP, audio and input
 callbacks are explicit remaining boot work.
 
+An experimental headless boot path validates the local ROM again, registers it
+with N64ModernRuntime, and runs until the first unsupported runtime boundary or
+for five seconds:
+
+```sh
+./build-pc-runtime/btga_runtime_probe --boot /path/to/battletanx_ga.z64
+```
+
 The configuration currently establishes the complete code-generation boundary.
 Runtime integration still requires N64ModernRuntime/RT64 service glue and RSP
 microcode recompilation; generated code alone is not presented as playable.
