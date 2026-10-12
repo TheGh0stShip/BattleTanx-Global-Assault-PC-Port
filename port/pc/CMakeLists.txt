@@ -6,8 +6,7 @@ include(FetchContent)
 set(BTGA_NET_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(btga_networking
     GIT_REPOSITORY https://github.com/TheGh0stShip/BattleTanx-Global-Assault-Networking.git
-    GIT_TAG 97b190991311525e360b426e4d303a948264c881
-    GIT_SHALLOW TRUE)
+    GIT_TAG 97b190991311525e360b426e4d303a948264c881)
 FetchContent_MakeAvailable(btga_networking)
 
 option(BTGA_BUILD_RECOMP "Compile locally generated N64Recomp output" OFF)
