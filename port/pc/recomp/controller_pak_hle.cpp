@@ -41,6 +41,7 @@ enum PfsError : std::int32_t {
     err_data_full = 7,
     err_directory_full = 8,
     err_exists = 9,
+    err_id_fatal = 10,
 };
 
 std::mutex pak_mutex;
@@ -124,7 +125,10 @@ extern "C" void osPfsInitPak_recomp(std::uint8_t* rdram, recomp_context* ctx) {
     if (port < 0 || port >= max_ports) { result(ctx, err_controller); return; }
     // Port 1 is the playable controller. Additional ports remain absent until
     // multiplayer input is configured rather than mirroring player one.
-    if (port != 0) { result(ctx, err_no_pak); return; }
+    // Player one defaults to a memory pak for saves. Additional connected
+    // controllers are exposed as Rumble Paks; the game recognizes them when
+    // PFS initialization returns the real ID-area failure code.
+    if (port != 0) { result(ctx, err_id_fatal); return; }
     std::lock_guard lock{pak_mutex};
     load_pak(port);
     const auto image = paks[port].image();

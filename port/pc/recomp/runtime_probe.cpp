@@ -1,4 +1,5 @@
 #include <charconv>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <cstdint>
@@ -31,6 +32,7 @@ extern RspUcodeFunc n_aspMain;
 
 namespace {
 constexpr std::u8string_view game_id = u8"battletanx-ga.n64.us.1.0";
+constexpr int max_controllers = 4;
 
 std::atomic_uint32_t created_threads{0};
 std::atomic_uint32_t display_lists{0};
@@ -42,7 +44,7 @@ SDL_Window* window = nullptr;
 SDL_AudioDeviceID audio_device = 0;
 std::mutex audio_mutex;
 std::uint32_t audio_frequency = 44100;
-SDL_GameController* gamepad = nullptr;
+std::array<SDL_GameController*, max_controllers> gamepads{};
 bool interactive = false;
 #endif
 
@@ -159,35 +161,56 @@ void poll_input() {
 #ifdef BTGA_HAS_RT64
     if (!interactive) return;
     SDL_PumpEvents();
-    if (gamepad && !SDL_GameControllerGetAttached(gamepad)) {
-        SDL_GameControllerClose(gamepad);
-        gamepad = nullptr;
+    for (auto& gamepad : gamepads) {
+        if (gamepad && !SDL_GameControllerGetAttached(gamepad)) {
+            SDL_GameControllerClose(gamepad);
+            gamepad = nullptr;
+        }
     }
-    if (!gamepad) {
-        for (int i = 0; i < SDL_NumJoysticks(); ++i) {
-            if (SDL_IsGameController(i)) { gamepad = SDL_GameControllerOpen(i); break; }
+    for (int device = 0; device < SDL_NumJoysticks(); ++device) {
+        if (!SDL_IsGameController(device)) continue;
+        const SDL_JoystickID instance = SDL_JoystickGetDeviceInstanceID(device);
+        bool already_open = false;
+        for (SDL_GameController* gamepad : gamepads) {
+            if (gamepad && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gamepad)) == instance) {
+                already_open = true;
+                break;
+            }
+        }
+        if (already_open) continue;
+        for (auto& gamepad : gamepads) {
+            if (!gamepad) {
+                gamepad = SDL_GameControllerOpen(device);
+                break;
+            }
         }
     }
 #endif
 }
 bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
-    if (controller != 0) {
+    if (controller < 0 || controller >= max_controllers) {
         return false;
     }
 #ifdef BTGA_HAS_RT64
     if (interactive) {
-        const auto* keys = SDL_GetKeyboardState(nullptr);
-        *buttons = (keys[SDL_SCANCODE_X] ? 0x8000 : 0) | (keys[SDL_SCANCODE_Z] ? 0x4000 : 0) |
-                   (keys[SDL_SCANCODE_LSHIFT] ? 0x2000 : 0) | (keys[SDL_SCANCODE_RETURN] ? 0x1000 : 0) |
-                   (keys[SDL_SCANCODE_UP] ? 0x0800 : 0) | (keys[SDL_SCANCODE_DOWN] ? 0x0400 : 0) |
-                   (keys[SDL_SCANCODE_LEFT] ? 0x0200 : 0) | (keys[SDL_SCANCODE_RIGHT] ? 0x0100 : 0) |
-                   (keys[SDL_SCANCODE_Q] ? 0x20 : 0) | (keys[SDL_SCANCODE_E] ? 0x10 : 0) |
-                   (keys[SDL_SCANCODE_I] ? 0x08 : 0) | (keys[SDL_SCANCODE_K] ? 0x04 : 0) |
-                   (keys[SDL_SCANCODE_J] ? 0x02 : 0) | (keys[SDL_SCANCODE_L] ? 0x01 : 0);
-        *x = float(keys[SDL_SCANCODE_D] - keys[SDL_SCANCODE_A]);
-        *y = float(keys[SDL_SCANCODE_W] - keys[SDL_SCANCODE_S]);
+        *buttons = 0;
+        *x = 0.0F;
+        *y = 0.0F;
+        if (controller == 0) {
+            const auto* keys = SDL_GetKeyboardState(nullptr);
+            *buttons = (keys[SDL_SCANCODE_X] ? 0x8000 : 0) | (keys[SDL_SCANCODE_Z] ? 0x4000 : 0) |
+                       (keys[SDL_SCANCODE_LSHIFT] ? 0x2000 : 0) | (keys[SDL_SCANCODE_RETURN] ? 0x1000 : 0) |
+                       (keys[SDL_SCANCODE_UP] ? 0x0800 : 0) | (keys[SDL_SCANCODE_DOWN] ? 0x0400 : 0) |
+                       (keys[SDL_SCANCODE_LEFT] ? 0x0200 : 0) | (keys[SDL_SCANCODE_RIGHT] ? 0x0100 : 0) |
+                       (keys[SDL_SCANCODE_Q] ? 0x20 : 0) | (keys[SDL_SCANCODE_E] ? 0x10 : 0) |
+                       (keys[SDL_SCANCODE_I] ? 0x08 : 0) | (keys[SDL_SCANCODE_K] ? 0x04 : 0) |
+                       (keys[SDL_SCANCODE_J] ? 0x02 : 0) | (keys[SDL_SCANCODE_L] ? 0x01 : 0);
+            *x = float(keys[SDL_SCANCODE_D] - keys[SDL_SCANCODE_A]);
+            *y = float(keys[SDL_SCANCODE_W] - keys[SDL_SCANCODE_S]);
+        }
+        SDL_GameController* gamepad = gamepads[controller];
         if (gamepad) {
-            auto pressed = [](SDL_GameControllerButton b) { return SDL_GameControllerGetButton(gamepad, b) != 0; };
+            auto pressed = [gamepad](SDL_GameControllerButton b) { return SDL_GameControllerGetButton(gamepad, b) != 0; };
             *buttons |= (pressed(SDL_CONTROLLER_BUTTON_A) ? 0x8000 : 0) |
                         (pressed(SDL_CONTROLLER_BUTTON_X) ? 0x4000 : 0) |
                         (pressed(SDL_CONTROLLER_BUTTON_BACK) ? 0x2000 : 0) |
@@ -207,15 +230,18 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
             if (gy > 0.15F || gy < -0.15F) *y = gy;
             if (SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 8000) *buttons |= 0x2000;
         }
-        return true;
+        return controller == 0 || gamepad != nullptr;
     }
 #endif
+    if (controller != 0) return false;
     *buttons = 0; *x = 0.0F; *y = 0.0F;
     return true;
 }
 void set_rumble(int controller, bool enabled) {
 #ifdef BTGA_HAS_RT64
-    if (interactive && controller == 0 && gamepad) {
+    if (interactive && controller >= 0 && controller < max_controllers &&
+        gamepads[controller]) {
+        SDL_GameController* gamepad = gamepads[controller];
         SDL_GameControllerRumble(gamepad, enabled ? 0xFFFF : 0, enabled ? 0xFFFF : 0, 250);
     }
 #else
@@ -229,6 +255,12 @@ ultramodern::input::connected_device_info_t connected_device(int controller) {
         // determines that this is a memory pak rather than a rumble pak.
         return {ultramodern::input::Device::Controller, ultramodern::input::Pak::RumblePak};
     }
+#ifdef BTGA_HAS_RT64
+    if (interactive && controller > 0 && controller < max_controllers &&
+        gamepads[controller]) {
+        return {ultramodern::input::Device::Controller, ultramodern::input::Pak::RumblePak};
+    }
+#endif
     return {ultramodern::input::Device::None, ultramodern::input::Pak::None};
 }
 
@@ -426,6 +458,9 @@ int main(int argc, char** argv) {
                                   SDL_WINDOWPOS_CENTERED, 960, 720,
                                   SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
         if (!window) { std::cerr << "Window creation failed: " << SDL_GetError() << '\n'; return 1; }
+        // Populate ports before libultra's initial controller query. Hot-plug
+        // changes are picked up by the same routine during normal polling.
+        poll_input();
     }
 #else
     if (play) { std::cerr << "This build does not include RT64\n"; return 1; }
@@ -473,9 +508,11 @@ int main(int argc, char** argv) {
     };
     recomp::start(config);
 #ifdef BTGA_HAS_RT64
-    if (gamepad != nullptr) {
-        SDL_GameControllerClose(gamepad);
-        gamepad = nullptr;
+    for (auto& gamepad : gamepads) {
+        if (gamepad != nullptr) {
+            SDL_GameControllerClose(gamepad);
+            gamepad = nullptr;
+        }
     }
     if (audio_device != 0) {
         SDL_CloseAudioDevice(audio_device);

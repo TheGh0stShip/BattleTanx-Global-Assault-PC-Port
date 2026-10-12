@@ -24,8 +24,9 @@ validation.
 - Arrow keys: D-pad
 - I / J / K / L: C buttons
 
-SDL game controllers use the left stick, face and shoulder buttons, left
-trigger, D-pad, and rumble.
+Up to four SDL game controllers are assigned to N64 ports in discovery order
+and use the left stick, face and shoulder buttons, left trigger, D-pad, and
+rumble. Keyboard input is combined with the first controller for player one.
 
 ## Renderer diagnostics
 
