@@ -255,13 +255,14 @@ and relay. **F10 → Online** browses, hosts, and joins real public relay lobbie
 The earlier peer-hosted synchronization mode remains experimental and is being
 superseded by a native dedicated authority: the server executes the translated
 gameplay simulation, publishes canonical four-player inputs, and periodically
-rebases clients with canonical world snapshots. The authority and a real
-translated Windows client now complete an automated public-relay gate with
-three additional protocol clients while checking every authoritative tick for
-divergence. Periodic recovery snapshots are validated without overwriting a
-synchronized client. Mid-match reconnect from a genuinely diverged process
-still requires a broader causal-state schema, so this is not yet a
-release-ready public multiplayer mode. Live
+rebases clients with canonical world snapshots. The authority and a translated
+Windows client complete an automated public-relay gate with three additional
+protocol clients. The server is isolated from render, controller, and audio
+interrupt waits, and clients restore a complete canonical snapshot at the tick
+boundary when prediction differs. Full recovery snapshots are sent every five
+ticks; bandwidth-efficient deltas and longer interactive campaign validation
+are still required before this becomes a release-ready public multiplayer
+mode. Live
 service status is available at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/).
 Opening the Online tab itself remains network-inert; Refresh, Host, and Join are

@@ -34,6 +34,7 @@ extern "C" {
 namespace {
 constexpr std::size_t rdram_size = 8U * 1024U * 1024U;
 std::mutex authority_mutex;
+std::mutex master_mutex;
 btga::TranslatedAuthority authority{0x0fU, 30U, 3U};
 std::array<btga::OnlineControllerInput, btga::online_player_limit> active_inputs{};
 std::array<std::chrono::steady_clock::time_point, btga::online_player_limit>
@@ -42,6 +43,7 @@ std::array<bool, btga::online_player_limit> client_seen{};
 std::chrono::steady_clock::time_point authority_started;
 bool enabled = false;
 bool gameplay_tick_active = false;
+thread_local bool dedicated_loop_running = false;
 std::uint32_t active_tick = 0;
 std::uint32_t inactive_tick_probes = 0;
 std::uint32_t network_poll_count = 0;
@@ -58,6 +60,26 @@ std::unique_ptr<btga::MasterClient> master;
 std::string public_lobby_id;
 std::string public_host_secret;
 std::chrono::steady_clock::time_point next_heartbeat{};
+
+void poll_master_heartbeat() {
+    const auto now = std::chrono::steady_clock::now();
+    unsigned players = 0;
+    {
+        const std::lock_guard lock{authority_mutex};
+        const auto mask = authority.connected_mask();
+        for (unsigned seat = 0; seat < 4; ++seat) players += (mask >> seat) & 1U;
+    }
+    const std::lock_guard lock{master_mutex};
+    if (!master || now < next_heartbeat) return;
+    try {
+        master->heartbeat(public_lobby_id, public_host_secret,
+                          static_cast<std::uint16_t>(std::max(1U, players)),
+                          players == configured_players ? "playing" : "lobby");
+    } catch (const std::exception& exception) {
+        std::fprintf(stderr, "BTGA_AUTHORITY heartbeat failed: %s\n", exception.what());
+    }
+    next_heartbeat = now + std::chrono::seconds{15};
+}
 
 std::uint32_t server_clock_tick() {
     const auto elapsed = std::chrono::steady_clock::now() - authority_started;
@@ -127,8 +149,8 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
     enabled = true;
     network_thread = std::jthread([](std::stop_token stop) {
         while (!stop.stop_requested()) {
-            btga_dedicated_network_poll();
-            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+            poll_master_heartbeat();
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
         }
     });
     return true;
@@ -256,11 +278,14 @@ bool btga_dedicated_enable_public(std::string_view name, std::string& error) {
             const std::lock_guard lock{authority_mutex};
             if (!enable_relay(registration.session_id, registration.relay,
                               registration.relay_token, error)) return false;
-            public_lobby_id = registration.lobby.id;
-            public_host_secret = registration.host_secret;
-            next_heartbeat = std::chrono::steady_clock::now();
-            master_http = std::move(http);
-            master = std::move(client);
+            {
+                const std::lock_guard master_lock{master_mutex};
+                public_lobby_id = registration.lobby.id;
+                public_host_secret = registration.host_secret;
+                next_heartbeat = std::chrono::steady_clock::now();
+                master_http = std::move(http);
+                master = std::move(client);
+            }
         }
         std::printf("ONLINE_LOBBY_ID=%s\n", public_lobby_id.c_str());
         std::fflush(stdout);
@@ -327,19 +352,6 @@ void btga_dedicated_network_poll()
             (void)authority.set_connected(seat, false);
         }
     }
-    if (master && now >= next_heartbeat) {
-        unsigned players = 0;
-        const auto mask = authority.connected_mask();
-        for (unsigned seat = 0; seat < 4; ++seat) players += (mask >> seat) & 1U;
-        try {
-            master->heartbeat(public_lobby_id, public_host_secret,
-                              static_cast<std::uint16_t>(std::max(1U, players)),
-                              players == configured_players ? "playing" : "lobby");
-        } catch (const std::exception& exception) {
-            std::fprintf(stderr, "BTGA_AUTHORITY heartbeat failed: %s\n", exception.what());
-        }
-        next_heartbeat = now + std::chrono::seconds{15};
-    }
 }
 
 bool btga_dedicated_controller_input(
@@ -379,6 +391,7 @@ extern "C" void btga_dedicated_tick_begin(
         }
         return;
     }
+    std::uint32_t wait_iterations = 0;
     for (;;) {
         btga_dedicated_network_poll();
         {
@@ -389,6 +402,13 @@ extern "C" void btga_dedicated_tick_begin(
                 std::ranges::copy(authority.inputs(), active_inputs.begin());
                 gameplay_tick_active = true;
                 return;
+            }
+            if (++wait_iterations % 1000U == 0U) {
+                std::fprintf(stderr,
+                             "BTGA_AUTHORITY waiting for tick=%u clock=%u connected=%02x\n",
+                             authority.next_tick(), server_clock_tick(),
+                             authority.connected_mask());
+                std::fflush(stderr);
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{1});
@@ -438,6 +458,12 @@ extern "C" void btga_dedicated_run_loop(
     std::uint8_t* rdram, recomp_context* context)
 {
     if (!btga_dedicated_enabled()) return;
+    // func_8009C524 contains the hook that enters this loop, and the loop must
+    // call func_8009C524 once per server tick.  Some retail state transitions
+    // reach that hook again from inside the tick.  Do not recursively start a
+    // second infinite server loop on the same translated thread.
+    if (dedicated_loop_running) return;
+    dedicated_loop_running = true;
 
     // The retail top-level loop is coupled to graphics-task completion and VI
     // pacing. A server has neither. Own the server clock here and invoke the
@@ -484,7 +510,7 @@ extern "C" void btga_dedicated_run_loop(
             const std::lock_guard lock{authority_mutex};
             const std::uint32_t next_tick = authority.next_tick();
             if (next_tick > 1U && next_tick != last_snapshot_tick &&
-                next_tick % 30U == 1U) {
+                next_tick % 5U == 1U) {
                 std::array<std::uint8_t, btga::gameplay_snapshot_size> state{};
                 if (btga::capture_gameplay_snapshot({rdram, rdram_size}, state) &&
                     encode_and_send_snapshot(next_tick, state)) {

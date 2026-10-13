@@ -388,7 +388,8 @@ extern "C" void func_80079FF0(std::uint8_t* rdram, recomp_context*) {
     const gpr state = MEM_W(0, state_global);
     const gpr source = ADD32(state, 0xC8);
 
-    while (MEM_W(0xC4, MEM_W(0, state_global)) != 0) {
+    while (!btga_dedicated_enabled() && !btga_dedicated_client_enabled() &&
+           MEM_W(0xC4, MEM_W(0, state_global)) != 0) {
         // The original loop is interrupted by the N64 scheduler. Yield to the
         // cooperative host scheduler so the task-completion interrupt can run.
         yield_self_1ms(rdram);

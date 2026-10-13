@@ -293,12 +293,15 @@ dedicated authority. The authority runs the translated gameplay simulation,
 waits for four authenticated seats before tick zero, continues when a seat
 times out, publishes canonical input frames, and sends periodic canonical
 gameplay snapshots. A real translated Windows client plus three protocol peers
-has completed this flow through the public service. The gate now rejects any
-client/authority digest divergence instead of accepting a boot-only success.
-An established client confirms matching recovery snapshots and refuses to
-overwrite live state with a nonmatching one. Complete mid-match reconnect is
-still under development, so this remains a development path rather than a
-finished public multiplayer mode.
+has completed this flow through the public service. Recovery state is captured
+at tick entry and a client restores the server snapshot when its prediction
+differs, rather than allowing divergence to persist. Full snapshots currently
+arrive every five ticks. The unattended headless gate remains strictly
+digest-identical, and a rendered Windows client has passed beyond tick 1,800
+with every checkpoint byte-identical and no authority timeout. Delta snapshots,
+longer interactive campaign coverage, and complete reconnect validation remain
+under development, so this is a development path rather than a finished public
+mode.
 
 Build and run the current dedicated gate on Windows with:
 

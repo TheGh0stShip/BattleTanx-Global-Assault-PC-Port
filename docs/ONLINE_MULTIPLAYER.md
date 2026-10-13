@@ -14,19 +14,21 @@ explicit opt-in actions.
   canonical input set and broadcasts it with a canonical state digest.
 - The server waits for all configured seats before tick zero, but does not
   freeze the match when a connected seat later times out.
-- Canonical gameplay snapshots are sent at startup and every 30 ticks. A new
-  match client can bootstrap from initial authority state; an established
-  client confirms a matching snapshot but never lets a nonmatching partial
-  snapshot overwrite a simulation already advancing on canonical frames.
+- Canonical gameplay snapshots are sent at startup and every five ticks. A new
+  match client bootstraps from authority state. An established client applies a
+  complete same-tick snapshot when prediction differs, or fast-forwards to a
+  newer snapshot after missing authoritative frames.
 - The public master, Azure UDP relay, four protocol clients, and a real
   translated headless client are covered by an unattended PowerShell gate.
 
-The translated Windows client and three protocol peers pass an unattended
-four-seat public-relay gate with every simulated tick checked against the
-authority digest. The portable snapshot schema excludes host-local audio
-handles. A complete causal-state schema for seamless mid-match reconnect, plus
-server-driven rendering/interpolation, remain required before this is exposed
-as a finished menu option.
+The translated headless Windows client and three protocol peers pass an
+unattended four-seat public-relay gate with every simulated tick checked against
+the authority digest. A rendered client has also run beyond tick 1,800 without
+an authority stall or digest mismatch; every periodic snapshot was confirmed
+byte-for-byte. The portable snapshot schema excludes host-local audio handles.
+Delta compression, longer interactive campaign coverage, server-driven
+interpolation, and seamless reconnect validation remain required before this is
+exposed as a finished menu option.
 
 ```powershell
 .\port\pc\scripts\test-dedicated-multiplayer.ps1 `

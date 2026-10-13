@@ -39,6 +39,7 @@ std::uint8_t local_seat = 0;
 bool client_enabled = false;
 bool tick_active = false;
 bool bootstrap_complete = false;
+bool divergence_reported = false;
 std::uint64_t expected_digest = 0;
 std::chrono::steady_clock::time_point next_keepalive{};
 
@@ -127,8 +128,11 @@ bool btga_dedicated_client_enable(
     expected_tick = 0U;
     input_sequence = 0U;
     frames.fill(std::nullopt);
+    pending_snapshot.reset();
+    tick_active = false;
     client_enabled = true;
     bootstrap_complete = false;
+    divergence_reported = false;
     next_keepalive = std::chrono::steady_clock::now();
     if (!send_inputs_locked(0U, {})) {
         error = "could not announce dedicated-client readiness";
@@ -170,11 +174,18 @@ extern "C" void btga_dedicated_client_tick_begin(
             const bool was_bootstrapped = bootstrap_complete;
             const bool fast_forward =
                 bootstrap_complete && pending_snapshot->tick > expected_tick;
-            const bool may_restore = !bootstrap_complete || fast_forward;
+            // A snapshot is the dedicated server's canonical tick-entry
+            // state.  Restore it even at the client's current tick when the
+            // digest differs; discarding it would make every later frame
+            // permanently diverge.  Newer snapshots additionally fast-forward
+            // a client that missed one or more authoritative frames.
+            const bool may_restore =
+                !bootstrap_complete || pending_snapshot->tick >= expected_tick;
             if (already_current || (may_restore && btga::restore_gameplay_snapshot(
                     {rdram, rdram_size}, pending_snapshot->state))) {
                 expected_tick = pending_snapshot->tick;
                 bootstrap_complete = true;
+                if (!already_current) divergence_reported = false;
                 if (!was_bootstrapped || fast_forward) frames.fill(std::nullopt);
                 std::fprintf(stderr, "BTGA_CLIENT %s snapshot tick=%u\n",
                              already_current ? "confirmed" : "applied",
@@ -216,13 +227,14 @@ extern "C" void btga_dedicated_client_tick_end(
     std::array<std::uint8_t, btga::gameplay_snapshot_size> canonical_state{};
     if (btga::capture_gameplay_snapshot({rdram, rdram_size}, canonical_state)) {
         const std::uint64_t digest = state_digest(canonical_state);
-        if (digest != expected_digest) {
+        if (digest != expected_digest && !divergence_reported) {
             std::fprintf(stderr,
                          "BTGA_CLIENT DESYNC tick=%u authority=%016llx local=%016llx\n",
                          expected_tick,
                          static_cast<unsigned long long>(expected_digest),
                          static_cast<unsigned long long>(digest));
             std::fflush(stderr);
+            divergence_reported = true;
         }
     }
     ++expected_tick;
