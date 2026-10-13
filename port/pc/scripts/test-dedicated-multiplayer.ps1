@@ -33,9 +33,17 @@ if (-not (Test-Path $server) -or -not (Test-Path $bot)) {
     throw "Build BattleTanxGA.exe and btga_dedicated_client_bot.exe first."
 }
 
-$evidence = Join-Path $build "dedicated-evidence"
-New-Item $evidence -ItemType Directory -Force | Out-Null
-Get-ChildItem $evidence -File -ErrorAction SilentlyContinue | Remove-Item -Force
+$evidenceRoot = Join-Path $build "dedicated-evidence"
+New-Item $evidenceRoot -ItemType Directory -Force | Out-Null
+$runId = "run-{0}-{1}-{2}" -f [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssfffZ"),
+    $PID, ([Guid]::NewGuid().ToString("N").Substring(0, 8))
+$evidence = Join-Path $evidenceRoot $runId
+New-Item $evidence -ItemType Directory | Out-Null
+# Do not clear or reuse an earlier run's directory: redirected process handles
+# can remain open briefly after termination, and fixed filenames made the next
+# unattended gate fail before it even launched. This pointer is informational;
+# the unique directory printed on success remains the authoritative evidence.
+Set-Content -Path (Join-Path $evidenceRoot "latest.txt") -Value $evidence -Encoding utf8
 $authorityOut = Join-Path $evidence "authority.stdout.log"
 $authorityErr = Join-Path $evidence "authority.stderr.log"
 $clientOut = Join-Path $evidence "client.stdout.log"
