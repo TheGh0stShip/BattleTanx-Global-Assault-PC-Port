@@ -741,16 +741,16 @@ int main() {
         std::string last_bearer;
     } http;
     http.responses = {
-        {200, R"({"lobbies":[{"id":"lobby-1","name":"Desert Duel","build":"pc-port-v1","platform":"pc","region":"eastus","state":"lobby","capabilities":2,"max_players":4,"current_players":2}]})"},
-        {201, R"({"lobby":{"id":"hosted-1","name":"My Lobby","build":"pc-port-v1","platform":"pc","region":"eastus","state":"lobby","capabilities":2,"max_players":4,"current_players":1},"host_secret":"host-secret","session_id":"1020304050607080","relay":{"address":"relay.example","udp_port":30420},"relay_token":"host.token"})"},
+        {200, R"({"lobbies":[{"id":"lobby-1","name":"Desert Duel","build":"pc-port-v2","platform":"pc","region":"eastus","state":"lobby","capabilities":2,"max_players":4,"current_players":2}]})"},
+        {201, R"({"lobby":{"id":"hosted-1","name":"My Lobby","build":"pc-port-v2","platform":"pc","region":"eastus","state":"lobby","capabilities":2,"max_players":4,"current_players":1},"host_secret":"host-secret","session_id":"1020304050607080","relay":{"address":"relay.example","udp_port":30420},"relay_token":"host.token"})"},
         {200, R"({"session_id":"1020304050607080","seat":2,"relay":{"address":"relay.example","udp_port":30420},"join_token":"join.token","resume_token":"resume.token"})"},
-        {200, R"({"id":"hosted-1","name":"My Lobby","build":"pc-port-v1","platform":"pc","region":"eastus","state":"playing","capabilities":2,"max_players":4,"current_players":2,"expires_at":1800000090,"relay_token":"refreshed.token"})"},
+        {200, R"({"id":"hosted-1","name":"My Lobby","build":"pc-port-v2","platform":"pc","region":"eastus","state":"playing","capabilities":2,"max_players":4,"current_players":2,"expires_at":1800000090,"relay_token":"refreshed.token"})"},
         {204, ""}
     };
     btga::MasterClient master{http};
     const auto lobbies = master.list_lobbies();
     CHECK(lobbies.size() == 1 && lobbies[0].current_players == 2);
-    CHECK(http.last_method == "GET" && http.last_path == "/lobbies?protocol=1&build=pc-port-v1");
+    CHECK(http.last_method == "GET" && http.last_path == "/lobbies?protocol=1&build=pc-port-v2");
     const auto hosted = master.host("My Lobby", 4);
     CHECK(hosted.session_id == UINT64_C(0x1020304050607080));
     CHECK(hosted.relay.address == "relay.example" && hosted.relay.port == 30420);

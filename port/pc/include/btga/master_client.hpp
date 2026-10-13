@@ -65,7 +65,7 @@ struct JoinRegistration {
 class MasterClient {
 public:
     static constexpr std::uint16_t protocol_version = 1;
-    explicit MasterClient(HttpClient& http, std::string build = "pc-port-v1");
+    explicit MasterClient(HttpClient& http, std::string build = "pc-port-v2");
 
     std::vector<OnlineLobby> list_lobbies();
     HostRegistration host(std::string_view name, std::uint16_t max_players,
