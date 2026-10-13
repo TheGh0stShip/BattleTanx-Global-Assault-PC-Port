@@ -54,12 +54,18 @@ if ($ReconnectAuthority) {
 }
 $processes = [System.Collections.Generic.List[Diagnostics.Process]]::new()
 $peers = [System.Collections.Generic.List[Diagnostics.Process]]::new()
+# MasterClient can make four HTTP attempts separated by three server-directed
+# waits of at most 30 seconds. Leave room for each WinHTTP transaction and for
+# checkpoint replay after a resumed join; otherwise the harness kills a client
+# that is correctly honoring Retry-After.
+$masterOperationDeadlineSeconds = 150
+$resumeRecoveryDeadlineSeconds = 180
 try {
     $authority = Start-Process $server -PassThru -WindowStyle Minimized `
         -ArgumentList @("--dedicated-server-public", $romPath) `
         -RedirectStandardOutput $authorityOut -RedirectStandardError $authorityErr
     $processes.Add($authority)
-    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+    $deadline = [DateTime]::UtcNow.AddSeconds($masterOperationDeadlineSeconds)
     do {
         Start-Sleep -Milliseconds 100
         $lobbyLine = if (Test-Path $authorityOut) {
@@ -82,7 +88,7 @@ try {
         -ArgumentList $clientArguments `
         -RedirectStandardOutput $clientOut -RedirectStandardError $clientErr
     $processes.Add($client)
-    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    $deadline = [DateTime]::UtcNow.AddSeconds($masterOperationDeadlineSeconds)
     do {
         Start-Sleep -Milliseconds 100
         $clientText = ""
@@ -111,7 +117,7 @@ try {
             -RedirectStandardOutput $out -RedirectStandardError $err
         $processes.Add($peer)
         $peers.Add($peer)
-        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        $deadline = [DateTime]::UtcNow.AddSeconds($masterOperationDeadlineSeconds)
         do {
             Start-Sleep -Milliseconds 100
             $peerText = ""
@@ -141,7 +147,7 @@ try {
                 -ArgumentList @("--dedicated-server-public", $romPath) `
                 -RedirectStandardOutput $authorityOut -RedirectStandardError $authorityErr
             $processes.Add($authority)
-            $deadline = [DateTime]::UtcNow.AddSeconds(25)
+            $deadline = [DateTime]::UtcNow.AddSeconds($masterOperationDeadlineSeconds)
             do {
                 Start-Sleep -Milliseconds 100
                 $authorityText = ""
@@ -193,7 +199,7 @@ try {
                 -ArgumentList $clientArguments `
                 -RedirectStandardOutput $clientOut -RedirectStandardError $clientErr
             $processes.Add($client)
-            $deadline = [DateTime]::UtcNow.AddSeconds(20)
+            $deadline = [DateTime]::UtcNow.AddSeconds($resumeRecoveryDeadlineSeconds)
             do {
                 Start-Sleep -Milliseconds 100
                 $clientText = ""
