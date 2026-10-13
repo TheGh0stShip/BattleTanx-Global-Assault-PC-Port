@@ -391,6 +391,8 @@ int main() {
                   client->begin() + 0x001AD128U + 24U * 0x4CCU, std::uint8_t{0xAA});
         std::fill(client->begin() + 0x00219458U,
                   client->begin() + 0x00219458U + 0x178U, std::uint8_t{0xBB});
+        std::fill(client->begin() + 0x002195D4U,
+                  client->begin() + 0x002195D8U, std::uint8_t{0xBC});
         std::fill(client->begin() + players,
                   client->begin() + players + 4U * 0x250U, std::uint8_t{0xCC});
         for (std::size_t player = 0; player < 3U; ++player) {
@@ -401,6 +403,9 @@ int main() {
         CHECK(btga::restore_gameplay_snapshot(*client, snapshot));
         CHECK(btga::gameplay_state_digests(*host).combined ==
               btga::gameplay_state_digests(*client).combined);
+        CHECK(std::equal(host->begin() + 0x002195D4U,
+                         host->begin() + 0x002195D8U,
+                         client->begin() + 0x002195D4U));
         CHECK(std::equal(host->begin() + 0x50000U,
                          host->begin() + 0x50000U + 0x58U,
                          client->begin() + 0x50000U));

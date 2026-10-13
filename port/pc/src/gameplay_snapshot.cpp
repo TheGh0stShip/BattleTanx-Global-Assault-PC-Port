@@ -10,6 +10,7 @@ constexpr std::size_t object_pool_offset = 0x001AD128U;
 constexpr std::size_t object_pool_size = 24U * 0x4CCU;
 constexpr std::size_t gameplay_globals_offset = 0x00219458U;
 constexpr std::size_t gameplay_globals_size = 0x178U;
+constexpr std::size_t gameplay_mode_state_offset = 0x002195D4U;
 constexpr std::size_t player_pool_offset = 0x00235F00U;
 constexpr std::size_t player_pool_size = 4U * 0x250U;
 constexpr std::size_t player_size = 0x250U;
@@ -41,6 +42,7 @@ bool capture_gameplay_snapshot(std::span<const std::uint8_t> rdram,
     append(random_seed_offset, sizeof(std::uint32_t));
     append(object_pool_offset, object_pool_size);
     append(gameplay_globals_offset, gameplay_globals_size);
+    append(gameplay_mode_state_offset, sizeof(std::uint32_t));
     append(player_pool_offset, player_pool_size);
     for (std::size_t player = 0; player < 4U; ++player) {
         const std::uint32_t address = load_word(
@@ -67,6 +69,7 @@ bool restore_gameplay_snapshot(std::span<std::uint8_t> rdram,
     restore(random_seed_offset, sizeof(std::uint32_t));
     restore(object_pool_offset, object_pool_size);
     restore(gameplay_globals_offset, gameplay_globals_size);
+    restore(gameplay_mode_state_offset, sizeof(std::uint32_t));
     restore(player_pool_offset, player_pool_size);
     for (std::size_t player = 0; player < 4U; ++player) {
         const std::uint32_t address = load_word(
