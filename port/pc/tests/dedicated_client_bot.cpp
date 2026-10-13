@@ -155,6 +155,10 @@ int main(int argc, char** argv) {
                 if (header.message_type == BTGA_NET_MSG_SNAPSHOT) {
                     continue;
                 }
+                if (header.message_type == BTGA_NET_MSG_PING &&
+                    header.payload_size == 0U) {
+                    continue;
+                }
                 if (header.message_type != BTGA_NET_MSG_EVENT ||
                     !replica.accept_frame({packet.data() + BTGA_NET_HEADER_SIZE,
                                            header.payload_size})) {

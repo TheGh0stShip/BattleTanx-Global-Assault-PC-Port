@@ -67,6 +67,7 @@ std::uint8_t bootstrap_requests = 0;
 std::uint8_t bootstrap_pending = 0;
 std::uint8_t replay_requests = 0;
 std::uint8_t disk_replay_announced = 0;
+std::uint8_t replay_send_failure_announced = 0;
 std::uint8_t snapshot_cursor = 0;
 std::array<std::chrono::steady_clock::time_point, btga::online_player_limit>
     snapshot_last_sent{};
@@ -82,6 +83,7 @@ std::unique_ptr<btga::MasterClient> master;
 std::string public_lobby_id;
 std::string public_host_secret;
 std::chrono::steady_clock::time_point next_heartbeat{};
+std::chrono::steady_clock::time_point next_recovery_status{};
 std::optional<std::filesystem::path> persistent_lease_path;
 btga::PersistentAuthorityLease persistent_lease;
 
@@ -265,8 +267,10 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
     bootstrap_pending = 0U;
     replay_requests = 0U;
     disk_replay_announced = 0U;
+    replay_send_failure_announced = 0U;
     recovery_barrier.reset();
     recovery_pause_announced = false;
+    next_recovery_status = {};
     snapshot_cursor = 0U;
     snapshot_last_sent.fill({});
     replay_next_tick.fill(0U);
@@ -323,6 +327,22 @@ bool encode_and_send_frame(
     return multiplayer && multiplayer->send_gameplay(
         destination_slot,
         {packet.data(), BTGA_NET_HEADER_SIZE + payload_size});
+}
+
+bool send_recovery_status_locked() {
+    std::array<std::uint8_t, BTGA_NET_HEADER_SIZE> packet{};
+    BtgaNetHeader header{};
+    header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
+    header.message_type = BTGA_NET_MSG_PING;
+    header.flags = BTGA_NET_FLAG_RELAYED;
+    header.session_id = session_id;
+    header.sequence = ++outgoing_sequence;
+    header.acknowledgment = authority.next_tick();
+    header.acknowledgment_bits = recovery_barrier.mask();
+    header.payload_size = 0U;
+    header.peer_id = 0U;
+    return btga_net_encode_header(packet.data(), packet.size(), &header) != 0U &&
+        multiplayer && multiplayer->send_gameplay(BTGA_RELAY_BROADCAST_SLOT, packet);
 }
 
 bool encode_and_send_snapshot(std::uint32_t tick, std::uint16_t destination_slot,
@@ -658,7 +678,11 @@ void btga_dedicated_network_poll()
     // cannot make the authority burst an unbounded match history, while a
     // recovering client can advance the window by acknowledging consumed
     // ticks. Existing real-time clients normally request zero or one frame.
-    constexpr std::size_t replay_window = 32U;
+    // Clients acknowledge about four times per second and consume 30 ticks per
+    // second. Eight frames per acknowledgment supplies 32 ticks per second,
+    // enough to converge while the recovery barrier is closed without
+    // overflowing either endpoint's nonblocking UDP socket.
+    constexpr std::size_t replay_window = 8U;
     for (std::uint8_t seat = 0; seat < btga::online_player_limit; ++seat) {
         const auto bit = static_cast<std::uint8_t>(1U << seat);
         if ((replay_requests & bit) == 0U) continue;
@@ -677,13 +701,20 @@ void btga_dedicated_network_poll()
         for (std::size_t index = 0; index < count; ++index) {
             if (!encode_and_send_frame(
                     frames[index], static_cast<std::uint16_t>(seat + 1U))) {
-                std::fprintf(stderr,
-                             "BTGA_AUTHORITY journal replay failed seat=%u tick=%u\n",
-                             static_cast<unsigned>(seat), frames[index].tick);
+                if ((replay_send_failure_announced & bit) == 0U) {
+                    std::fprintf(stderr,
+                                 "BTGA_AUTHORITY journal replay backpressure "
+                                 "seat=%u tick=%u\n",
+                                 static_cast<unsigned>(seat), frames[index].tick);
+                    replay_send_failure_announced |= bit;
+                }
                 break;
             }
             if (index + 1U < count) {
                 std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+            if (index + 1U == count) {
+                replay_send_failure_announced &= static_cast<std::uint8_t>(~bit);
             }
         }
     }
@@ -698,6 +729,7 @@ void btga_dedicated_network_poll()
             bootstrap_pending &= static_cast<std::uint8_t>(~bit);
             replay_requests &= static_cast<std::uint8_t>(~bit);
             disk_replay_announced &= static_cast<std::uint8_t>(~bit);
+            replay_send_failure_announced &= static_cast<std::uint8_t>(~bit);
             recovery_barrier.disconnect(seat);
             (void)authority.set_connected(seat, false);
         }
@@ -909,11 +941,21 @@ extern "C" void btga_dedicated_run_loop(
                     std::fflush(stderr);
                     recovery_pause_announced = true;
                 }
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= next_recovery_status) {
+                    if (!send_recovery_status_locked()) {
+                        std::fputs("BTGA_AUTHORITY recovery status send failed\n", stderr);
+                    }
+                    next_recovery_status = now + std::chrono::milliseconds{250};
+                }
             } else if (recovery_pause_announced && !recovery_barrier.paused()) {
                 std::fprintf(stderr,
                              "BTGA_AUTHORITY recovery complete head=%u\n",
                              authority.next_tick());
                 std::fflush(stderr);
+                if (!send_recovery_status_locked()) {
+                    std::fputs("BTGA_AUTHORITY recovery status send failed\n", stderr);
+                }
                 recovery_pause_announced = false;
             }
         }

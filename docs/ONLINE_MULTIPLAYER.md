@@ -75,6 +75,13 @@ barrier and all four seats continue together. A disconnected recovery seat is
 removed from the barrier after the normal timeout, so a failed restart cannot
 freeze the match indefinitely.
 
+While the barrier is closed, the authority broadcasts a 250 ms recovery-status
+heartbeat containing the stable journal head and recovering-seat mask. Healthy
+clients therefore show a synchronized recovery pause instead of reporting an
+authority timeout. Replay delivery is matched to client consumption at eight
+frames per acknowledgment (about 32 supplied versus 30 consumed per second),
+which avoids nonblocking UDP backpressure without lengthening the replay.
+
 The bootstrap/checkpoint schema includes both complete inner and outer retail
 mode-state blocks. The prior schema omitted three outer-loop words; a restarted
 process could therefore confirm the compact gameplay bytes and still diverge

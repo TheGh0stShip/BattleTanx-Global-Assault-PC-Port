@@ -46,6 +46,9 @@ std::chrono::steady_clock::time_point next_keepalive{};
 std::uint32_t current_random_seed = 0U;
 std::uint32_t expected_random_seed = 0U;
 std::uint32_t observed_authority_head = 0U;
+std::uint8_t authority_recovery_mask = 0U;
+bool recovery_wait_announced = false;
+std::chrono::steady_clock::time_point last_authority_contact{};
 
 std::uint64_t state_digest(std::span<const std::uint8_t> state) {
     std::uint64_t digest = UINT64_C(1469598103934665603);
@@ -70,6 +73,22 @@ bool poll_frames_locked() {
             header.payload_size != size - BTGA_NET_HEADER_SIZE) continue;
         const auto payload = std::span<const std::uint8_t>{
             packet.data() + BTGA_NET_HEADER_SIZE, header.payload_size};
+        last_authority_contact = std::chrono::steady_clock::now();
+        if (header.message_type == BTGA_NET_MSG_PING && payload.empty()) {
+            observed_authority_head = header.acknowledgment;
+            authority_recovery_mask = static_cast<std::uint8_t>(
+                header.acknowledgment_bits & 0x0fU);
+            if (authority_recovery_mask != 0U && !recovery_wait_announced) {
+                std::fprintf(stderr,
+                             "BTGA_CLIENT synchronized recovery pause mask=%02x head=%u\n",
+                             authority_recovery_mask, observed_authority_head);
+                std::fflush(stderr);
+                recovery_wait_announced = true;
+            } else if (authority_recovery_mask == 0U) {
+                recovery_wait_announced = false;
+            }
+            continue;
+        }
         if (header.message_type == BTGA_NET_MSG_SNAPSHOT) {
             if (replica.accept_snapshot_chunk(payload) && replica.snapshot_ready()) {
                 pending_snapshot = replica.take_snapshot();
@@ -176,6 +195,9 @@ bool btga_dedicated_client_enable(
     current_random_seed = 0U;
     expected_random_seed = 0U;
     observed_authority_head = 0U;
+    authority_recovery_mask = 0U;
+    recovery_wait_announced = false;
+    last_authority_contact = std::chrono::steady_clock::now();
     next_keepalive = std::chrono::steady_clock::now();
     if (!send_snapshot_subscription_locked() || !send_inputs_locked(0U, {})) {
         error = "could not announce dedicated-client readiness";
@@ -197,7 +219,6 @@ extern "C" void btga_dedicated_client_tick_begin(
     std::unique_lock lock{client_mutex};
     if (!client_enabled || tick_active) return;
     if (!btga::gameplay_frame_input_active({rdram, rdram_size})) return;
-    const auto timeout = std::chrono::steady_clock::now() + std::chrono::seconds{10};
     bool warned = false;
     for (;;) {
         (void)poll_frames_locked();
@@ -276,7 +297,8 @@ extern "C" void btga_dedicated_client_tick_begin(
             tick_active = true;
             return;
         }
-        if (!warned && std::chrono::steady_clock::now() >= timeout) {
+        if (!warned && std::chrono::steady_clock::now() - last_authority_contact >=
+                std::chrono::seconds{10}) {
             std::fprintf(stderr, "BTGA_CLIENT authority timeout at tick=%u\n", expected_tick);
             std::fflush(stderr);
             warned = true; // remain paused; never advance a divergent local tick
