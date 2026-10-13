@@ -9,7 +9,8 @@ param(
     [int] $BootSeconds = 60,
     [ValidateRange(1, 100)]
     [int] $GameRuns = 5,
-    [switch] $KillClientAfterEpoch
+    [switch] $KillClientAfterEpoch,
+    [switch] $ShowWindows
 )
 
 $ErrorActionPreference = "Stop"
@@ -67,7 +68,9 @@ if ($Rom) {
     $clientKilled = $false
 
     try {
+        if ($ShowWindows) { $env:BTGA_HEADLESS_VISIBLE = "1" }
         $env:BTGA_DATA_DIR = $hostData
+        $env:BTGA_ONLINE_LOCAL_VIEW = "host"
         $hostProcess = Start-Process -FilePath $runtime -PassThru `
             -ArgumentList @("--online-headless-host", $BootSeconds, $resolvedRom) `
             -RedirectStandardOutput $hostOut -RedirectStandardError $hostErr
@@ -85,6 +88,7 @@ if ($Rom) {
         if (-not $lobby) { throw "Headless host published an empty lobby ID." }
 
         $env:BTGA_DATA_DIR = $clientData
+        $env:BTGA_ONLINE_LOCAL_VIEW = "client"
         $clientProcess = Start-Process -FilePath $runtime -PassThru `
             -ArgumentList @("--online-headless-join", $BootSeconds, $lobby, $resolvedRom) `
             -RedirectStandardOutput $clientOut -RedirectStandardError $clientErr
@@ -197,6 +201,8 @@ if ($Rom) {
     }
     finally {
         Remove-Item Env:BTGA_DATA_DIR -ErrorAction SilentlyContinue
+        Remove-Item Env:BTGA_ONLINE_LOCAL_VIEW -ErrorAction SilentlyContinue
+        Remove-Item Env:BTGA_HEADLESS_VISIBLE -ErrorAction SilentlyContinue
         foreach ($process in @($hostProcess, $clientProcess)) {
             if ($null -ne $process -and !$process.HasExited) {
                 Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue

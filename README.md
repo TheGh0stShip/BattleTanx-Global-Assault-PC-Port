@@ -51,9 +51,11 @@ to play the full demonstration on YouTube.
   USA Rev 0 `.z64` dump at launch.
 - Native PC host/client transport passes an automated public relay test in both
   directions. The runtime has an experimental synchronized cold-boot path with
-  deterministic game timing and a bounded four-update lead window; rollback,
-  campaign/victory validation, and full-screen per-device cameras remain in
-  development.
+  deterministic game timing, a bounded four-update lead window, bounded
+  peer-loss recovery, and one full-screen local camera per device. The remote
+  player's camera is suppressed, though duplicate retail multiplayer HUD
+  elements still need a presentation-only cleanup. General rollback and full
+  campaign validation remain in development.
 
 This is still a development port. Long-session stability, every game mode,
 representative GPUs/controllers, in-game save-flow validation, and visual
@@ -256,10 +258,10 @@ arguments or a manual cold boot. The `--online-host` and `--online-join`
 commands remain developer fallbacks. Both peers enter N64 code with the same
 session seed and frame epoch. A five-run headless Windows gate now exercises
 the real retail two-player front end and synchronized gameplay without forcing
-player count or requiring a human-operated window. It remains experimental:
-rollback/resimulation,
-long campaign/victory validation, and full-screen local cameras are not
-finished. Live
+player count or requiring a human-operated window. Online peers receive their
+own full-screen local camera automatically; the remaining duplicate remote HUD
+elements are a known visual issue. It remains experimental: general
+rollback/resimulation and full-campaign validation are not finished. Live
 service status is available at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/).
 Opening the Online tab itself remains network-inert; Refresh, Host, and Join are

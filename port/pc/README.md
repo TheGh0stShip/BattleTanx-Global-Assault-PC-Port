@@ -258,9 +258,12 @@ when the online flow ends.
 
 The design is relay-first and uses outbound UDP only. It does not use UPnP,
 NAT-PMP, inbound port forwarding, or expose a host's home connection. Each
-device currently runs the original two-controller multiplayer flow. Replacing
-the retail split-screen layout with one full-screen local camera remains a
-required port feature; it is not represented as complete here.
+device runs the original two-controller simulation but now receives its own
+full-screen local camera: the runtime-private ROM copy expands that player's
+verified viewport/scissor template and suppresses the remote camera. The
+user's ROM is never modified, and offline/local multiplayer is unchanged.
+Some duplicate remote-player HUD elements remain visible and are tracked as a
+presentation-only cleanup.
 
 The public service dashboard at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/) shows active games,
@@ -284,13 +287,14 @@ The normal Windows experimental play flow is:
 The automatic restart is the state guarantee: an online session never attempts
 to attach one live emulation instance to another. Developer fallback commands
 remain available as `--online-host ROM` and `--online-join LOBBY_ID ROM`.
-Rollback/resimulation, disconnect recovery, longer multi-mission campaign
-validation, and the full-screen local-camera conversion are still under
-development. A native two-process test has now
-completed one two-player campaign mission, shown victory on both peers, and
-advanced both into the next mission with matching RNG and game-frame
-checkpoints. Until the remaining work lands, this is an experimental test
-path, not a finished public multiplayer mode.
+General rollback/resimulation and full-campaign validation are still under
+development. The frame/input watchdog now recovers from a departed peer
+without freezing. Five consecutive native three-minute runs completed a match,
+traversed victory/intermission, entered a second synchronized gameplay epoch,
+and stayed checksum-identical through frame 4740. An additional fault run
+terminated the client after synchronization and verified host recovery. Until
+the remaining work lands, this is an experimental test path, not a finished
+public multiplayer mode.
 
 Developers can reproduce the fully native PC transport test with CMake and a
 C++20 compiler:

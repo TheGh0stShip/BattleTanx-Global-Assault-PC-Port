@@ -999,16 +999,17 @@ private:
             return SetEnvironmentVariableA(name, value.c_str()) != FALSE;
         };
         const auto clear = [](const char* name) { SetEnvironmentVariableA(name, nullptr); };
-        const std::array<const char*, 7> names{
+        const std::array<const char*, 8> names{
             "BTGA_ONLINE_ROLE", "BTGA_ONLINE_SESSION", "BTGA_ONLINE_RELAY_HOST",
             "BTGA_ONLINE_RELAY_PORT", "BTGA_ONLINE_TOKEN", "BTGA_ONLINE_LOBBY",
-            "BTGA_ONLINE_HOST_SECRET"};
+            "BTGA_ONLINE_HOST_SECRET", "BTGA_ONLINE_LOCAL_VIEW"};
         const bool environment_ready =
             set(names[0], host ? "host" : "client") &&
             set(names[1], session_text) && set(names[2], relay.address) &&
             set(names[3], port_text) && set(names[4], std::string{token}) &&
             set(names[5], std::string{lobby_id}) &&
-            set(names[6], std::string{host_secret});
+            set(names[6], std::string{host_secret}) &&
+            set(names[7], host ? "host" : "client");
         if (!environment_ready) {
             for (const char* name : names) clear(name);
             online_status_ = "Could not prepare the synchronized restart environment.";

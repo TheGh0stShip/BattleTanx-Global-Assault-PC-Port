@@ -23,6 +23,7 @@
 #include "btga/master_client.hpp"
 #include "btga/input_sync.hpp"
 #include "btga/online_bootstrap.hpp"
+#include "btga/online_local_view.hpp"
 #include "btga/texture_packs.hpp"
 #include "ultramodern/renderer_context.hpp"
 #include "ultramodern/ultramodern.hpp"
@@ -751,6 +752,17 @@ void patch_screen_edge_scissors(std::uint8_t*, recomp_context*) {
         patched[fix.offset + 2] = static_cast<std::uint8_t>(fix.replacement >> 8);
         patched[fix.offset + 3] = static_cast<std::uint8_t>(fix.replacement);
     }
+    if (const char* role = std::getenv("BTGA_ONLINE_LOCAL_VIEW"); role != nullptr) {
+        const std::string_view value{role};
+        const std::optional<btga::OnlineLocalView> local_view =
+            value == "host" ? std::optional{btga::OnlineLocalView::HostPlayerOne}
+            : value == "client" ? std::optional{btga::OnlineLocalView::ClientPlayerTwo}
+                                : std::nullopt;
+        if (local_view && !btga::patch_online_local_view(patched, *local_view)) {
+            std::cerr << "Verified ROM did not contain the expected online viewport templates\n";
+            std::abort();
+        }
+    }
     recomp::set_rom_contents(std::move(patched));
 }
 }
@@ -958,7 +970,9 @@ int runtime_main(int argc, char** argv) {
         }
         configure_keyboard();
         std::uint32_t window_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
-        if (headless_online) window_flags |= SDL_WINDOW_HIDDEN;
+        if (headless_online && std::getenv("BTGA_HEADLESS_VISIBLE") == nullptr) {
+            window_flags |= SDL_WINDOW_HIDDEN;
+        }
         if (pc_settings.window_mode == btga::WindowMode::Borderless) {
             window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
         } else if (pc_settings.window_mode == btga::WindowMode::Fullscreen) {

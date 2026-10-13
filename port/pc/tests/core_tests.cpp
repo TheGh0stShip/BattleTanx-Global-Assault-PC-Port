@@ -5,6 +5,7 @@
 #include "btga/controller_pak.hpp"
 #include "btga/pc_settings.hpp"
 #include "btga/online_multiplayer.hpp"
+#include "btga/online_local_view.hpp"
 #include "btga/master_client.hpp"
 #include "btga/sha256.hpp"
 #include "btga/snapshot_transfer.hpp"
@@ -37,6 +38,63 @@ extern "C" {
     } while (false)
 
 int main() {
+    {
+        constexpr std::size_t full_vp = 0xB7E30U;
+        constexpr std::size_t p1_vp = 0xB7E40U;
+        constexpr std::size_t p2_vp = 0xB7E50U;
+        constexpr std::size_t p1_scissor = 0xB7F88U;
+        constexpr std::size_t p2_scissor = 0xB7FA0U;
+        const std::array<std::uint8_t, 16> full{
+            0x02,0x80,0x01,0xE0,0x01,0xFF,0,0,
+            0x02,0x80,0x01,0xE0,0x01,0xFF,0,0};
+        const std::array<std::uint8_t, 16> top{
+            0x02,0x80,0x00,0xF0,0x01,0xFF,0,0,
+            0x02,0x80,0x00,0xF0,0x01,0xFF,0,0};
+        const std::array<std::uint8_t, 16> bottom{
+            0x02,0x80,0x00,0xF0,0x01,0xFF,0,0,
+            0x02,0x80,0x02,0xD0,0x01,0xFF,0,0};
+        const std::array<std::uint8_t, 8> top_scissor{
+            0xED,0,0,0,0,0x50,0x01,0xDC};
+        const std::array<std::uint8_t, 8> bottom_scissor{
+            0xED,0,0x01,0xE0,0,0x50,0x03,0xC0};
+        const std::array<std::uint8_t, 8> full_scissor{
+            0xED,0,0,0,0,0x50,0x03,0xC0};
+        const std::array<std::uint8_t, 8> hidden_scissor{
+            0xED,0,0,0,0,0,0x40,0x04};
+        auto make_rom = [&]() {
+            std::vector<std::uint8_t> rom(0xB8000U);
+            std::copy(full.begin(), full.end(), rom.begin() + full_vp);
+            std::copy(top.begin(), top.end(), rom.begin() + p1_vp);
+            std::copy(bottom.begin(), bottom.end(), rom.begin() + p2_vp);
+            std::copy(top_scissor.begin(), top_scissor.end(), rom.begin() + p1_scissor);
+            std::copy(bottom_scissor.begin(), bottom_scissor.end(), rom.begin() + p2_scissor);
+            return rom;
+        };
+        auto host = make_rom();
+        CHECK(btga::patch_online_local_view(
+            host, btga::OnlineLocalView::HostPlayerOne));
+        CHECK(std::equal(full.begin(), full.end(), host.begin() + p1_vp));
+        CHECK(std::equal(full_scissor.begin(), full_scissor.end(),
+                         host.begin() + p1_scissor));
+        CHECK(std::equal(hidden_scissor.begin(), hidden_scissor.end(),
+                         host.begin() + p2_scissor));
+
+        auto client = make_rom();
+        CHECK(btga::patch_online_local_view(
+            client, btga::OnlineLocalView::ClientPlayerTwo));
+        CHECK(std::equal(full.begin(), full.end(), client.begin() + p2_vp));
+        CHECK(std::equal(hidden_scissor.begin(), hidden_scissor.end(),
+                         client.begin() + p1_scissor));
+        CHECK(std::equal(full_scissor.begin(), full_scissor.end(),
+                         client.begin() + p2_scissor));
+
+        auto invalid = make_rom();
+        invalid[p1_vp] ^= 1U;
+        const auto before = invalid;
+        CHECK(!btga::patch_online_local_view(
+            invalid, btga::OnlineLocalView::HostPlayerOne));
+        CHECK(invalid == before);
+    }
     {
         constexpr std::size_t rdram_size = 8U * 1024U * 1024U;
         constexpr std::size_t players = 0x00235F00U;
