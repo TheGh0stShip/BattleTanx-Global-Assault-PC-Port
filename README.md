@@ -255,14 +255,19 @@ and relay. **F10 → Online** browses, hosts, and joins real public relay lobbie
 The earlier peer-hosted synchronization mode remains experimental and is being
 superseded by a native dedicated authority: the server executes the translated
 gameplay simulation, publishes canonical four-player inputs, and periodically
-rebases clients with canonical world snapshots. The authority and a translated
+verifies clients against canonical world snapshots. The authority and a translated
 Windows client complete an automated public-relay gate with three additional
 protocol clients. The server is isolated from render, controller, and audio
-interrupt waits, and clients restore a complete canonical snapshot at the tick
-boundary when prediction differs. Full recovery snapshots are sent every five
-ticks; bandwidth-efficient deltas and longer interactive campaign validation
-are still required before this becomes a release-ready public multiplayer
-mode. Live
+interrupt waits. Snapshots are targeted and round-robin rather than broadcast,
+and a returning connection atomically reclaims its stable seat with a rotating
+resume credential. Authority heartbeats confirm only the seats that are
+actually connected, so abandoned anonymous reservations expire instead of
+locking a lobby. Fresh-process mid-match recovery is not yet supported: an
+experiment that patched changed RDRAM bytes was rejected after it corrupted
+live RSP/audio and scheduler state. Recovery is being redesigned around a
+canonical input journal and explicit portable state rather than copying opaque
+runtime memory. Longer interactive campaign and cross-architecture validation
+are still required before this becomes a release-ready public multiplayer mode. Live
 service status is available at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/).
 Opening the Online tab itself remains network-inert; Refresh, Host, and Join are
@@ -284,6 +289,7 @@ BattleTanxGA.exe --dedicated-join LOBBY_ID BattleTanxGA.z64
 # Unattended authority + translated client + three peers
 ./port/pc/scripts/test-dedicated-multiplayer.ps1 `
   -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows
+
 ```
 
 ## License

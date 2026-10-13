@@ -79,6 +79,7 @@ int main() {
         rdram[0x1234] = 0x5aU;
         const auto frame0 = authority.finish_tick(0U, rdram);
         CHECK(frame0 && frame0->tick == 0U && frame0->received_mask == 0x0fU);
+        CHECK(authority.journal_size() == 1U);
         CHECK(authority.next_tick() == 1U);
         CHECK(!authority.latest_snapshot());
 
@@ -95,6 +96,13 @@ int main() {
         rdram[0x1235] = 0xa5U;
         const auto frame1 = authority.finish_tick(1U, rdram);
         CHECK(frame1 && authority.latest_snapshot());
+        std::array<btga::AuthoritativeFrame, 4> replay{};
+        CHECK(authority.copy_journal_from(0U, replay) == 2U);
+        CHECK(replay[0].tick == 0U && replay[0].inputs[3].buttons == 4U);
+        CHECK(replay[1].tick == 1U && replay[1].inputs[0].buttons == 9U);
+        CHECK(authority.copy_journal_from(1U, replay) == 1U);
+        CHECK(replay[0].tick == 1U);
+        CHECK(authority.copy_journal_from(2U, replay) == 0U);
         CHECK(authority.latest_snapshot()->next_tick == 2U);
         CHECK(authority.latest_snapshot()->state.size() == rdram.size());
         CHECK(authority.latest_snapshot()->state[0x1235] == 0xa5U);
@@ -626,7 +634,7 @@ int main() {
     http.responses = {
         {200, R"({"lobbies":[{"id":"lobby-1","name":"Desert Duel","build":"pc-port-v1","platform":"pc","region":"eastus","state":"lobby","capabilities":2,"max_players":4,"current_players":2}]})"},
         {201, R"({"lobby":{"id":"hosted-1","name":"My Lobby","build":"pc-port-v1","platform":"pc","region":"eastus","state":"lobby","capabilities":2,"max_players":4,"current_players":1},"host_secret":"host-secret","session_id":"1020304050607080","relay":{"address":"relay.example","udp_port":30420},"relay_token":"host.token"})"},
-        {200, R"({"session_id":"1020304050607080","relay":{"address":"relay.example","udp_port":30420},"join_token":"join.token"})"},
+        {200, R"({"session_id":"1020304050607080","seat":2,"relay":{"address":"relay.example","udp_port":30420},"join_token":"join.token","resume_token":"resume.token"})"},
         {200, R"({"id":"hosted-1","name":"My Lobby","build":"pc-port-v1","platform":"pc","region":"eastus","state":"playing","capabilities":2,"max_players":4,"current_players":2,"expires_at":1800000090,"relay_token":"refreshed.token"})"},
         {204, ""}
     };
@@ -640,8 +648,15 @@ int main() {
     CHECK(http.last_method == "POST" && http.last_path == "/lobbies");
     const auto joined = master.join("hosted-1");
     CHECK(joined.session_id == hosted.session_id && joined.join_token == "join.token");
-    master.heartbeat("hosted-1", "host-secret", 2, "playing");
+    CHECK(joined.seat == 2 && joined.resume_token == "resume.token");
+    CHECK(http.last_body.find("resume_token") == std::string::npos);
+    master.heartbeat("hosted-1", "host-secret", 2, "playing", 0x05U);
     CHECK(http.last_method == "PUT" && http.last_bearer == "host-secret");
+    CHECK(http.last_body.find("\"seat_mask\":5") != std::string::npos);
+    try {
+        master.heartbeat("hosted-1", "host-secret", 2, "playing", 0x10U);
+        CHECK(false);
+    } catch (const std::invalid_argument&) {}
     master.remove("hosted-1", "host-secret");
     CHECK(http.last_method == "DELETE" && http.last_bearer == "host-secret");
 

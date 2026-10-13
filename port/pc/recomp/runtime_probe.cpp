@@ -15,6 +15,7 @@
 #include <span>
 #include <stdexcept>
 #include <string_view>
+#include <system_error>
 
 #include "funcs.h"
 #include "librecomp/game.hpp"
@@ -53,6 +54,50 @@ extern RspUcodeFunc n_aspMain;
 namespace {
 constexpr std::u8string_view game_id = u8"battletanx-ga.n64.us.1.0";
 constexpr int max_controllers = 4;
+
+std::filesystem::path dedicated_resume_path() {
+    const char* value = std::getenv("BTGA_DEDICATED_RESUME_FILE");
+    return value == nullptr || *value == '\0'
+        ? std::filesystem::path{} : std::filesystem::u8path(value);
+}
+
+std::string load_dedicated_resume_token(const std::filesystem::path& path) {
+    if (path.empty()) return {};
+    std::ifstream input{path, std::ios::binary};
+    if (!input) return {};
+    std::string token((std::istreambuf_iterator<char>{input}),
+                      std::istreambuf_iterator<char>{});
+    while (!token.empty() && (token.back() == '\r' || token.back() == '\n')) {
+        token.pop_back();
+    }
+    if (token.size() > BTGA_NET_MAX_JOIN_TOKEN_SIZE) {
+        throw std::runtime_error{"Dedicated resume credential is oversized"};
+    }
+    return token;
+}
+
+void save_dedicated_resume_token(const std::filesystem::path& path,
+                                 std::string_view token) {
+    if (path.empty() || token.empty()) return;
+    std::error_code error;
+    if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), error);
+    if (error) throw std::runtime_error{"Could not create resume credential directory"};
+    const std::filesystem::path temporary = path.string() + ".tmp";
+    {
+        std::ofstream output{temporary, std::ios::binary | std::ios::trunc};
+        if (!output || !output.write(token.data(), static_cast<std::streamsize>(token.size())) ||
+            !output.put('\n')) {
+            throw std::runtime_error{"Could not write resume credential"};
+        }
+    }
+    std::filesystem::rename(temporary, path, error);
+    if (error) {
+        std::filesystem::remove(path, error);
+        error.clear();
+        std::filesystem::rename(temporary, path, error);
+    }
+    if (error) throw std::runtime_error{"Could not install resume credential"};
+}
 
 std::atomic_uint32_t created_threads{0};
 std::atomic_uint32_t display_lists{0};
@@ -938,7 +983,10 @@ int runtime_main(int argc, char** argv) {
             "https://btga.thegh0stship.com/api/v1");
         btga::MasterClient master{*http};
         const char* lobby_id = dedicated_headless ? argv[3] : argv[2];
-        const btga::JoinRegistration registration = master.join(lobby_id);
+        const std::filesystem::path resume_path = dedicated_resume_path();
+        const std::string resume_token = load_dedicated_resume_token(resume_path);
+        const btga::JoinRegistration registration = master.join(lobby_id, resume_token);
+        save_dedicated_resume_token(resume_path, registration.resume_token);
         std::string error;
         if (!btga_dedicated_client_enable(registration.session_id,
                                           registration.relay,

@@ -126,9 +126,14 @@ TranslatedAuthority::inputs() const noexcept { return current_inputs_; }
 std::optional<AuthoritativeFrame> TranslatedAuthority::finish_tick(
     std::uint32_t tick, std::span<const std::uint8_t> rdram)
 {
-    if (!tick_active_ || tick != active_tick_ || rdram.empty()) return std::nullopt;
+    if (!tick_active_ || tick != active_tick_ || rdram.empty() ||
+        canonical_journal_.size() >= journal_limit) return std::nullopt;
     const std::uint64_t state_digest = digest(rdram);
     AuthoritativeFrame frame{tick, current_inputs_, state_digest, received_mask_};
+    // next_tick_ begins at zero and never skips, so the vector index is the
+    // canonical tick. This makes bounded replay reads allocation-free.
+    if (canonical_journal_.size() != tick) return std::nullopt;
+    canonical_journal_.push_back(frame);
     ++next_tick_;
     tick_active_ = false;
     history_[tick % history_size] = {};
@@ -146,6 +151,21 @@ TranslatedAuthority::latest_snapshot() const noexcept { return snapshot_; }
 std::uint32_t TranslatedAuthority::next_tick() const noexcept { return next_tick_; }
 std::uint8_t TranslatedAuthority::occupied_mask() const noexcept { return occupied_mask_; }
 std::uint8_t TranslatedAuthority::connected_mask() const noexcept { return connected_mask_; }
+
+std::size_t TranslatedAuthority::journal_size() const noexcept {
+    return canonical_journal_.size();
+}
+
+std::size_t TranslatedAuthority::copy_journal_from(
+    std::uint32_t first_tick, std::span<AuthoritativeFrame> destination) const
+{
+    const std::size_t first = first_tick;
+    if (first >= canonical_journal_.size() || destination.empty()) return 0U;
+    const std::size_t count = (std::min)(
+        destination.size(), canonical_journal_.size() - first);
+    std::copy_n(canonical_journal_.begin() + first, count, destination.begin());
+    return count;
+}
 
 std::uint64_t TranslatedAuthority::digest(
     std::span<const std::uint8_t> bytes) noexcept

@@ -156,22 +156,35 @@ HostRegistration MasterClient::host(std::string_view name, std::uint16_t max_pla
     return result;
 }
 
-JoinRegistration MasterClient::join(std::string_view lobby_id) {
-    const Json request = {
+JoinRegistration MasterClient::join(std::string_view lobby_id,
+                                    std::string_view resume_token) {
+    Json request = {
         {"protocol", protocol_version}, {"build", build_}, {"platform", "pc"}
     };
+    if (!resume_token.empty()) request["resume_token"] = resume_token;
     const Json body = parse_response(http_.request(
         "POST", "/lobbies/" + escape_path(lobby_id) + "/join", request.dump()), 200);
     JoinRegistration result;
     result.session_id = decode_session(body);
+    if (body.contains("seat")) result.seat = bounded_u16(body, "seat", 0, 3);
     result.relay = decode_relay(body.at("relay"));
     result.join_token = bounded_string(body, "join_token", BTGA_NET_MAX_JOIN_TOKEN_SIZE);
+    if (body.contains("resume_token")) {
+        result.resume_token = bounded_string(
+            body, "resume_token", BTGA_NET_MAX_JOIN_TOKEN_SIZE);
+    }
     return result;
 }
 
 void MasterClient::heartbeat(std::string_view lobby_id, std::string_view host_secret,
-                             std::uint16_t players, std::string_view state) {
-    const Json request = {{"current_players", players}, {"state", state}};
+                             std::uint16_t players, std::string_view state,
+                             std::uint8_t seat_mask) {
+    if ((seat_mask & 0xf0U) != 0U) {
+        throw std::invalid_argument("seat mask exceeds four-player limit");
+    }
+    const Json request = {
+        {"current_players", players}, {"state", state}, {"seat_mask", seat_mask}
+    };
     (void)parse_response(http_.request(
         "PUT", "/lobbies/" + escape_path(lobby_id) + "/heartbeat",
         request.dump(), host_secret), 200);

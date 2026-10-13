@@ -29,7 +29,11 @@ $authorityOut = Join-Path $evidence "authority.stdout.log"
 $authorityErr = Join-Path $evidence "authority.stderr.log"
 $clientOut = Join-Path $evidence "client.stdout.log"
 $clientErr = Join-Path $evidence "client.stderr.log"
+$resumeCredential = Join-Path $evidence "client-resume.credential"
+$previousResumeFile = $env:BTGA_DEDICATED_RESUME_FILE
+$env:BTGA_DEDICATED_RESUME_FILE = $resumeCredential
 $processes = [System.Collections.Generic.List[Diagnostics.Process]]::new()
+$peers = [System.Collections.Generic.List[Diagnostics.Process]]::new()
 try {
     $authority = Start-Process $server -PassThru `
         -ArgumentList @("--dedicated-server-public", $romPath) `
@@ -66,14 +70,20 @@ try {
         $bound = $clientText.Contains("BTGA_CLIENT bound authoritative seat=0")
     } until ($bound -or $client.HasExited -or [DateTime]::UtcNow -ge $deadline)
     if (-not $bound) { throw "Translated client did not bind seat 0." }
+    if (-not (Test-Path $resumeCredential) -or
+        (Get-Item $resumeCredential).Length -eq 0) {
+        throw "Translated client did not persist its rotating resume credential."
+    }
 
+    $peerSeconds = $Seconds
     for ($seat = 1; $seat -lt 4; ++$seat) {
         $out = Join-Path $evidence "bot-$seat.stdout.log"
         $err = Join-Path $evidence "bot-$seat.stderr.log"
         $peer = Start-Process $bot -PassThru `
-            -ArgumentList @("--join", $lobby, $seat, $Seconds) `
+            -ArgumentList @("--join", $lobby, $seat, $peerSeconds) `
             -RedirectStandardOutput $out -RedirectStandardError $err
         $processes.Add($peer)
+        $peers.Add($peer)
         $deadline = [DateTime]::UtcNow.AddSeconds(10)
         do {
             Start-Sleep -Milliseconds 100
@@ -89,8 +99,8 @@ try {
         }
     }
     $seat = 1
-    foreach ($process in $processes | Select-Object -Skip 2) {
-        $process.WaitForExit(($Seconds + 15) * 1000) | Out-Null
+    foreach ($process in $peers) {
+        $process.WaitForExit(($peerSeconds + 15) * 1000) | Out-Null
         $process.Refresh()
         if (-not $process.HasExited) {
             throw "Dedicated protocol peer failed (PID $($process.Id))."
@@ -140,4 +150,5 @@ try {
             $process.WaitForExit(5000) | Out-Null
         }
     }
+    $env:BTGA_DEDICATED_RESUME_FILE = $previousResumeFile
 }

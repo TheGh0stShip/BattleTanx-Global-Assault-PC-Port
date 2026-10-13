@@ -114,7 +114,7 @@ int main() {
         }
         if (!received) throw std::runtime_error("native gameplay reply timed out");
         stage = "heartbeat";
-        master.heartbeat(hosted.lobby.id, hosted.host_secret, 2, "playing");
+        master.heartbeat(hosted.lobby.id, hosted.host_secret, 2, "playing", 0x03U);
         std::cout << "native HTTPS + public relay multiplayer test passed\n";
         return 0;
     } catch (const std::exception& error) {

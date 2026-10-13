@@ -1702,10 +1702,18 @@ private:
             const std::string secret = online_host_secret_;
             const std::uint16_t players = static_cast<std::uint16_t>(
                 1 + std::count(online_peer_seen_.begin(), online_peer_seen_.end(), true));
+            std::uint8_t seat_mask = 0U;
+            // Relay slot zero is the peer host and has no join lease. Joined
+            // relay slots 1..4 map to master-service lease seats 0..3.
+            for (std::size_t slot = 1; slot < online_peer_seen_.size(); ++slot) {
+                if (online_peer_seen_[slot]) {
+                    seat_mask |= static_cast<std::uint8_t>(1U << (slot - 1U));
+                }
+            }
             start_online_task(OnlineTaskKind::Heartbeat,
-                [master, lobby, secret, players](OnlineTaskResult&) {
+                [master, lobby, secret, players, seat_mask](OnlineTaskResult&) {
                     master->heartbeat(lobby, secret, players,
-                                      players > 1 ? "playing" : "lobby");
+                                      players > 1 ? "playing" : "lobby", seat_mask);
                 });
         }
     }

@@ -93,6 +93,31 @@ bool send_inputs_locked(std::uint32_t first_tick,
         first_tick, local_seat, inputs);
     return size != 0U && client_online->send_gameplay(0U, {packet.data(), size});
 }
+
+bool send_snapshot_subscription_locked() {
+    std::array<std::uint8_t, BTGA_NET_HEADER_SIZE> packet{};
+    BtgaNetHeader header{};
+    header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
+    header.message_type = BTGA_NET_MSG_PING;
+    header.flags = BTGA_NET_FLAG_RELAYED;
+    header.session_id = client_session;
+    header.sequence = ++input_sequence;
+    // Zero means this process has not yet installed an authority checkpoint.
+    // Once bootstrapped, tick+1 keeps tick zero distinguishable from that state.
+    header.acknowledgment = bootstrap_complete ? expected_tick + 1U : 0U;
+    header.payload_size = 0U;
+    header.peer_id = client_online->relay_slot();
+    return btga_net_encode_header(packet.data(), packet.size(), &header) != 0U &&
+        client_online->send_gameplay(0U, packet);
+}
+
+void send_keepalive_if_due_locked() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_keepalive) return;
+    (void)send_snapshot_subscription_locked();
+    (void)send_inputs_locked(expected_tick, {});
+    next_keepalive = now + std::chrono::milliseconds{250};
+}
 } // namespace
 
 bool btga_dedicated_client_enable(
@@ -134,7 +159,7 @@ bool btga_dedicated_client_enable(
     bootstrap_complete = false;
     divergence_reported = false;
     next_keepalive = std::chrono::steady_clock::now();
-    if (!send_inputs_locked(0U, {})) {
+    if (!send_snapshot_subscription_locked() || !send_inputs_locked(0U, {})) {
         error = "could not announce dedicated-client readiness";
         client_enabled = false;
         return false;
@@ -158,6 +183,7 @@ extern "C" void btga_dedicated_client_tick_begin(
     bool warned = false;
     for (;;) {
         (void)poll_frames_locked();
+        send_keepalive_if_due_locked();
         if (pending_snapshot && bootstrap_complete &&
             pending_snapshot->tick < expected_tick) {
             pending_snapshot.reset();
@@ -171,28 +197,38 @@ extern "C" void btga_dedicated_client_tick_begin(
             const std::uint64_t current_digest = captured ? state_digest(current) : 0U;
             const bool already_current =
                 captured && current_digest == pending_snapshot->state_digest;
-            const bool was_bootstrapped = bootstrap_complete;
-            const bool fast_forward =
-                bootstrap_complete && pending_snapshot->tick > expected_tick;
-            // A snapshot is the dedicated server's canonical tick-entry
-            // state.  Restore it even at the client's current tick when the
-            // digest differs; discarding it would make every later frame
-            // permanently diverge.  Newer snapshots additionally fast-forward
-            // a client that missed one or more authoritative frames.
-            const bool may_restore =
-                !bootstrap_complete || pending_snapshot->tick >= expected_tick;
-            if (already_current || (may_restore && btga::restore_gameplay_snapshot(
-                    {rdram, rdram_size}, pending_snapshot->state))) {
+            // This compact snapshot deliberately excludes host-local and
+            // pointer-owned runtime state. It is safe for the cold-bootstrap
+            // rendezvous, where both processes still share the same clean
+            // runtime topology, but it is not a portable live checkpoint.
+            // Applying it to a running client can splice authority gameplay
+            // fields into unrelated local scheduler/audio state and make the
+            // very next tick diverge. After bootstrap it is verification only;
+            // recovery will use the canonical input journal plus an explicit
+            // portable checkpoint once that schema is complete.
+            const bool may_restore = !bootstrap_complete;
+            bool restored = false;
+            if (may_restore && !already_current) {
+                restored = btga::restore_gameplay_snapshot(
+                    {rdram, rdram_size}, pending_snapshot->state);
+                if (restored) {
+                    std::array<std::uint8_t, btga::gameplay_snapshot_size> verify{};
+                    restored = btga::capture_gameplay_snapshot(
+                        {rdram, rdram_size}, verify) &&
+                        state_digest(verify) == pending_snapshot->state_digest;
+                }
+            }
+            if (already_current || restored) {
                 expected_tick = pending_snapshot->tick;
                 bootstrap_complete = true;
                 if (!already_current) divergence_reported = false;
-                if (!was_bootstrapped || fast_forward) frames.fill(std::nullopt);
+                if (may_restore) frames.fill(std::nullopt);
                 std::fprintf(stderr, "BTGA_CLIENT %s snapshot tick=%u\n",
                              already_current ? "confirmed" : "applied",
                              expected_tick);
             } else if (bootstrap_complete) {
                 std::fprintf(stderr,
-                             "BTGA_CLIENT ignored nonmatching recovery snapshot tick=%u "
+                             "BTGA_CLIENT ignored nonportable live snapshot tick=%u "
                              "snapshot=%016llx current=%016llx previous=%016llx\n",
                              pending_snapshot->tick,
                              static_cast<unsigned long long>(pending_snapshot->state_digest),
@@ -261,11 +297,7 @@ void btga_dedicated_client_pump() {
     const std::lock_guard lock{client_mutex};
     if (!client_enabled || !client_online) return;
     (void)poll_frames_locked();
-    const auto now = std::chrono::steady_clock::now();
-    if (now >= next_keepalive) {
-        (void)send_inputs_locked(expected_tick, {});
-        next_keepalive = now + std::chrono::milliseconds{250};
-    }
+    send_keepalive_if_due_locked();
 }
 
 void btga_dedicated_client_submit_local(

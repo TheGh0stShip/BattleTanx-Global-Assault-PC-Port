@@ -44,6 +44,9 @@ public:
     [[nodiscard]] std::uint32_t next_tick() const noexcept;
     [[nodiscard]] std::uint8_t occupied_mask() const noexcept;
     [[nodiscard]] std::uint8_t connected_mask() const noexcept;
+    [[nodiscard]] std::size_t journal_size() const noexcept;
+    [[nodiscard]] std::size_t copy_journal_from(
+        std::uint32_t first_tick, std::span<AuthoritativeFrame> destination) const;
 
 private:
     struct TickInputs {
@@ -53,6 +56,10 @@ private:
     };
 
     static constexpr std::size_t history_size = 256;
+    // A little over nine hours at 30 Hz. This is intentionally bounded so an
+    // abandoned authority cannot grow without limit. A future portable world
+    // checkpoint will allow pruning older entries without losing reconnect.
+    static constexpr std::size_t journal_limit = 1'000'000;
     [[nodiscard]] static std::uint64_t digest(
         std::span<const std::uint8_t> bytes) noexcept;
 
@@ -61,6 +68,7 @@ private:
     std::array<OnlineControllerInput, online_player_limit> last_inputs_{};
     std::array<std::uint32_t, online_player_limit> latest_sequences_{};
     std::array<bool, online_player_limit> have_sequence_{};
+    std::vector<AuthoritativeFrame> canonical_journal_;
     std::optional<AuthoritativeSnapshot> snapshot_;
     std::uint32_t next_tick_ = 0;
     std::uint32_t active_tick_ = 0;

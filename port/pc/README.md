@@ -294,14 +294,18 @@ waits for four authenticated seats before tick zero, continues when a seat
 times out, publishes canonical input frames, and sends periodic canonical
 gameplay snapshots. A real translated Windows client plus three protocol peers
 has completed this flow through the public service. Recovery state is captured
-at tick entry and a client restores the server snapshot when its prediction
-differs, rather than allowing divergence to persist. Full snapshots currently
-arrive every five ticks. The unattended headless gate remains strictly
-digest-identical, and a rendered Windows client has passed beyond tick 1,800
-with every checkpoint byte-identical and no authority timeout. Delta snapshots,
-longer interactive campaign coverage, and complete reconnect validation remain
-under development, so this is a development path rather than a finished public
-mode.
+at tick entry. Snapshot delivery targets one subscribed seat every eight ticks,
+avoiding the old broadcast bandwidth spike. A returning connection atomically
+reclaims its stable seat with a rotating resume token. The authority reports
+its exact connected-seat mask so the master renews active reservations without
+preserving abandoned anonymous joins. A rendered Windows client has separately
+passed beyond tick 1,800
+with every checkpoint byte-identical and no authority timeout. Longer
+interactive campaign and fresh-process recovery remain under development. A
+changed-RDRAM recovery experiment was rejected after it corrupted live
+RSP/audio and scheduler state; the replacement design uses the authority's
+canonical input journal and explicit portable state. This remains a development
+path rather than a finished public mode.
 
 Build and run the current dedicated gate on Windows with:
 

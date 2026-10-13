@@ -51,8 +51,10 @@ struct HostRegistration {
 
 struct JoinRegistration {
     std::uint64_t session_id = 0;
+    std::uint16_t seat = 0;
     RelayEndpoint relay;
     std::string join_token;
+    std::string resume_token;
 };
 
 class MasterClient {
@@ -63,9 +65,11 @@ public:
     std::vector<OnlineLobby> list_lobbies();
     HostRegistration host(std::string_view name, std::uint16_t max_players,
                           std::string_view region = "eastus");
-    JoinRegistration join(std::string_view lobby_id);
+    JoinRegistration join(std::string_view lobby_id,
+                          std::string_view resume_token = {});
     void heartbeat(std::string_view lobby_id, std::string_view host_secret,
-                   std::uint16_t players, std::string_view state);
+                   std::uint16_t players, std::string_view state,
+                   std::uint8_t seat_mask);
     void remove(std::string_view lobby_id, std::string_view host_secret) noexcept;
 
     [[nodiscard]] const std::string& build() const noexcept { return build_; }
