@@ -305,6 +305,19 @@ BattleTanxGA.exe --dedicated-join LOBBY_ID BattleTanxGA.z64
 
 ```
 
+For a real-relay loss gate, add
+`-Seconds 30 -DropOutgoingEvery 10 -DropIncomingEvery 10`. This test-only
+profile starts after signed relay admission and is disabled during normal play.
+
+For the same four-player loss test without Azure quota or Internet service,
+use a local networking checkout (Node.js required):
+
+```powershell
+.\port\pc\scripts\test-local-dedicated-multiplayer.ps1 `
+  -Rom 'C:\Games\BattleTanx - Global Assault (USA).z64' `
+  -NetworkingRoot 'C:\src\BattleTanx-Global-Assault-Networking'
+```
+
 If the master has expired a saved lobby, the supervisor now creates a new
 lobby automatically and prints its new `ONLINE_LOBBY_ID`. A client must select
 that newly listed lobby; an old copied ID correctly returns `404 lobby not

@@ -903,6 +903,8 @@ int runtime_main(int argc, char** argv) {
         argc == 4 && std::string_view{argv[1]} == "--dedicated-join";
     const bool dedicated_headless =
         argc == 5 && std::string_view{argv[1]} == "--dedicated-headless";
+    const bool dedicated_headless_direct =
+        argc == 4 && std::string_view{argv[1]} == "--dedicated-headless-direct";
     automated_online = headless_online;
     automated_online_host = headless_online_host;
     const bool online_host = headless_online_host ||
@@ -911,9 +913,10 @@ int runtime_main(int argc, char** argv) {
         (argc == 4 && std::string_view{argv[1]} == "--online-join");
     const bool online_resume = argc == 3 && std::string_view{argv[1]} == "--online-resume";
     bool boot = dedicated_server || dedicated_server_public || dedicated_headless ||
+                dedicated_headless_direct ||
                 (argc == 3 && std::string_view{argv[1]} == "--boot");
     bool timed_boot = (argc == 4 && std::string_view{argv[1]} == "--boot-seconds") ||
-                      dedicated_headless;
+                      dedicated_headless || dedicated_headless_direct;
     bool play = dedicated_join || (!headless_online && (online_host || online_join)) ||
                 online_resume || picked_rom.has_value() ||
                 (argc == 3 && std::string_view{argv[1]} == "--play") ||
@@ -927,7 +930,8 @@ int runtime_main(int argc, char** argv) {
                      " | --online-headless-join SECONDS LOBBY_ID ROM"
                      " | --dedicated-server ROM | --dedicated-server-public ROM"
                      " | --dedicated-join LOBBY_ID ROM"
-                     " | --dedicated-headless SECONDS LOBBY_ID ROM]\n";
+                     " | --dedicated-headless SECONDS LOBBY_ID ROM"
+                     " | --dedicated-headless-direct SECONDS ROM]\n";
         return 2;
     }
 
@@ -954,6 +958,7 @@ int runtime_main(int argc, char** argv) {
         else if (online_join || dedicated_join) rom_path = argv[3];
         else if (online_resume) rom_path = argv[2];
         else if (dedicated_headless) rom_path = argv[4];
+        else if (dedicated_headless_direct) rom_path = argv[3];
         else if (timed_boot) rom_path = argv[3];
         else if (argc == 2) rom_path = argv[1];
         else rom_path = argv[2];
@@ -983,7 +988,38 @@ int runtime_main(int argc, char** argv) {
             throw std::runtime_error{"Could not start dedicated authority: " + error};
         }
     }
-    if (dedicated_join || dedicated_headless) {
+    if (dedicated_headless_direct) {
+        const auto environment = [](const char* name) -> std::string {
+            const char* value = std::getenv(name);
+            return value == nullptr ? std::string{} : std::string{value};
+        };
+        const std::string session_text = environment("BTGA_DEDICATED_SESSION");
+        const std::string relay_host = environment("BTGA_DEDICATED_RELAY_HOST");
+        const std::string relay_port_text = environment("BTGA_DEDICATED_RELAY_PORT");
+        const std::string token = environment("BTGA_DEDICATED_TOKEN");
+        std::uint64_t session = 0U;
+        unsigned int relay_port = 0U;
+        const auto [session_end, session_error] = std::from_chars(
+            session_text.data(), session_text.data() + session_text.size(), session);
+        const auto [port_end, port_error] = std::from_chars(
+            relay_port_text.data(), relay_port_text.data() + relay_port_text.size(),
+            relay_port);
+        if (session_error != std::errc{} ||
+            session_end != session_text.data() + session_text.size() ||
+            port_error != std::errc{} ||
+            port_end != relay_port_text.data() + relay_port_text.size() ||
+            session == 0U || relay_port == 0U || relay_port > 65535U ||
+            relay_host.empty() || token.empty()) {
+            throw std::runtime_error{
+                "Invalid or incomplete direct dedicated-client credentials"};
+        }
+        std::string error;
+        if (!btga_dedicated_client_enable(
+                session, {relay_host, static_cast<std::uint16_t>(relay_port)},
+                token, error)) {
+            throw std::runtime_error{"Could not join direct dedicated authority: " + error};
+        }
+    } else if (dedicated_join || dedicated_headless) {
         auto http = btga::make_platform_http_client(btga::master_service_url());
         btga::MasterClient master{*http};
         const char* lobby_id = dedicated_headless ? argv[3] : argv[2];

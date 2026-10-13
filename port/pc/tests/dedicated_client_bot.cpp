@@ -90,11 +90,13 @@ int main(int argc, char** argv) {
         }
         if (host.empty() || token.empty()) throw std::runtime_error("relay settings missing");
 
+        const auto fault_profile = btga::udp_test_fault_profile_from_environment();
         btga::UdpOnlineIo io{host, static_cast<std::uint16_t>(port)};
         btga::OnlineMultiplayer online{io};
         if (!bind_relay(online, session, token)) {
             throw std::runtime_error("relay bind timed out");
         }
+        io.set_fault_profile(fault_profile);
         if (public_join) {
             seat = online.relay_slot() - 1U;
         } else if (online.relay_slot() != seat + 1U) {

@@ -20,6 +20,7 @@
 #include "dedicated_runtime_bridge.hpp"
 
 extern "C" {
+#include <btga/btga_gameplay.h>
 #include <btga/btga_net.h>
 }
 
@@ -51,6 +52,8 @@ std::uint32_t observed_authority_head = 0U;
 std::uint32_t installed_snapshot_id = 0U;
 std::uint8_t authority_recovery_mask = 0U;
 bool recovery_wait_announced = false;
+bool fault_diagnostics = false;
+std::uint64_t observed_snapshot_chunks = 0U;
 std::chrono::steady_clock::time_point last_authority_contact{};
 
 std::uint64_t state_digest(std::span<const std::uint8_t> state) {
@@ -93,7 +96,22 @@ bool poll_frames_locked() {
             continue;
         }
         if (header.message_type == BTGA_NET_MSG_SNAPSHOT) {
-            if (replica.accept_snapshot_chunk(payload) && replica.snapshot_ready()) {
+            const bool accepted = replica.accept_snapshot_chunk(payload);
+            ++observed_snapshot_chunks;
+            if (fault_diagnostics) {
+                BtgaNetSnapshotChunk chunk{};
+                if (btga_net_decode_snapshot_chunk(
+                        &chunk, payload.data(), payload.size()) != 0 &&
+                    (observed_snapshot_chunks <= 3U || chunk.offset == 0U)) {
+                    std::fprintf(stderr,
+                                 "BTGA_CLIENT snapshot chunk count=%llu id=%u "
+                                 "offset=%u total=%u accepted=%u\n",
+                                 static_cast<unsigned long long>(observed_snapshot_chunks),
+                                 chunk.snapshot_id, chunk.offset, chunk.total_size,
+                                 accepted ? 1U : 0U);
+                }
+            }
+            if (accepted && replica.snapshot_ready()) {
                 pending_snapshot = replica.take_snapshot();
             }
             continue;
@@ -166,6 +184,7 @@ bool btga_dedicated_client_enable(
         error = "invalid dedicated-client registration";
         return false;
     }
+    const auto fault_profile = btga::udp_test_fault_profile_from_environment();
     client_udp = std::make_unique<btga::UdpOnlineIo>(relay.address, relay.port);
     client_online = std::make_unique<btga::OnlineMultiplayer>(*client_udp);
     const auto bytes = std::span{
@@ -184,6 +203,17 @@ bool btga_dedicated_client_enable(
         client_online->relay_slot() < 1U || client_online->relay_slot() > 4U) {
         error = "dedicated relay binding timed out or assigned an invalid seat";
         return false;
+    }
+    client_udp->set_fault_profile(fault_profile);
+    fault_diagnostics = fault_profile.drop_outgoing_every != 0U ||
+        fault_profile.drop_incoming_every != 0U;
+    observed_snapshot_chunks = 0U;
+    if (fault_profile.drop_outgoing_every != 0U ||
+        fault_profile.drop_incoming_every != 0U) {
+        std::fprintf(stderr,
+                     "BTGA_CLIENT test UDP loss outgoing=%u incoming=%u\n",
+                     fault_profile.drop_outgoing_every,
+                     fault_profile.drop_incoming_every);
     }
     client_session = session_id;
     local_seat = static_cast<std::uint8_t>(client_online->relay_slot() - 1U);
@@ -223,7 +253,6 @@ extern "C" void btga_dedicated_client_tick_begin(
     std::uint8_t* rdram, recomp_context*) {
     std::unique_lock lock{client_mutex};
     if (!client_enabled || tick_active) return;
-    if (!btga::gameplay_frame_input_active({rdram, rdram_size})) return;
     bool warned = false;
     for (;;) {
         (void)poll_frames_locked();
@@ -301,6 +330,29 @@ extern "C" void btga_dedicated_client_tick_begin(
             }
             pending_snapshot.reset();
         }
+        // Canonical input frames are not a substitute for the checkpoint that
+        // defines their starting state. Under loss, event frames can arrive
+        // before all snapshot chunks; consuming them advanced the cold client
+        // from an unrelated local state and made its later acknowledgment stop
+        // bootstrap retransmission. Remain paused and keep advertising ack=0
+        // until a complete snapshot generation has been installed.
+        if (!bootstrap_complete) {
+            if (!warned && std::chrono::steady_clock::now() - last_authority_contact >=
+                    std::chrono::seconds{10}) {
+                std::fprintf(stderr,
+                             "BTGA_CLIENT authority timeout awaiting bootstrap\n");
+                std::fflush(stderr);
+                warned = true;
+            }
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            lock.lock();
+            continue;
+        }
+        // Installing the bootstrap can itself transition the translated game
+        // into the canonical input-active state. Only normal frame consumption
+        // belongs behind this retail-state predicate.
+        if (!btga::gameplay_frame_input_active({rdram, rdram_size})) return;
         auto& slot = frames[expected_tick % history_size];
         if (slot && slot->tick == expected_tick) {
             if (!btga::restore_gameplay_random_seed(

@@ -5,6 +5,8 @@ param(
     [string] $BuildDirectory = "build-pc-windows",
     [ValidateRange(8, 120)]
     [int] $Seconds = 15,
+    [ValidateRange(1, 4)]
+    [int] $Players = 4,
     [switch] $RenderedClient,
     [switch] $ReconnectClient,
     [switch] $ReconnectAuthority,
@@ -16,10 +18,17 @@ param(
     [int] $ReconnectCycles = 1,
     [ValidateRange(32, 1000000)]
     [int] $JournalMemoryFrames = 4096,
-    [switch] $RequireDiskReplay
+    [switch] $RequireDiskReplay,
+    [ValidateRange(0, 1000)]
+    [int] $DropOutgoingEvery = 0,
+    [ValidateRange(0, 1000)]
+    [int] $DropIncomingEvery = 0
 )
 
 $ErrorActionPreference = "Stop"
+if ($DropOutgoingEvery -eq 1 -or $DropIncomingEvery -eq 1) {
+    throw "Packet-loss intervals must be 0 (disabled) or at least 2."
+}
 $root = (Resolve-Path (Join-Path $PSScriptRoot "../../..")).Path
 $build = if ([IO.Path]::IsPathRooted($BuildDirectory)) {
     $BuildDirectory
@@ -27,6 +36,11 @@ $build = if ([IO.Path]::IsPathRooted($BuildDirectory)) {
     Join-Path $root $BuildDirectory
 }
 $romPath = (Resolve-Path $Rom).Path
+# Windows PowerShell's Start-Process joins ArgumentList entries into one native
+# command line without quoting entries that contain spaces. Preserve the exact
+# ROM path as one argv element (the common verified ROM filename contains
+# spaces and parentheses).
+$quotedRomPath = '"' + $romPath.Replace('"', '\"') + '"'
 $server = Join-Path $build "BattleTanxGA.exe"
 $bot = Join-Path $build "btga_dedicated_client_bot.exe"
 if (-not (Test-Path $server) -or -not (Test-Path $bot)) {
@@ -52,8 +66,23 @@ $resumeCredential = Join-Path $evidence "client-resume.credential"
 $previousResumeFile = $env:BTGA_DEDICATED_RESUME_FILE
 $previousJournalMemoryFrames = $env:BTGA_DEDICATED_JOURNAL_MEMORY_FRAMES
 $previousStateDirectory = $env:BTGA_DEDICATED_STATE_DIR
+$previousDedicatedPlayers = $env:BTGA_DEDICATED_PLAYERS
+$previousFaultsEnabled = $env:BTGA_NET_TEST_FAULTS
+$previousDropOutgoingEvery = $env:BTGA_NET_TEST_DROP_OUTGOING_EVERY
+$previousDropIncomingEvery = $env:BTGA_NET_TEST_DROP_INCOMING_EVERY
 $env:BTGA_DEDICATED_RESUME_FILE = $resumeCredential
 $env:BTGA_DEDICATED_JOURNAL_MEMORY_FRAMES = [string]$JournalMemoryFrames
+$env:BTGA_DEDICATED_PLAYERS = [string]$Players
+$faultsEnabled = $DropOutgoingEvery -gt 0 -or $DropIncomingEvery -gt 0
+if ($faultsEnabled) {
+    $env:BTGA_NET_TEST_FAULTS = "1"
+    $env:BTGA_NET_TEST_DROP_OUTGOING_EVERY = [string]$DropOutgoingEvery
+    $env:BTGA_NET_TEST_DROP_INCOMING_EVERY = [string]$DropIncomingEvery
+} else {
+    $env:BTGA_NET_TEST_FAULTS = $null
+    $env:BTGA_NET_TEST_DROP_OUTGOING_EVERY = $null
+    $env:BTGA_NET_TEST_DROP_INCOMING_EVERY = $null
+}
 $authorityState = Join-Path $evidence "authority-state"
 if ($ReconnectAuthority) {
     if (Test-Path $authorityState) { Remove-Item $authorityState -Recurse -Force }
@@ -70,7 +99,7 @@ $masterOperationDeadlineSeconds = 150
 $resumeRecoveryDeadlineSeconds = 180
 try {
     $authority = Start-Process $server -PassThru -WindowStyle Minimized `
-        -ArgumentList @("--dedicated-server-public", $romPath) `
+        -ArgumentList @("--dedicated-server-public", $quotedRomPath) `
         -RedirectStandardOutput $authorityOut -RedirectStandardError $authorityErr
     $processes.Add($authority)
     $deadline = [DateTime]::UtcNow.AddSeconds($masterOperationDeadlineSeconds)
@@ -88,9 +117,9 @@ try {
         30 * $AuthorityReconnectCycles
     } else { 0 })
     $clientArguments = if ($RenderedClient) {
-        @("--dedicated-join", $lobby, $romPath)
+        @("--dedicated-join", $lobby, $quotedRomPath)
     } else {
-        @("--dedicated-headless", $clientRunSeconds, $lobby, $romPath)
+        @("--dedicated-headless", $clientRunSeconds, $lobby, $quotedRomPath)
     }
     $client = Start-Process $server -PassThru -WindowStyle Minimized `
         -ArgumentList $clientArguments `
@@ -117,12 +146,18 @@ try {
         $peerSeconds += $ReconnectCycles * ($ReconnectAfterSeconds + 20)
     }
     if ($ReconnectAuthority) { $peerSeconds += 30 * $AuthorityReconnectCycles }
-    for ($seat = 1; $seat -lt 4; ++$seat) {
+    for ($seat = 1; $seat -lt $Players; ++$seat) {
         $out = Join-Path $evidence "bot-$seat.stdout.log"
         $err = Join-Path $evidence "bot-$seat.stderr.log"
+        # Keep the protocol witnesses reliable. The fault profile targets the
+        # translated authority/client path; making admission-only bots lossy
+        # tests their minimal binding helper instead and can prevent the match
+        # from ever reaching the transport under test.
+        if ($faultsEnabled) { $env:BTGA_NET_TEST_FAULTS = $null }
         $peer = Start-Process $bot -PassThru -WindowStyle Minimized `
             -ArgumentList @("--join", $lobby, $seat, $peerSeconds) `
             -RedirectStandardOutput $out -RedirectStandardError $err
+        if ($faultsEnabled) { $env:BTGA_NET_TEST_FAULTS = "1" }
         $processes.Add($peer)
         $peers.Add($peer)
         $deadline = [DateTime]::UtcNow.AddSeconds($masterOperationDeadlineSeconds)
@@ -157,7 +192,7 @@ try {
             $authorityErr = Join-Path $evidence `
                 "authority-resumed-$authorityCycle.stderr.log"
             $authority = Start-Process $server -PassThru -WindowStyle Minimized `
-                -ArgumentList @("--dedicated-server-public", $romPath) `
+                -ArgumentList @("--dedicated-server-public", $quotedRomPath) `
                 -RedirectStandardOutput $authorityOut -RedirectStandardError $authorityErr
             $processes.Add($authority)
             $deadline = [DateTime]::UtcNow.AddSeconds($masterOperationDeadlineSeconds)
@@ -323,8 +358,25 @@ try {
             throw "No replacement authority replayed a persisted journal tail. See $evidence."
         }
     }
+    if ($faultsEnabled) {
+        $authorityLogs = [string]((Get-ChildItem $evidence -File |
+            Where-Object { $_.Name -like "authority*.stderr.log" } |
+            ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n")
+        $clientLogs = [string]((Get-ChildItem $evidence -File |
+            Where-Object { $_.Name -like "client*.stderr.log" } |
+            ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n")
+        $expectedProfile = "outgoing=$DropOutgoingEvery incoming=$DropIncomingEvery"
+        if (-not $authorityLogs.Contains(
+            "BTGA_AUTHORITY test UDP loss $expectedProfile")) {
+            throw "Authority did not activate the requested UDP loss profile."
+        }
+        if (-not $clientLogs.Contains(
+            "BTGA_CLIENT test UDP loss $expectedProfile")) {
+            throw "Translated client did not activate the requested UDP loss profile."
+        }
+    }
     $clientKind = if ($RenderedClient) { "rendered" } else { "headless" }
-    Write-Host "Dedicated 4-player $clientKind test passed. Lobby: $lobby"
+    Write-Host "Dedicated $Players-player $clientKind test passed. Lobby: $lobby"
     Write-Host "Evidence: $evidence"
 } finally {
     foreach ($process in $processes) {
@@ -336,4 +388,8 @@ try {
     $env:BTGA_DEDICATED_RESUME_FILE = $previousResumeFile
     $env:BTGA_DEDICATED_JOURNAL_MEMORY_FRAMES = $previousJournalMemoryFrames
     $env:BTGA_DEDICATED_STATE_DIR = $previousStateDirectory
+    $env:BTGA_DEDICATED_PLAYERS = $previousDedicatedPlayers
+    $env:BTGA_NET_TEST_FAULTS = $previousFaultsEnabled
+    $env:BTGA_NET_TEST_DROP_OUTGOING_EVERY = $previousDropOutgoingEvery
+    $env:BTGA_NET_TEST_DROP_INCOMING_EVERY = $previousDropIncomingEvery
 }

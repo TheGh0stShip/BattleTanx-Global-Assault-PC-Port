@@ -75,6 +75,7 @@ std::array<std::uint32_t, btga::online_player_limit> replay_next_tick{};
 std::array<std::uint32_t, btga::online_player_limit> bootstrap_expected_ack{};
 std::array<std::uint32_t, btga::online_player_limit>
     bootstrap_expected_snapshot_id{};
+std::array<std::uint32_t, btga::online_player_limit> snapshot_retry_rotation{};
 std::array<std::uint8_t, btga::gameplay_snapshot_size> initial_snapshot_state{};
 bool initial_snapshot_available = false;
 unsigned int configured_players = 4;
@@ -171,6 +172,7 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
         return false;
     }
     session_id = requested_session;
+    const auto fault_profile = btga::udp_test_fault_profile_from_environment();
     udp = std::make_unique<btga::UdpOnlineIo>(relay.address, relay.port);
     multiplayer = std::make_unique<btga::OnlineMultiplayer>(*udp);
     if (!multiplayer->enter_online() || !multiplayer->begin_relay(
@@ -191,6 +193,14 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
         udp.reset();
         error = "dedicated authority relay binding timed out";
         return false;
+    }
+    udp->set_fault_profile(fault_profile);
+    if (fault_profile.drop_outgoing_every != 0U ||
+        fault_profile.drop_incoming_every != 0U) {
+        std::fprintf(stderr,
+                     "BTGA_AUTHORITY test UDP loss outgoing=%u incoming=%u\n",
+                     fault_profile.drop_outgoing_every,
+                     fault_profile.drop_incoming_every);
     }
     bool journal_ready = false;
     try {
@@ -279,6 +289,7 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
     replay_next_tick.fill(0U);
     bootstrap_expected_ack.fill(0U);
     bootstrap_expected_snapshot_id.fill(0U);
+    snapshot_retry_rotation.fill(0U);
     initial_snapshot_available = false;
     for (std::uint8_t seat = 0; seat < btga::online_player_limit; ++seat) {
         (void)authority.set_connected(seat, false);
@@ -290,6 +301,21 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
             std::this_thread::sleep_for(std::chrono::milliseconds{100});
         }
     });
+    return true;
+}
+
+bool load_configured_players(std::string& error) {
+    configured_players = 4U;
+    const char* configured = std::getenv("BTGA_DEDICATED_PLAYERS");
+    if (configured == nullptr || *configured == '\0') return true;
+    const std::string_view text{configured};
+    const auto [end, parse_error] = std::from_chars(
+        text.data(), text.data() + text.size(), configured_players);
+    if (parse_error != std::errc{} || end != text.data() + text.size() ||
+        configured_players < 1U || configured_players > 4U) {
+        error = "BTGA_DEDICATED_PLAYERS must be from 1 through 4";
+        return false;
+    }
     return true;
 }
 }
@@ -352,7 +378,9 @@ bool send_recovery_status_locked() {
 
 bool encode_and_send_snapshot(std::uint32_t tick, std::uint16_t destination_slot,
                               std::span<const std::uint8_t> state,
-                              std::uint64_t canonical_digest = 0U) {
+                              std::uint64_t canonical_digest = 0U,
+                              std::uint32_t retransmit_id = 0U,
+                              std::uint32_t first_chunk = 0U) {
     if (canonical_digest == 0U) {
         canonical_digest = UINT64_C(1469598103934665603);
         for (const std::uint8_t byte : state) {
@@ -361,8 +389,21 @@ bool encode_and_send_snapshot(std::uint32_t tick, std::uint16_t destination_slot
         }
     }
     const auto total = static_cast<std::uint32_t>(state.size());
-    const std::uint32_t id = ++snapshot_id;
-    for (std::uint32_t offset = 0; offset < total;) {
+    // Keep one generation ID while retransmitting a bootstrap. The replica
+    // retains already received chunks for that ID, so UDP loss can be repaired
+    // over several sends instead of every retry discarding partial progress.
+    const std::uint32_t id = retransmit_id != 0U
+        ? retransmit_id : ++snapshot_id;
+    const std::uint32_t chunk_count =
+        (total + BTGA_NET_SNAPSHOT_CHUNK_DATA_LIMIT - 1U) /
+        BTGA_NET_SNAPSHOT_CHUNK_DATA_LIMIT;
+    for (std::uint32_t ordinal = 0U; ordinal < chunk_count; ++ordinal) {
+        // Rotate retry order so periodic or burst-correlated loss cannot erase
+        // the same chunk on every full retransmission.
+        const std::uint32_t chunk_index =
+            (first_chunk + ordinal) % chunk_count;
+        const std::uint32_t offset =
+            chunk_index * BTGA_NET_SNAPSHOT_CHUNK_DATA_LIMIT;
         const auto data_size = static_cast<std::uint16_t>(std::min<std::uint32_t>(
             BTGA_NET_SNAPSHOT_CHUNK_DATA_LIMIT, total - offset));
         std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
@@ -372,23 +413,31 @@ bool encode_and_send_snapshot(std::uint32_t tick, std::uint16_t destination_slot
             packet.data() + BTGA_NET_HEADER_SIZE,
             packet.size() - BTGA_NET_HEADER_SIZE, &chunk);
         if (payload_size == 0U) return false;
-        BtgaNetHeader header{};
-        header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
-        header.message_type = BTGA_NET_MSG_SNAPSHOT;
-        header.flags = static_cast<std::uint8_t>(BTGA_NET_FLAG_RELIABLE |
-                                                 BTGA_NET_FLAG_RELAYED);
-        header.session_id = session_id;
-        header.sequence = ++outgoing_sequence;
-        header.payload_size = static_cast<std::uint16_t>(payload_size);
-        header.peer_id = 0;
-        if (btga_net_encode_header(packet.data(), packet.size(), &header) == 0U ||
-            !multiplayer->send_gameplay(
-                destination_slot,
-                {packet.data(), BTGA_NET_HEADER_SIZE + payload_size})) return false;
-        offset += data_size;
-        // Avoid a 33-datagram burst overflowing client UDP receive buffers.
-        std::this_thread::sleep_for(std::chrono::milliseconds{
-            state.size() > btga::gameplay_snapshot_size ? 7 : 2});
+        // The small tick-zero state is the only way a cold process can enter
+        // canonical simulation. Send each of its chunks three times so one
+        // bootstrap succeeds even when periodic loss repeatedly targets the
+        // same position in a burst. Larger portable recovery checkpoints use
+        // rotated full retries instead of tripling their bandwidth.
+        const unsigned copies = state.size() <= btga::gameplay_snapshot_size
+            ? 3U : 1U;
+        for (unsigned copy = 0U; copy < copies; ++copy) {
+            BtgaNetHeader header{};
+            header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
+            header.message_type = BTGA_NET_MSG_SNAPSHOT;
+            header.flags = static_cast<std::uint8_t>(BTGA_NET_FLAG_RELIABLE |
+                                                     BTGA_NET_FLAG_RELAYED);
+            header.session_id = session_id;
+            header.sequence = ++outgoing_sequence;
+            header.payload_size = static_cast<std::uint16_t>(payload_size);
+            header.peer_id = 0;
+            if (btga_net_encode_header(packet.data(), packet.size(), &header) == 0U ||
+                !multiplayer->send_gameplay(
+                    destination_slot,
+                    {packet.data(), BTGA_NET_HEADER_SIZE + payload_size})) return false;
+            // Stay below the relay's egress budget and avoid overflowing the
+            // client's UDP receive buffer while sending redundant chunks.
+            std::this_thread::sleep_for(std::chrono::milliseconds{7});
+        }
     }
     return true;
 }
@@ -414,23 +463,36 @@ void send_pending_bootstrap_snapshot_locked() {
     std::uint32_t checkpoint_tick = 0U;
     std::span<const std::uint8_t> checkpoint_state{initial_snapshot_state};
     std::uint64_t checkpoint_digest = 0U;
-    if (const auto& latest = authority.latest_snapshot(); latest &&
-        latest->next_tick <= authority.next_tick() &&
-        btga::is_dedicated_checkpoint(latest->state)) {
-        checkpoint_tick = latest->next_tick;
-        checkpoint_state = latest->state;
-        checkpoint_digest = latest->state_digest;
+    const std::uint32_t retransmit_id = bootstrap_expected_snapshot_id[target];
+    const bool retrying_initial_generation = retransmit_id != 0U &&
+        bootstrap_expected_ack[target] == 1U;
+    if (!retrying_initial_generation) {
+        if (const auto& latest = authority.latest_snapshot(); latest &&
+            latest->next_tick <= authority.next_tick() &&
+            btga::is_dedicated_checkpoint(latest->state)) {
+            checkpoint_tick = latest->next_tick;
+            checkpoint_state = latest->state;
+            checkpoint_digest = latest->state_digest;
+        }
     }
+    const std::uint32_t first_chunk = retransmit_id == 0U
+        ? 0U : ++snapshot_retry_rotation[target];
     if (encode_and_send_snapshot(
             checkpoint_tick, static_cast<std::uint16_t>(target + 1U),
-            checkpoint_state, checkpoint_digest)) {
+            checkpoint_state, checkpoint_digest, retransmit_id, first_chunk)) {
         snapshot_last_sent[target] = std::chrono::steady_clock::now();
         // Keep the authority frozen until the replacement has installed this
         // checkpoint *and* replayed through the head at which the recovery
         // barrier began. Releasing at checkpoint_tick strands the client a
         // fixed number of ticks behind because both sides then run at 30 Hz.
         bootstrap_expected_ack[target] = authority.next_tick() + 1U;
-        bootstrap_expected_snapshot_id[target] = snapshot_id;
+        bootstrap_expected_snapshot_id[target] = retransmit_id != 0U
+            ? retransmit_id : snapshot_id;
+        std::fprintf(stderr,
+                     "BTGA_AUTHORITY bootstrap snapshot seat=%u id=%u tick=%u retry=%u\n",
+                     static_cast<unsigned>(target),
+                     bootstrap_expected_snapshot_id[target], checkpoint_tick,
+                     retransmit_id != 0U ? 1U : 0U);
         snapshot_requests &= static_cast<std::uint8_t>(~bit);
         bootstrap_requests &= static_cast<std::uint8_t>(~bit);
         snapshot_cursor = static_cast<std::uint8_t>(
@@ -451,7 +513,6 @@ bool btga_dedicated_enable_from_environment(std::string& error)
     const std::string relay_host = variable("BTGA_DEDICATED_RELAY_HOST");
     const std::string relay_port_text = variable("BTGA_DEDICATED_RELAY_PORT");
     const std::string token = variable("BTGA_DEDICATED_TOKEN");
-    const std::string players_text = variable("BTGA_DEDICATED_PLAYERS");
     unsigned int relay_port = 0;
     const auto [session_end, session_error] = std::from_chars(
         session_text.data(), session_text.data() + session_text.size(), session_id);
@@ -464,21 +525,13 @@ bool btga_dedicated_enable_from_environment(std::string& error)
         error = "dedicated session, relay endpoint, or authority token is missing or invalid";
         return false;
     }
-    if (!players_text.empty()) {
-        const auto [players_end, players_error] = std::from_chars(
-            players_text.data(), players_text.data() + players_text.size(), configured_players);
-        if (players_error != std::errc{} ||
-            players_end != players_text.data() + players_text.size() ||
-            configured_players < 1U || configured_players > 4U) {
-            error = "BTGA_DEDICATED_PLAYERS must be from 1 through 4";
-            return false;
-        }
-    }
+    if (!load_configured_players(error)) return false;
     return enable_relay(session_id,
                         {relay_host, static_cast<std::uint16_t>(relay_port)}, token, error);
 }
 
 bool btga_dedicated_enable_public(std::string_view name, std::string& error) {
+    if (!load_configured_players(error)) return false;
     try {
         auto http = btga::make_platform_http_client(btga::master_service_url());
         auto client = std::make_unique<btga::MasterClient>(*http);
@@ -549,7 +602,12 @@ bool btga_dedicated_enable_public(std::string_view name, std::string& error) {
                 return true;
             }
         }
-        const btga::HostRegistration registration = client->host(name, 4);
+        // The public lobby advertises the service's four-seat capacity even
+        // when a test authority starts with fewer required participants.
+        // Master lobbies count the authority as current_players=1 until a seat
+        // mask arrives, so max_players=1 would reject the first real client.
+        const btga::HostRegistration registration = client->host(
+            name, btga::online_player_limit);
         const btga::PersistentAuthorityLease new_lease{
             registration.lobby.id, registration.host_secret,
             registration.session_id, registration.relay, 0U};
@@ -646,10 +704,20 @@ void btga_dedicated_network_poll()
                         bootstrap_pending |= bit;
                         bootstrap_expected_ack[seat] = 0U;
                         bootstrap_expected_snapshot_id[seat] = 0U;
+                        snapshot_retry_rotation[seat] = 0U;
                         bootstrap_requests |= bit;
                         replay_requests &= static_cast<std::uint8_t>(~bit);
                     }
-                    if (first_subscription || retry_due) snapshot_requests |= bit;
+                    if (first_subscription || retry_due) {
+                        snapshot_requests |= bit;
+                        if (!first_subscription && retry_due) {
+                            std::fprintf(stderr,
+                                         "BTGA_AUTHORITY bootstrap retry requested "
+                                         "seat=%zu id=%u\n",
+                                         seat,
+                                         bootstrap_expected_snapshot_id[seat]);
+                        }
+                    }
                 } else if ((bootstrap_pending & bit) != 0U &&
                            (bootstrap_expected_ack[seat] == 0U ||
                             bootstrap_expected_snapshot_id[seat] == 0U ||
@@ -850,6 +918,11 @@ extern "C" void btga_dedicated_match_bootstrap(
 {
     const std::lock_guard lock{authority_mutex};
     if (!enabled && !btga_dedicated_client_enabled()) return;
+    // Client processes do not execute the authority-registration path that
+    // normally parses this setting. Read it here as well so reduced-player
+    // gates configure identical retail state on both sides.
+    std::string player_error;
+    (void)load_configured_players(player_error);
 
     // Native dedicated-session orchestration. Skip the retail menu state
     // machine and configure a four-human deathmatch before the main loop's

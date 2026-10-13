@@ -464,6 +464,57 @@ int main() {
         CHECK(resumed->state_digest == simulation.state_digest());
     }
     {
+        // A full bootstrap is larger than one UDP datagram. Retransmitting the
+        // same snapshot generation in a different chunk order must fill holes
+        // left by loss without discarding chunks already received.
+        constexpr std::uint32_t snapshot_id = 77U;
+        constexpr std::uint32_t snapshot_tick = 123U;
+        std::vector<std::uint8_t> state(
+            BTGA_NET_SNAPSHOT_CHUNK_DATA_LIMIT * 2U + 17U);
+        for (std::size_t index = 0; index < state.size(); ++index) {
+            state[index] = static_cast<std::uint8_t>((index * 37U + 11U) & 0xffU);
+        }
+        std::uint64_t digest = UINT64_C(1469598103934665603);
+        for (const auto byte : state) {
+            digest ^= byte;
+            digest *= UINT64_C(1099511628211);
+        }
+        const auto encode_chunk = [&](std::uint32_t offset) {
+            const auto remaining = static_cast<std::uint32_t>(state.size()) - offset;
+            const auto size = static_cast<std::uint16_t>((std::min)(
+                remaining,
+                static_cast<std::uint32_t>(BTGA_NET_SNAPSHOT_CHUNK_DATA_LIMIT)));
+            BtgaNetSnapshotChunk chunk{
+                snapshot_id, snapshot_tick, digest,
+                static_cast<std::uint32_t>(state.size()), offset, size,
+                state.data() + offset};
+            std::vector<std::uint8_t> payload(BTGA_NET_MAX_DATAGRAM_SIZE);
+            const auto encoded = btga_net_encode_snapshot_chunk(
+                payload.data(), payload.size(), &chunk);
+            if (encoded == 0U) {
+                throw std::runtime_error("snapshot test chunk encoding failed");
+            }
+            payload.resize(encoded);
+            return payload;
+        };
+        const auto chunk0 = encode_chunk(0U);
+        const auto chunk1 = encode_chunk(BTGA_NET_SNAPSHOT_CHUNK_DATA_LIMIT);
+        const auto chunk2 = encode_chunk(BTGA_NET_SNAPSHOT_CHUNK_DATA_LIMIT * 2U);
+        btga::AuthoritativeReplica replica;
+        CHECK(replica.accept_snapshot_chunk(chunk0));
+        CHECK(replica.accept_snapshot_chunk(chunk2));
+        CHECK(!replica.snapshot_ready());
+        // A retry can repeat known chunks and deliver the missing one last.
+        CHECK(replica.accept_snapshot_chunk(chunk2));
+        CHECK(replica.accept_snapshot_chunk(chunk1));
+        CHECK(replica.snapshot_ready());
+        const auto completed = replica.take_snapshot();
+        CHECK(completed && completed->snapshot_id == snapshot_id);
+        CHECK(completed->tick == snapshot_tick);
+        CHECK(completed->state_digest == digest);
+        CHECK(completed->state == state);
+    }
+    {
         constexpr std::size_t full_vp = 0xB7E30U;
         constexpr std::size_t p1_vp = 0xB7E40U;
         constexpr std::size_t p2_vp = 0xB7E50U;

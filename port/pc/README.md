@@ -317,6 +317,19 @@ Build and run the current dedicated gate on Windows with:
     -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows
 ```
 
+Add `-Seconds 30 -DropOutgoingEvery 10 -DropIncomingEvery 10` to exercise the
+translated authority and client through deterministic bidirectional UDP loss.
+The profile is test-only and begins after relay admission.
+
+To run that four-player gate locally without contacting Azure, install Node.js
+and supply a checkout of the networking repository:
+
+```powershell
+.\port\pc\scripts\test-local-dedicated-multiplayer.ps1 `
+    -Rom 'C:\Games\BattleTanx - Global Assault (USA).z64' `
+    -NetworkingRoot 'C:\src\BattleTanx-Global-Assault-Networking'
+```
+
 For an actual persistent authority, use the supervisor rather than launching
 the executable directly:
 

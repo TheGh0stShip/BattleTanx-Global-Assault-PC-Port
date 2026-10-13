@@ -163,6 +163,43 @@ nine-hour rejection cliff without memory growth. Without
 `BTGA_DEDICATED_STATE_DIR` the journal remains ephemeral and is removed on
 clean shutdown; setting it enables the durable recovery mode above.
 
+The same gate can deterministically discard live gameplay datagrams after
+relay admission. This exercises the translated authority and translated client
+through the real public relay while leaving the three protocol witnesses
+reliable:
+
+```powershell
+.\port\pc\scripts\test-dedicated-multiplayer.ps1 `
+    -Rom 'C:\Games\BattleTanx - Global Assault (USA).z64' `
+    -Seconds 30 -DropOutgoingEvery 10 -DropIncomingEvery 10
+```
+
+An interval of 10 discards every tenth datagram in that direction. Zero keeps
+the direction lossless; one is rejected. Fault injection is test-only,
+default-off, activated after the signed relay handshake, and the gate fails if
+the authority and translated client do not both confirm the requested profile.
+Bootstrap retries retain one snapshot generation and rotate chunk order, so a
+partially received checkpoint accumulates across retries even under periodic
+or burst-correlated loss. A cold client remains paused until that checkpoint is
+complete; authoritative input frames alone can never bootstrap unknown state.
+
+The same four-player loss gate can run without consuming public lobby quota.
+Give it a local checkout of the networking repository; it creates fresh signed
+credentials, owns a private loopback relay, archives a unique evidence folder,
+and closes every child process when the run ends:
+
+```powershell
+.\port\pc\scripts\test-local-dedicated-multiplayer.ps1 `
+    -Rom 'C:\Games\BattleTanx - Global Assault (USA).z64' `
+    -NetworkingRoot 'C:\src\BattleTanx-Global-Assault-Networking'
+```
+
+This local gate defaults to four players, 30 seconds, and deterministic 10%
+loss in each direction on the translated authority/client path. Node.js is
+needed only to create local signed credentials and run the relay; Azure and the
+public master service are never contacted. CI may instead provide a fresh
+fixture with `-FixturePath ... -ExternalRelay`.
+
 The older peer-hosted flow documented below remains available for comparison,
 but it is not the architecture being taken to production.
 
