@@ -252,20 +252,32 @@ The portable GPLv3 protocol and relay client are pinned into this build but
 remain dormant: constructing or launching the game performs no network access.
 The native PC transport has been tested end to end through the public master
 and relay. **F10 → Online** browses, hosts, and joins real public relay lobbies.
-On Windows, choosing **Host** or **Join** now performs a controlled automatic
-restart into that pre-boot rendezvous; players do not need command-line launch
-arguments or a manual cold boot. The `--online-host` and `--online-join`
-commands remain developer fallbacks. Both peers enter N64 code with the same
-session seed and frame epoch. A five-run headless Windows gate now exercises
-the real retail two-player front end and synchronized gameplay without forcing
-player count or requiring a human-operated window. Online peers receive their
-own full-screen local camera automatically; the remaining duplicate remote HUD
-elements are a known visual issue. It remains experimental: general
-rollback/resimulation and full-campaign validation are not finished. Live
+The earlier peer-hosted synchronization mode remains experimental and is being
+superseded by a native dedicated authority: the server executes the translated
+gameplay simulation, publishes canonical four-player inputs, and periodically
+rebases clients with canonical world snapshots. The authority and a real
+translated headless client have completed automated public-relay runs with
+three additional protocol clients. Client rendering between authority
+snapshots and seamless reconnect are still active development; this is not yet
+a release-ready public multiplayer mode. Live
 service status is available at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/).
 Opening the Online tab itself remains network-inert; Refresh, Host, and Join are
 the explicit opt-in actions.
+
+Dedicated-authority developer commands on Windows are:
+
+```powershell
+# Persistent four-player authority; prints ONLINE_LOBBY_ID=...
+BattleTanxGA.exe --dedicated-server-public BattleTanxGA.z64
+
+# Normal rendered client
+BattleTanxGA.exe --dedicated-join LOBBY_ID BattleTanxGA.z64
+
+# Unattended authority + translated client + three peers
+./port/pc/scripts/test-dedicated-multiplayer.ps1 `
+  -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows
+```
 
 ## License
 

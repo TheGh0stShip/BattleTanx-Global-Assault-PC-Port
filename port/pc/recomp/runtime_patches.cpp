@@ -1,10 +1,17 @@
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <memory>
 #include <unordered_map>
 
 #include "recomp.h"
+#include "btga/gameplay_digest.hpp"
 #include "btga/online_bootstrap.hpp"
+#include "dedicated_runtime_bridge.hpp"
+#include "dedicated_client_bridge.hpp"
 
 namespace btga::renderer {
 bool online_simulation_frame_barrier();
@@ -18,6 +25,7 @@ extern "C" bool btga_turret_aim_active(int player);
 extern "C" float btga_screen_shake_intensity();
 extern "C" float btga_music_volume_setting();
 extern "C" float btga_effects_volume_setting();
+extern "C" void func_8009C524(std::uint8_t* rdram, recomp_context* ctx);
 
 namespace {
 std::int32_t effects_master_requested = 0x7FFF;
@@ -30,6 +38,58 @@ struct OnlineClockSample {
 
 thread_local OnlineClockSample online_clock_sample;
 
+constexpr std::size_t n64_rdram_size = 8U * 1024U * 1024U;
+
+struct ReplayEquivalenceProbe {
+    std::unique_ptr<std::uint8_t[]> rdram;
+    recomp_context entry_context{};
+    recomp_context first_exit_context{};
+    recomp_context replay_exit_context{};
+    bool captured = false;
+    bool replaying = false;
+    bool replay_end_seen = false;
+    bool finished = false;
+};
+
+thread_local ReplayEquivalenceProbe replay_probe;
+
+bool replay_probe_requested() {
+    static const bool requested = [] {
+        const char* value = std::getenv("BTGA_REPLAY_EQUIVALENCE_PROBE");
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return requested;
+}
+
+std::uint64_t fnv1a64(const std::uint8_t* bytes, std::size_t size) {
+    std::uint64_t hash = UINT64_C(1469598103934665603);
+    for (std::size_t index = 0; index < size; ++index) {
+        hash ^= bytes[index];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+void report_replay_difference(const std::uint8_t* expected,
+                              const std::uint8_t* actual,
+                              bool context_equal) {
+    std::size_t first = n64_rdram_size;
+    std::size_t count = 0;
+    for (std::size_t index = 0; index < n64_rdram_size; ++index) {
+        if (expected[index] == actual[index]) continue;
+        if (first == n64_rdram_size) first = index;
+        ++count;
+    }
+    std::fprintf(stderr,
+                 "BTGA_REPLAY_PROBE FAIL rdram_differences=%zu first=0x%06zx "
+                 "expected_hash=%016llx actual_hash=%016llx context_equal=%d\n",
+                 count, first,
+                 static_cast<unsigned long long>(fnv1a64(expected, n64_rdram_size)),
+                 static_cast<unsigned long long>(fnv1a64(actual, n64_rdram_size)),
+                 context_equal ? 1 : 0);
+    std::fflush(stderr);
+}
+
 float read_guest_float(std::uint8_t* rdram, std::uint32_t address) {
     const gpr guest_address = static_cast<gpr>(static_cast<std::int32_t>(address));
     return std::bit_cast<float>(static_cast<std::uint32_t>(MEM_W(0, guest_address)));
@@ -39,7 +99,69 @@ extern "C" void btga_online_seed_step(std::uint8_t*, recomp_context* ctx) {
     if (const auto seed = btga::preboot_online_seed()) ctx->r4 = *seed;
 }
 
+extern "C" void btga_replay_probe_begin(std::uint8_t* rdram, recomp_context* ctx) {
+    btga_dedicated_tick_begin(rdram, ctx);
+    btga_dedicated_client_tick_begin(rdram, ctx);
+    if (replay_probe.replaying || replay_probe.finished || !replay_probe_requested()) return;
+    if (!btga::preboot_online_seed()) return;
+    if (!btga::gameplay_frame_input_active({rdram, n64_rdram_size})) return;
+    if (!replay_probe.rdram) replay_probe.rdram = std::make_unique<std::uint8_t[]>(n64_rdram_size);
+    std::memcpy(replay_probe.rdram.get(), rdram, n64_rdram_size);
+    replay_probe.entry_context = *ctx;
+    replay_probe.captured = true;
+}
+
+extern "C" void btga_replay_probe_end(std::uint8_t* rdram, recomp_context* ctx) {
+    btga_dedicated_tick_end(rdram, ctx);
+    btga_dedicated_client_tick_end(rdram, ctx);
+    if (replay_probe.replaying) {
+        replay_probe.replay_exit_context = *ctx;
+        replay_probe.replay_end_seen = true;
+        return;
+    }
+    if (replay_probe.finished || !replay_probe.captured) return;
+
+    std::unique_ptr<std::uint8_t[]> first_result =
+        std::make_unique<std::uint8_t[]>(n64_rdram_size);
+    std::memcpy(first_result.get(), rdram, n64_rdram_size);
+    replay_probe.first_exit_context = *ctx;
+
+    std::memcpy(rdram, replay_probe.rdram.get(), n64_rdram_size);
+    *ctx = replay_probe.entry_context;
+    replay_probe.replaying = true;
+    replay_probe.replay_end_seen = false;
+    func_8009C524(rdram, ctx);
+    replay_probe.replaying = false;
+
+    const bool rdram_equal =
+        std::memcmp(first_result.get(), rdram, n64_rdram_size) == 0;
+    const bool context_equal = replay_probe.replay_end_seen &&
+        std::memcmp(&replay_probe.first_exit_context,
+                    &replay_probe.replay_exit_context,
+                    sizeof(recomp_context)) == 0;
+    if (rdram_equal && context_equal) {
+        std::fprintf(stderr,
+                     "BTGA_REPLAY_PROBE PASS hash=%016llx bytes=%zu\n",
+                     static_cast<unsigned long long>(fnv1a64(rdram, n64_rdram_size)),
+                     n64_rdram_size);
+        std::fflush(stderr);
+    } else {
+        report_replay_difference(first_result.get(), rdram, context_equal);
+        if (!context_equal) {
+            std::fprintf(stderr, "BTGA_REPLAY_PROBE FAIL cpu_context_differs=1\n");
+            std::fflush(stderr);
+        }
+    }
+
+    // The outer invocation still has its epilogue to execute.  Preserve its
+    // pre-epilogue CPU context while retaining the replayed RDRAM result.
+    *ctx = replay_probe.first_exit_context;
+    replay_probe.finished = true;
+    replay_probe.captured = false;
+}
+
 extern "C" void btga_online_clock_begin(std::uint8_t* rdram, recomp_context*) {
+    if (replay_probe.replaying) return;
     if (!btga::preboot_online_seed()) return;
     (void)btga::renderer::online_simulation_frame_barrier();
     constexpr gpr frame_counter = static_cast<gpr>(static_cast<std::int32_t>(0x8021945CU));
@@ -48,6 +170,17 @@ extern "C" void btga_online_clock_begin(std::uint8_t* rdram, recomp_context*) {
 }
 
 extern "C" void btga_online_clock_end(std::uint8_t* rdram, recomp_context*) {
+    if (replay_probe.replaying) {
+        constexpr gpr frame_counter = static_cast<gpr>(static_cast<std::int32_t>(0x8021945CU));
+        constexpr gpr frame_step = static_cast<gpr>(static_cast<std::int32_t>(0x80219488U));
+        constexpr gpr time_mode = static_cast<gpr>(static_cast<std::int32_t>(0x802195CCU));
+        const std::uint32_t mode = static_cast<std::uint32_t>(MEM_W(0, time_mode));
+        const bool paused = mode == 5U || mode == 6U || mode == 7U;
+        MEM_W(0, frame_counter) = static_cast<std::int32_t>(
+            online_clock_sample.frame + (paused ? 0U : 1U));
+        MEM_W(0, frame_step) = static_cast<std::int32_t>(std::bit_cast<std::uint32_t>(1.0F));
+        return;
+    }
     if (!btga::preboot_online_seed() || online_clock_sample.rdram != rdram) return;
     constexpr gpr frame_counter = static_cast<gpr>(static_cast<std::int32_t>(0x8021945CU));
     constexpr gpr frame_step = static_cast<gpr>(static_cast<std::int32_t>(0x80219488U));

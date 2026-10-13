@@ -15,6 +15,7 @@ param(
     [ValidateRange(5, 120)]
     [int] $ProgressTimeoutSeconds = 30,
     [switch] $SkipBuild,
+    [switch] $ReplayEquivalenceProbe,
     [switch] $ShowWindows
 )
 
@@ -50,9 +51,6 @@ for ($run = 1; $run -le $RelayRuns; ++$run) {
 }
 
 if ($Rom) {
-    if (-not $ControllerPak) {
-        throw "-ControllerPak is required for deterministic native gameplay scenarios. Use a local profile created by the game; it is copied into isolated per-peer data directories."
-    }
     if ($PeerLossRun -gt $GameRuns) {
         throw "-PeerLossRun cannot be greater than -GameRuns."
     }
@@ -87,6 +85,7 @@ if ($Rom) {
     $lastProgressSignature = ""
 
     try {
+        if ($ReplayEquivalenceProbe) { $env:BTGA_REPLAY_EQUIVALENCE_PROBE = "1" }
         if ($ShowWindows) { $env:BTGA_HEADLESS_VISIBLE = "1" }
         $env:BTGA_DATA_DIR = $hostData
         $env:BTGA_ONLINE_LOCAL_VIEW = "host"
@@ -174,6 +173,17 @@ if ($Rom) {
         if ($hostLog.Contains("Headless lobby cleanup failed")) {
             throw "Headless host could not remove its temporary lobby."
         }
+        if ($ReplayEquivalenceProbe) {
+            foreach ($namedLog in @(@("host", $hostLog), @("client", $clientLog))) {
+                if ($namedLog[1].Contains("BTGA_REPLAY_PROBE FAIL")) {
+                    throw "Headless $($namedLog[0]) failed deterministic tick replay."
+                }
+                $passes = [regex]::Matches($namedLog[1], "BTGA_REPLAY_PROBE PASS")
+                if ($passes.Count -ne 1) {
+                    throw "Headless $($namedLog[0]) reported $($passes.Count) replay passes; expected exactly one."
+                }
+            }
+        }
         $hostSyncPath = Join-Path $hostData "btga-net-sync.log"
         $clientSyncPath = Join-Path $clientData "btga-net-sync.log"
         $hostSync = if (Test-Path $hostSyncPath) { Get-Content $hostSyncPath -Raw } else { "" }
@@ -260,6 +270,7 @@ if ($Rom) {
         Remove-Item Env:BTGA_DATA_DIR -ErrorAction SilentlyContinue
         Remove-Item Env:BTGA_ONLINE_LOCAL_VIEW -ErrorAction SilentlyContinue
         Remove-Item Env:BTGA_HEADLESS_VISIBLE -ErrorAction SilentlyContinue
+        Remove-Item Env:BTGA_REPLAY_EQUIVALENCE_PROBE -ErrorAction SilentlyContinue
         foreach ($process in @($hostProcess, $clientProcess)) {
             if ($null -ne $process -and !$process.HasExited) {
                 Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
@@ -278,6 +289,7 @@ if ($Rom) {
         relay_runs = $RelayRuns
         game_runs = $GameRuns
         peer_loss_run = $PeerLossRun
+        replay_equivalence_probe = [bool]$ReplayEquivalenceProbe
         results = $results
     }
     $summary | ConvertTo-Json -Depth 5 | Set-Content -Path $report -Encoding UTF8

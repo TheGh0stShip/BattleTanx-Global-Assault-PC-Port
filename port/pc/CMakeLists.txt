@@ -6,7 +6,7 @@ include(FetchContent)
 set(BTGA_NET_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(btga_networking
     GIT_REPOSITORY https://github.com/TheGh0stShip/BattleTanx-Global-Assault-Networking.git
-    GIT_TAG beb48db98fa7cc913915e8b71f127bec6e2f1cf4)
+    GIT_TAG aaab81a7e45d3abeba5eb17ed4437455f7fa4cb7)
 FetchContent_MakeAvailable(btga_networking)
 
 FetchContent_Declare(nlohmann_json
@@ -26,6 +26,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(btga_pc_core
+    src/authoritative_session.cpp
+    src/authoritative_server.cpp
+    src/authoritative_replica.cpp
+    src/translated_authority.cpp
     src/controller_pak.cpp
     src/gameplay_digest.cpp
     src/gameplay_snapshot.cpp
@@ -81,20 +85,45 @@ add_executable(btga_pc_synchronization_soak tests/synchronization_soak.cpp)
 target_link_libraries(btga_pc_synchronization_soak PRIVATE btga_pc_core)
 add_test(NAME btga_pc_synchronization_soak COMMAND btga_pc_synchronization_soak)
 
+add_executable(btga_authoritative_server_soak tests/authoritative_server_soak.cpp)
+target_link_libraries(btga_authoritative_server_soak PRIVATE btga_pc_core)
+add_test(NAME btga_authoritative_server_soak COMMAND btga_authoritative_server_soak)
+
 add_executable(btga_pc_live_multiplayer_test tests/live_multiplayer_test.cpp)
 target_link_libraries(btga_pc_live_multiplayer_test PRIVATE btga_pc_core)
 
 add_executable(btga_pc_native_online_e2e tests/native_online_e2e.cpp)
 target_link_libraries(btga_pc_native_online_e2e PRIVATE btga_pc_core)
 
+# Headless protocol participant used by local/CI dedicated-server tests. It
+# binds one authenticated seat, streams distinctive inputs and verifies the
+# canonical frames emitted by the real authoritative simulation.
+add_executable(btga_dedicated_client_bot tests/dedicated_client_bot.cpp)
+target_link_libraries(btga_dedicated_client_bot PRIVATE btga_pc_core)
+
 if(BTGA_BUILD_RECOMP)
     set(BTGA_RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/recomp/generated/functions")
     set(BTGA_RECOMP_HEADER "${BTGA_RECOMP_DIR}/funcs.h")
     set(BTGA_RECOMP_INCLUDE "${BTGA_N64_RUNTIME_ROOT}/N64Recomp/include")
+    set(BTGA_RECOMP_CONFIG "${CMAKE_CURRENT_SOURCE_DIR}/recomp/btga.toml")
+    set(BTGA_RECOMP_CONFIG_HASH "${CMAKE_CURRENT_SOURCE_DIR}/recomp/generated/btga.toml.sha256")
 
     if(NOT EXISTS "${BTGA_RECOMP_HEADER}")
         message(FATAL_ERROR
             "Generated recompilation output is missing. Run port/pc/recomp/prepare.sh first.")
+    endif()
+    if(NOT EXISTS "${BTGA_RECOMP_CONFIG_HASH}")
+        message(FATAL_ERROR
+            "Generated recompilation output has no configuration fingerprint. "
+            "Rerun port/pc/recomp/prepare.sh (or setup-windows.ps1).")
+    endif()
+    file(SHA256 "${BTGA_RECOMP_CONFIG}" BTGA_RECOMP_EXPECTED_HASH)
+    file(READ "${BTGA_RECOMP_CONFIG_HASH}" BTGA_RECOMP_GENERATED_HASH)
+    string(STRIP "${BTGA_RECOMP_GENERATED_HASH}" BTGA_RECOMP_GENERATED_HASH)
+    if(NOT BTGA_RECOMP_GENERATED_HASH STREQUAL BTGA_RECOMP_EXPECTED_HASH)
+        message(FATAL_ERROR
+            "Generated recompilation output is stale for recomp/btga.toml. "
+            "Rerun port/pc/recomp/prepare.sh (or setup-windows.ps1).")
     endif()
     if(NOT EXISTS "${BTGA_RECOMP_INCLUDE}/recomp.h")
         message(FATAL_ERROR
@@ -167,6 +196,8 @@ if(BTGA_BUILD_RECOMP)
         endif()
         add_executable(btga_runtime_probe
             recomp/controller_pak_hle.cpp
+            recomp/dedicated_client_bridge.cpp
+            recomp/dedicated_runtime_bridge.cpp
             recomp/generated/n_aspMain.cpp
             recomp/register_overlays.cpp
             recomp/runtime_probe.cpp

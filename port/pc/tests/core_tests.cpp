@@ -1,5 +1,9 @@
 #include "btga/game.hpp"
 #include "btga/gameplay_digest.hpp"
+#include "btga/authoritative_session.hpp"
+#include "btga/authoritative_server.hpp"
+#include "btga/authoritative_replica.hpp"
+#include "btga/translated_authority.hpp"
 #include "btga/gameplay_snapshot.hpp"
 #include "btga/input_sync.hpp"
 #include "btga/controller_pak.hpp"
@@ -38,6 +42,275 @@ extern "C" {
     } while (false)
 
 int main() {
+    {
+        // This is the execution model used by the translated dedicated
+        // runtime: the guest tick owns the call stack, while the authority
+        // freezes inputs at entry and captures canonical RDRAM at exit.
+        btga::TranslatedAuthority authority{0x0fU, 2U, 3U};
+        std::vector<std::uint8_t> rdram(8U * 1024U * 1024U, 0U);
+        for (std::uint8_t seat = 0; seat < 4; ++seat) {
+            BtgaNetInputBatch batch{};
+            batch.first_tick = 0;
+            batch.player_id = seat;
+            batch.frame_count = 1;
+            batch.frames[0] = {static_cast<std::uint16_t>(seat + 1U),
+                               static_cast<std::int8_t>(seat), 0};
+            std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
+            const std::size_t payload_size = btga_net_encode_input_batch(
+                packet.data() + BTGA_NET_HEADER_SIZE,
+                packet.size() - BTGA_NET_HEADER_SIZE, &batch);
+            BtgaNetHeader header{};
+            header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
+            header.message_type = BTGA_NET_MSG_INPUT;
+            header.flags = BTGA_NET_FLAG_RELAYED;
+            header.session_id = UINT64_C(0x123456789abcdef0);
+            header.sequence = seat + 1U;
+            header.payload_size = static_cast<std::uint16_t>(payload_size);
+            header.peer_id = static_cast<std::uint16_t>(seat + 1U);
+            CHECK(btga_net_encode_header(packet.data(), packet.size(), &header));
+            CHECK(authority.ingest_client_packet(
+                {packet.data(), BTGA_NET_HEADER_SIZE + payload_size},
+                header.session_id, header.peer_id));
+        }
+        CHECK(authority.ready(0U));
+        CHECK(authority.begin_tick(0U));
+        CHECK(!authority.begin_tick(0U));
+        CHECK(authority.inputs()[3].buttons == 4U);
+        rdram[0x1234] = 0x5aU;
+        const auto frame0 = authority.finish_tick(0U, rdram);
+        CHECK(frame0 && frame0->tick == 0U && frame0->received_mask == 0x0fU);
+        CHECK(authority.next_tick() == 1U);
+        CHECK(!authority.latest_snapshot());
+
+        CHECK(authority.submit(0, 1U, {9U, 0, 0}));
+        CHECK(!authority.ready(2U));
+        CHECK(authority.ready(4U));
+        CHECK(authority.begin_tick(4U));
+        // Connected missing seats repeat their last accepted input only after
+        // the bounded jitter deadline.
+        CHECK(authority.inputs()[1].buttons == 2U);
+        CHECK(authority.set_connected(2U, false));
+        // Disconnects become neutral on the next tick and never repeat a
+        // stuck drive or fire control.
+        rdram[0x1235] = 0xa5U;
+        const auto frame1 = authority.finish_tick(1U, rdram);
+        CHECK(frame1 && authority.latest_snapshot());
+        CHECK(authority.latest_snapshot()->next_tick == 2U);
+        CHECK(authority.latest_snapshot()->state.size() == rdram.size());
+        CHECK(authority.latest_snapshot()->state[0x1235] == 0xa5U);
+
+        CHECK(authority.ready(5U));
+        CHECK(authority.begin_tick(5U));
+        CHECK(authority.inputs()[2].buttons == 0U);
+        CHECK(authority.finish_tick(2U, rdram));
+
+        // A newly authenticated endpoint resumes with a fresh packet sequence
+        // epoch after timeout. The old endpoint's sequence was 3; sequence 1
+        // must be accepted only after set_connected(false) reset that epoch.
+        CHECK(authority.set_connected(2U, true));
+        btga::InputSynchronizer resume_encoder;
+        std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> resume_packet{};
+        const auto resume_size = resume_encoder.encode(
+            resume_packet, UINT64_C(0x123456789abcdef0), 3U, 1U, 3U, 2U,
+            {0x55U, 1, -1});
+        CHECK(resume_size != 0U);
+        CHECK(authority.ingest_client_packet(
+            {resume_packet.data(), resume_size}, UINT64_C(0x123456789abcdef0), 3U));
+        CHECK(authority.ready(6U));
+        CHECK(authority.begin_tick(6U));
+        CHECK(authority.inputs()[2].buttons == 0x55U);
+        CHECK(authority.finish_tick(3U, rdram));
+    }
+    {
+        class FourSeatSimulation final : public btga::AuthoritativeSimulation {
+        public:
+            bool run_tick(
+                std::uint32_t tick,
+                std::span<const btga::OnlineControllerInput,
+                          btga::online_player_limit> inputs) override {
+                if (tick != ticks) return false;
+                for (std::size_t seat = 0; seat < inputs.size(); ++seat) {
+                    state[seat] += inputs[seat].buttons;
+                    state[seat] += static_cast<std::int32_t>(inputs[seat].stick_x);
+                    state[seat] += static_cast<std::int32_t>(inputs[seat].stick_y);
+                }
+                ++ticks;
+                return true;
+            }
+            std::uint64_t state_digest() const override {
+                std::uint64_t digest = ticks;
+                for (const auto value : state) {
+                    digest = digest * 1099511628211ULL ^
+                             static_cast<std::uint32_t>(value);
+                }
+                return digest;
+            }
+            bool save_state(std::vector<std::uint8_t>& destination) const override {
+                destination.resize(sizeof(ticks) + sizeof(state));
+                std::memcpy(destination.data(), &ticks, sizeof(ticks));
+                std::memcpy(destination.data() + sizeof(ticks), state.data(), sizeof(state));
+                return true;
+            }
+            std::uint32_t ticks = 0;
+            std::array<std::int32_t, btga::online_player_limit> state{};
+        } simulation;
+
+        btga::AuthoritativeSession session{0x0fU, 2U};
+        CHECK(!session.ready());
+        CHECK(session.submit(0, 0, {1, 1, 1}));
+        CHECK(session.submit(1, 0, {2, 2, 2}));
+        CHECK(session.submit(2, 0, {3, 3, 3}));
+        CHECK(!session.ready());
+        CHECK(session.submit(3, 0, {4, 4, 4}));
+        CHECK(session.ready());
+        const auto first = session.advance(simulation);
+        CHECK(first && first->tick == 0 && first->inputs[3].buttons == 4);
+        CHECK(first->received_mask == 0x0fU);
+        CHECK(session.next_tick() == 1 && !session.latest_snapshot());
+        CHECK(!session.submit(3, 0, {}));
+        for (std::uint8_t seat = 0; seat < btga::online_player_limit; ++seat) {
+            CHECK(session.submit(seat, 1, {static_cast<std::uint16_t>(seat + 5U), 0, 0}));
+        }
+        const auto second = session.advance(simulation);
+        CHECK(second && second->tick == 1);
+        CHECK(session.latest_snapshot());
+        CHECK(session.latest_snapshot()->next_tick == 2);
+        CHECK(session.latest_snapshot()->state_digest == second->state_digest);
+        CHECK(!session.latest_snapshot()->state.empty());
+
+        CHECK(session.submit(0, 2, {9, 1, 0}));
+        CHECK(session.submit(1, 2, {10, 0, 0}));
+        CHECK(session.submit(2, 2, {11, 0, 0}));
+        CHECK(!session.advance_due(simulation, 4U));
+        const auto timed_out = session.advance_due(simulation, 5U);
+        CHECK(timed_out && timed_out->tick == 2);
+        CHECK(timed_out->received_mask == 0x07U);
+        CHECK(timed_out->inputs[3].buttons == 8U);
+        CHECK(!session.submit(3, 2, {12, 0, 0}));
+    }
+    {
+        class ServerSimulation final : public btga::AuthoritativeSimulation {
+        public:
+            bool run_tick(
+                std::uint32_t tick,
+                std::span<const btga::OnlineControllerInput,
+                          btga::online_player_limit> inputs) override {
+                if (tick != ticks) return false;
+                for (std::size_t seat = 0; seat < inputs.size(); ++seat) {
+                    state[seat] += inputs[seat].buttons;
+                }
+                ++ticks;
+                return true;
+            }
+            std::uint64_t state_digest() const override {
+                std::uint64_t result = ticks;
+                for (const auto value : state) result = result * 131U + value;
+                return result;
+            }
+            bool save_state(std::vector<std::uint8_t>& destination) const override {
+                destination.resize(sizeof(ticks) + sizeof(state));
+                std::memcpy(destination.data(), &ticks, sizeof(ticks));
+                std::memcpy(destination.data() + sizeof(ticks), state.data(),
+                            sizeof(state));
+                return true;
+            }
+            std::uint32_t ticks = 0;
+            std::array<std::uint32_t, btga::online_player_limit> state{};
+        } simulation;
+
+        btga::AuthoritativeServerCore server{0x0fU, 2U, 3U};
+        btga::AuthoritativeReplica replica;
+        auto submit = [&](std::uint8_t seat, std::uint32_t tick,
+                          std::uint16_t buttons) {
+            BtgaNetInputBatch batch{};
+            std::array<std::uint8_t, BTGA_NET_MAX_PAYLOAD_SIZE> payload{};
+            batch.first_tick = tick;
+            batch.player_id = seat;
+            batch.frame_count = 1U;
+            batch.frames[0] = {buttons, 0, 0};
+            const auto size = btga_net_encode_input_batch(
+                payload.data(), payload.size(), &batch);
+            return size != 0U && server.ingest_input_payload(
+                std::span<const std::uint8_t>{payload.data(), size});
+        };
+        auto submit_packet = [&](std::uint8_t seat, std::uint16_t source_slot,
+                                 std::uint32_t tick, std::uint32_t sequence) {
+            btga::InputSynchronizer encoder;
+            std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
+            const auto size = encoder.encode(
+                packet, UINT64_C(0x1020304050607080), source_slot, sequence, tick,
+                seat, {static_cast<std::uint16_t>(seat + 20U), 0, 0});
+            return size != 0U && server.ingest_client_packet(
+                std::span<const std::uint8_t>{packet.data(), size},
+                UINT64_C(0x1020304050607080), source_slot);
+        };
+        CHECK(!submit_packet(0U, 2U, 10U, 1U));
+        CHECK(submit_packet(0U, 1U, 10U, 1U));
+        CHECK(submit_packet(0U, 1U, 10U, 1U));
+        for (std::uint8_t seat = 0; seat < btga::online_player_limit; ++seat) {
+            CHECK(submit(seat, 0U, static_cast<std::uint16_t>(seat + 1U)));
+        }
+        const auto first = server.step(simulation, 0U);
+        CHECK(first && first->snapshot_payloads.empty());
+        CHECK(replica.accept_frame(first->frame_payload));
+        BtgaNetAuthoritativeFrame frame{};
+        CHECK(btga_net_decode_authoritative_frame(
+            &frame, first->frame_payload.data(), first->frame_payload.size()));
+        CHECK(frame.tick == 0U && frame.received_mask == 0x0fU);
+        CHECK(frame.connected_mask == 0x0fU);
+
+        CHECK(submit(0U, 1U, 9U));
+        CHECK(submit(1U, 1U, 10U));
+        CHECK(submit(2U, 1U, 11U));
+        CHECK(!server.step(simulation, 3U));
+        const auto second = server.step(simulation, 4U);
+        CHECK(second && second->snapshot_payloads.size() == 1U);
+        CHECK(replica.accept_frame(second->frame_payload));
+        CHECK(replica.accept_snapshot_chunk(second->snapshot_payloads[0]));
+        CHECK(replica.accept_snapshot_chunk(second->snapshot_payloads[0]));
+        CHECK(replica.snapshot_ready());
+        CHECK(btga_net_decode_authoritative_frame(
+            &frame, second->frame_payload.data(), second->frame_payload.size()));
+        CHECK(frame.tick == 1U && frame.received_mask == 0x07U);
+        CHECK(frame.inputs[3].buttons == 4U);
+        BtgaNetSnapshotChunk chunk{};
+        CHECK(btga_net_decode_snapshot_chunk(
+            &chunk, second->snapshot_payloads[0].data(),
+            second->snapshot_payloads[0].size()));
+        CHECK(chunk.tick == 2U && chunk.offset == 0U);
+        CHECK(chunk.total_size == sizeof(simulation.ticks) + sizeof(simulation.state));
+        CHECK(chunk.data_size == chunk.total_size);
+        const auto canonical = replica.take_snapshot();
+        CHECK(canonical && canonical->tick == 2U);
+        CHECK(canonical->state.size() == chunk.total_size);
+
+        CHECK(server.set_connected(3U, false));
+        CHECK(!submit(3U, 2U, 0xffffU));
+        CHECK(submit(0U, 2U, 1U));
+        CHECK(submit(1U, 2U, 1U));
+        CHECK(submit(2U, 2U, 1U));
+        const auto disconnected = server.step(simulation, 5U);
+        CHECK(disconnected);
+        CHECK(replica.accept_frame(disconnected->frame_payload));
+        CHECK(btga_net_decode_authoritative_frame(
+            &frame, disconnected->frame_payload.data(),
+            disconnected->frame_payload.size()));
+        CHECK(frame.inputs[3].buttons == 0U);
+        CHECK(frame.connected_mask == 0x07U);
+        CHECK(replica.latest_frame()->connected_mask == 0x07U);
+        CHECK((frame.received_mask & 0x08U) == 0U);
+        CHECK(server.set_connected(3U, true));
+        CHECK(submit(3U, 3U, 12U));
+        const auto resync = server.make_resync(simulation);
+        CHECK(resync && !resync->empty());
+        btga::AuthoritativeReplica returning_client;
+        for (auto iterator = resync->rbegin(); iterator != resync->rend(); ++iterator) {
+            CHECK(returning_client.accept_snapshot_chunk(*iterator));
+        }
+        const auto resumed = returning_client.take_snapshot();
+        CHECK(resumed && resumed->tick == server.session().next_tick());
+        CHECK(resumed->state_digest == simulation.state_digest());
+    }
     {
         constexpr std::size_t full_vp = 0xB7E30U;
         constexpr std::size_t p1_vp = 0xB7E40U;

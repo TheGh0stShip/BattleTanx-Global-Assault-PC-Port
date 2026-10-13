@@ -27,7 +27,7 @@ struct OnlineSyncOrigin {
 // struct serialization so the same bytes can be used by every target platform.
 class InputSynchronizer {
 public:
-    static constexpr std::size_t max_players = 16;
+    static constexpr std::size_t max_players = 4;
     static constexpr std::size_t history_size = 64;
 
     [[nodiscard]] std::size_t encode(std::span<std::uint8_t> packet,

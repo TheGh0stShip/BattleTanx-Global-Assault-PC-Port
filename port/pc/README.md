@@ -288,13 +288,25 @@ The automatic restart is the state guarantee: an online session never attempts
 to attach one live emulation instance to another. Developer fallback commands
 remain available as `--online-host ROM` and `--online-join LOBBY_ID ROM`.
 General rollback/resimulation and full-campaign validation are still under
-development. The frame/input watchdog now recovers from a departed peer
-without freezing. Five consecutive native three-minute runs completed a match,
-traversed victory/intermission, entered a second synchronized gameplay epoch,
-and stayed checksum-identical through frame 4740. An additional fault run
-terminated the client after synchronization and verified host recovery. Until
-the remaining work lands, this is an experimental test path, not a finished
-public multiplayer mode.
+development. The peer-hosted path is being superseded by a four-player native
+dedicated authority. The authority runs the translated gameplay simulation,
+waits for four authenticated seats before tick zero, continues when a seat
+times out, publishes canonical input frames, and sends periodic canonical
+gameplay snapshots. A real translated headless client plus three protocol peers
+has completed this flow through the public service. The translated client still
+diverges between snapshot rebases, so this is an automated development path,
+not a finished public multiplayer mode.
+
+Build and run the current dedicated gate on Windows with:
+
+```powershell
+.\port\pc\build-windows.ps1
+.\port\pc\scripts\test-dedicated-multiplayer.ps1 `
+    -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows
+```
+
+For a visible client, leave the authority running, copy the printed lobby ID,
+and launch `BattleTanxGA.exe --dedicated-join LOBBY_ID BattleTanxGA.z64`.
 
 Developers can reproduce the fully native PC transport test with CMake and a
 C++20 compiler:

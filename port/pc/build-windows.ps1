@@ -13,17 +13,46 @@ if ($root.StartsWith("\\")) {
 
 $runtime = Join-Path $root ".deps\N64ModernRuntime"
 $rt64 = Join-Path $root ".deps\rt64"
+$recompRoot = Join-Path $root ".deps\N64Recomp"
+$recompExe = Join-Path $recompRoot "build\N64Recomp.exe"
+$recompDirectory = Join-Path $root "port\pc\recomp"
+$recompInput = Join-Path $recompDirectory "input"
+$generatedDirectory = Join-Path $recompDirectory "generated"
 $generated = Join-Path $root "port\pc\recomp\generated\functions\funcs.h"
+$recompConfig = Join-Path $root "port\pc\recomp\btga.toml"
+$recompFingerprint = Join-Path $root "port\pc\recomp\generated\btga.toml.sha256"
 foreach ($required in @(
     (Join-Path $runtime "CMakeLists.txt"),
     (Join-Path $rt64 "CMakeLists.txt"),
-    $generated,
+    $recompExe,
+    (Join-Path $recompInput "functions.toml"),
+    (Join-Path $recompInput "battletanx_ga.z64"),
     (Join-Path $root "port\pc\recomp\generated\n_aspMain.cpp")
 )) {
     if (-not (Test-Path $required)) {
         throw "Required generated/dependency file is missing: $required. See port/pc/recomp/README.md."
     }
 }
+
+# Generated CPU translation is deliberately rebuilt on every native runtime
+# build. N64Recomp output is ignored by Git, and treating an old generated tree
+# as an implicit input has repeatedly produced binaries that did not contain
+# the current hooks. Keep translation in the build flow instead of relying on
+# timestamps, copied worktrees, or a developer remembering a separate step.
+Remove-Item (Join-Path $generatedDirectory "functions") -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $generatedDirectory "battletanx_ga.bin") -Force -ErrorAction SilentlyContinue
+Push-Location $recompDirectory
+try {
+    & $recompExe "btga.toml"
+    if ($LASTEXITCODE -ne 0) { throw "N64Recomp translation failed." }
+} finally {
+    Pop-Location
+}
+if (-not (Test-Path $generated)) {
+    throw "N64Recomp completed without producing $generated."
+}
+$expectedRecompHash = (Get-FileHash -Algorithm SHA256 $recompConfig).Hash.ToLowerInvariant()
+Set-Content -NoNewline -Encoding ascii $recompFingerprint $expectedRecompHash
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
 if (-not (Test-Path $vswhere)) {
@@ -61,7 +90,9 @@ $sdl = Join-Path $rt64 "src\contrib\mupen64plus-win32-deps\SDL2-2.26.3"
     "-DSDL2_DIR=$(Join-Path $sdl 'cmake')"
 if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed." }
 
-& $cmake --build $build --target btga_runtime_probe btga_pc_tests btga_pc_synchronization_soak --parallel
+& $cmake --build $build --target btga_runtime_probe btga_pc_tests `
+    btga_pc_synchronization_soak btga_authoritative_server_soak `
+    btga_dedicated_client_bot --parallel
 if ($LASTEXITCODE -ne 0) { throw "Native build failed." }
 
 & $ctest --test-dir $build --output-on-failure

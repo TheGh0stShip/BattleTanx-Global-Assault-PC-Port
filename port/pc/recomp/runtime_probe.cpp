@@ -25,6 +25,8 @@
 #include "btga/online_bootstrap.hpp"
 #include "btga/online_local_view.hpp"
 #include "btga/texture_packs.hpp"
+#include "dedicated_runtime_bridge.hpp"
+#include "dedicated_client_bridge.hpp"
 #include "ultramodern/renderer_context.hpp"
 #include "ultramodern/ultramodern.hpp"
 #include "xxHash/xxh3.h"
@@ -369,6 +371,13 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
     if (controller < 0 || controller >= max_controllers) {
         return false;
     }
+    if (btga_dedicated_controller_input(controller, *buttons, *x, *y)) {
+        return true;
+    }
+    const int dedicated_local_seat = btga_dedicated_client_local_seat();
+    if (dedicated_local_seat >= 0 && controller != dedicated_local_seat) {
+        return btga_dedicated_client_controller_input(controller, *buttons, *x, *y);
+    }
 #ifdef BTGA_HAS_RT64
     if (interactive) {
         const std::lock_guard lock(input_settings_mutex);
@@ -490,6 +499,10 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
                 *y = static_cast<float>(scripted.stick_y) / 127.0F;
             }
         }
+        if (dedicated_local_seat == controller) {
+            btga_dedicated_client_submit_local(*buttons, *x, *y);
+            return btga_dedicated_client_controller_input(controller, *buttons, *x, *y);
+        }
         if (online_slot >= 0) {
             if (!online_input_presampled.exchange(false, std::memory_order_acq_rel)) {
                 btga::renderer::online_submit_local_input(*buttons, *x, *y);
@@ -557,6 +570,14 @@ void set_rumble(int controller, bool enabled) {
 #endif
 }
 ultramodern::input::connected_device_info_t connected_device(int controller) {
+    if (btga_dedicated_enabled() && controller >= 0 && controller < max_controllers) {
+        return {ultramodern::input::Device::Controller,
+                ultramodern::input::Pak::RumblePak};
+    }
+    if (btga_dedicated_client_enabled() && controller >= 0 && controller < max_controllers) {
+        return {ultramodern::input::Device::Controller,
+                ultramodern::input::Pak::RumblePak};
+    }
     // Controller discovery occurs before the renderer context necessarily
     // adopts the pre-boot relay session. Advertise both synchronized ports
     // from the negotiated launch intent so the retail front end exposes its
@@ -639,6 +660,8 @@ std::string headless_host_lobby_id;
 std::string headless_host_secret;
 
 void drive_headless_runtime(void*) {
+    if (btga_dedicated_enabled()) btga_dedicated_network_poll();
+    btga_dedicated_client_pump();
 #ifdef BTGA_HAS_RT64
     if (interactive) {
         SDL_Event event{};
@@ -674,6 +697,10 @@ void drive_headless_runtime(void*) {
     } else if (interactive && !automated_online) {
         return;
 #endif
+    } else if (btga_dedicated_enabled()) {
+        // Dedicated authority processes are persistent. Lifecycle shutdown is
+        // controlled by the service manager, not the bounded boot probe.
+        return;
     } else if (std::chrono::steady_clock::now() - boot_started > headless_boot_duration) {
         std::cerr << "Headless boot window elapsed: threads=" << created_threads.load()
                   << " vi=" << vi_events.load()
@@ -812,6 +839,14 @@ int runtime_main(int argc, char** argv) {
     const bool headless_online_join =
         argc == 5 && std::string_view{argv[1]} == "--online-headless-join";
     const bool headless_online = headless_online_host || headless_online_join;
+    const bool dedicated_server =
+        argc == 3 && std::string_view{argv[1]} == "--dedicated-server";
+    const bool dedicated_server_public =
+        argc == 3 && std::string_view{argv[1]} == "--dedicated-server-public";
+    const bool dedicated_join =
+        argc == 4 && std::string_view{argv[1]} == "--dedicated-join";
+    const bool dedicated_headless =
+        argc == 5 && std::string_view{argv[1]} == "--dedicated-headless";
     automated_online = headless_online;
     automated_online_host = headless_online_host;
     const bool online_host = headless_online_host ||
@@ -819,9 +854,11 @@ int runtime_main(int argc, char** argv) {
     const bool online_join = headless_online_join ||
         (argc == 4 && std::string_view{argv[1]} == "--online-join");
     const bool online_resume = argc == 3 && std::string_view{argv[1]} == "--online-resume";
-    bool boot = argc == 3 && std::string_view{argv[1]} == "--boot";
-    bool timed_boot = argc == 4 && std::string_view{argv[1]} == "--boot-seconds";
-    bool play = (!headless_online && (online_host || online_join)) ||
+    bool boot = dedicated_server || dedicated_server_public || dedicated_headless ||
+                (argc == 3 && std::string_view{argv[1]} == "--boot");
+    bool timed_boot = (argc == 4 && std::string_view{argv[1]} == "--boot-seconds") ||
+                      dedicated_headless;
+    bool play = dedicated_join || (!headless_online && (online_host || online_join)) ||
                 online_resume || picked_rom.has_value() ||
                 (argc == 3 && std::string_view{argv[1]} == "--play") ||
                 (argc == 2 && std::string_view{argv[1]}.starts_with("-") == false);
@@ -831,7 +868,10 @@ int runtime_main(int argc, char** argv) {
                   << " [ROM | --choose-rom | --boot ROM | --boot-seconds SECONDS ROM | --play ROM"
                      " | --online-host ROM | --online-join LOBBY_ID ROM"
                      " | --online-headless-host SECONDS ROM"
-                     " | --online-headless-join SECONDS LOBBY_ID ROM]\n";
+                     " | --online-headless-join SECONDS LOBBY_ID ROM"
+                     " | --dedicated-server ROM | --dedicated-server-public ROM"
+                     " | --dedicated-join LOBBY_ID ROM"
+                     " | --dedicated-headless SECONDS LOBBY_ID ROM]\n";
         return 2;
     }
 
@@ -855,8 +895,9 @@ int runtime_main(int argc, char** argv) {
         else if (headless_online_host) rom_path = argv[3];
         else if (headless_online_join) rom_path = argv[4];
         else if (online_host) rom_path = argv[2];
-        else if (online_join) rom_path = argv[3];
+        else if (online_join || dedicated_join) rom_path = argv[3];
         else if (online_resume) rom_path = argv[2];
+        else if (dedicated_headless) rom_path = argv[4];
         else if (timed_boot) rom_path = argv[3];
         else if (argc == 2) rom_path = argv[1];
         else rom_path = argv[2];
@@ -877,6 +918,28 @@ int runtime_main(int argc, char** argv) {
         return 1;
     }
     btga_register_overlays();
+    if (dedicated_server || dedicated_server_public) {
+        std::string error;
+        const bool started = dedicated_server_public
+            ? btga_dedicated_enable_public("BattleTanx Dedicated", error)
+            : btga_dedicated_enable_from_environment(error);
+        if (!started) {
+            throw std::runtime_error{"Could not start dedicated authority: " + error};
+        }
+    }
+    if (dedicated_join || dedicated_headless) {
+        auto http = btga::make_platform_http_client(
+            "https://btga.thegh0stship.com/api/v1");
+        btga::MasterClient master{*http};
+        const char* lobby_id = dedicated_headless ? argv[3] : argv[2];
+        const btga::JoinRegistration registration = master.join(lobby_id);
+        std::string error;
+        if (!btga_dedicated_client_enable(registration.session_id,
+                                          registration.relay,
+                                          registration.join_token, error)) {
+            throw std::runtime_error{"Could not join dedicated authority: " + error};
+        }
+    }
 
     std::cout << "Registered all translated game code at entrypoint 0x"
               << std::hex << static_cast<std::uint32_t>(game.entrypoint_address) << '\n';
@@ -984,6 +1047,11 @@ int runtime_main(int argc, char** argv) {
         if (!window) { std::cerr << "Window creation failed: " << SDL_GetError() << '\n'; return 1; }
         if (online_host) SDL_SetWindowTitle(window, "BattleTanx GA - HOST (waiting to cold boot)");
         if (online_join) SDL_SetWindowTitle(window, "BattleTanx GA - CLIENT (waiting to cold boot)");
+        if (dedicated_join) {
+            const std::string title = "BattleTanx GA - ONLINE (Seat " +
+                std::to_string(btga_dedicated_client_local_seat() + 1) + ")";
+            SDL_SetWindowTitle(window, title.c_str());
+        }
         // Populate ports before libultra's initial controller query. Hot-plug
         // changes are picked up by the same routine during normal polling.
         poll_input();

@@ -25,6 +25,7 @@ ln -sfn "$matching/config/us/recomp_function_boundaries.toml" input/functions.to
 ln -sfn "$matching/baseroms/us/baserom.z64" input/battletanx_ga.z64
 rm -rf generated/functions generated/battletanx_ga.bin
 "$recomp" btga.toml
+sha256sum btga.toml | awk '{print $1}' > generated/btga.toml.sha256
 
 if [[ -x "$rsp_recomp" ]]; then
     "$rsp_recomp" n_aspMain.toml

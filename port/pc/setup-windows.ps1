@@ -132,7 +132,6 @@ Remove-Item (Join-Path $generatedDirectory "battletanx_ga.bin") -Force -ErrorAct
 
 Push-Location $recompDirectory
 try {
-    Invoke-Checked (Join-Path $recompBuild "N64Recomp.exe") @("btga.toml") "Translating the game CPU code"
     Invoke-Checked (Join-Path $recompBuild "RSPRecomp.exe") @("n_aspMain.toml") "Translating the audio microcode"
 } finally {
     Pop-Location
