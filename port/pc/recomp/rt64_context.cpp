@@ -46,9 +46,13 @@ constexpr std::uint8_t online_state_version = 1;
 constexpr std::uint8_t online_state_ack_version = 2;
 constexpr std::size_t online_state_packet_size = 17;
 constexpr std::size_t random_seed_offset = 0x00114C80U;
+constexpr std::size_t object_pool_offset = 0x001AD128U;
+constexpr std::size_t object_size = 0x4CCU;
+constexpr std::size_t object_count = 24U;
 constexpr std::size_t frame_counter_offset = 0x0021945CU;
 constexpr std::uint32_t online_state_checksum_salt = UINT32_C(0x42544741);
 constexpr std::size_t online_digest_history_size = 128U;
+constexpr std::uint32_t online_max_corrective_rebases = 2U;
 constexpr std::uint8_t gameplay_snapshot_version = 0x10;
 constexpr std::uint8_t gameplay_snapshot_ack_version = 0x11;
 constexpr std::size_t gameplay_snapshot_header_size =
@@ -115,6 +119,15 @@ bool environment_flag_enabled(const char* name) {
     const std::string_view text{value};
     return !text.empty() && text != "0" && text != "false" && text != "FALSE" &&
            text != "off" && text != "OFF";
+}
+
+std::optional<std::uint32_t> environment_u32(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') return std::nullopt;
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end == value || *end != '\0' || parsed > UINT32_MAX) return std::nullopt;
+    return static_cast<std::uint32_t>(parsed);
 }
 
 void configure_aspect_ratio(RT64::UserConfiguration& config, btga::AspectRatioMode mode) {
@@ -325,6 +338,7 @@ class Context final : public ultramodern::renderer::RendererContext {
 public:
     Context(std::uint8_t* rdram, ultramodern::renderer::WindowHandle window, bool developer_mode)
         : rdram_(rdram), draft_settings_(pc_settings) {
+        online_test_desync_frame_ = environment_u32("BTGA_TEST_DESYNC_FRAME");
         RT64::Application::Core core{};
 #if defined(_WIN32)
         core.window = window.window;
@@ -707,6 +721,21 @@ public:
         // enforce deterministic digests only in frame-synchronized gameplay.
         const bool frame_inputs_active = btga::gameplay_frame_input_active(
             {rdram_, 8U * 1024U * 1024U});
+        if (frame_inputs_active && local == 1 && online_test_desync_frame_ &&
+            !online_test_desync_injected_ && frame >= *online_test_desync_frame_) {
+            // Test-only fault injection mutates a snapshot-covered byte in the
+            // final object slot. The authoritative host snapshot must restore
+            // it; no production path sets this environment variable.
+            constexpr std::size_t fault_offset =
+                object_pool_offset + (object_count - 1U) * object_size + object_size - 1U;
+            rdram_[fault_offset] ^= UINT8_C(1);
+            online_test_desync_injected_ = true;
+            if (online_trace_) {
+                online_trace_ << "TEST_DESYNC_INJECT frame=" << frame
+                              << " offset=" << fault_offset << '\n';
+                online_trace_.flush();
+            }
+        }
         std::uint32_t checksum = 0;
         if (frame_inputs_active) {
             const btga::GameplayStateDigests digests = online_gameplay_digests();
@@ -791,6 +820,9 @@ public:
             load_rdram_word(rdram_, game_update_state_offset);
         if (frame_inputs_active &&
             (!online_frame_inputs_active_ || online_gameplay_resync_requested_)) {
+            const bool corrective_rebase =
+                online_frame_inputs_active_ && online_gameplay_resync_requested_;
+            if (!online_frame_inputs_active_) online_corrective_rebases_ = 0;
             // A match is a new deterministic epoch. The host's complete
             // simulation snapshot is applied and acknowledged before either
             // peer may execute the first frame-tagged gameplay update.
@@ -815,6 +847,15 @@ public:
             online_last_digest_frame_.reset();
             online_digest_mismatch_run_ = 0;
             online_gameplay_resync_requested_ = false;
+            if (corrective_rebase) {
+                ++online_corrective_rebases_;
+                if (online_trace_) {
+                    online_trace_ << "DESYNC_REBASE_APPLIED frame="
+                                  << online_gameplay_snapshot_generation_
+                                  << " attempt=" << online_corrective_rebases_ << '\n';
+                    online_trace_.flush();
+                }
+            }
         } else if (!frame_inputs_active && online_frame_inputs_active_) {
             online_gameplay_snapshot_acknowledged_ = false;
             online_gameplay_snapshot_received_mask_ = 0;
@@ -1126,6 +1167,8 @@ private:
         online_gameplay_applied_generation_ = 0;
         online_gameplay_snapshot_applied_ = false;
         online_gameplay_resync_requested_ = false;
+        online_corrective_rebases_ = 0;
+        online_test_desync_injected_ = false;
         online_snapshot_assembler_.reset();
         online_trace_.close();
         online_trace_.open(pc_data_path / "btga-net-sync.log",
@@ -1578,17 +1621,31 @@ private:
         }
         if (online_digest_mismatch_run_ < 3U || online_first_desync_frame_) return;
         online_first_desync_frame_ = frame - 2U;
-        online_status_ = "Persistent state divergence detected from simulation frame " +
-                         std::to_string(*online_first_desync_frame_) +
-                         "; online play stopped.";
+        if (online_corrective_rebases_ < online_max_corrective_rebases) {
+            const std::uint16_t local = online_connection_
+                ? online_connection_->relay_slot()
+                : UINT16_MAX;
+            online_status_ = local == 0
+                ? "Persistent divergence detected; sending authoritative recovery state."
+                : "Persistent divergence detected; waiting for authoritative recovery state.";
+            if (local == 0) online_gameplay_resync_requested_ = true;
+            if (online_trace_) {
+                online_trace_ << "DESYNC_REBASE_REQUEST frame="
+                              << *online_first_desync_frame_
+                              << " role=" << (local == 0 ? "host" : "client")
+                              << " attempt=" << online_corrective_rebases_ + 1U << '\n';
+                online_trace_.flush();
+            }
+            return;
+        }
+        online_status_ = "Persistent state divergence remained after recovery; online play stopped.";
         if (online_trace_) {
-            online_trace_ << "DESYNC_ABORT frame=" << *online_first_desync_frame_ << '\n';
+            online_trace_ << "DESYNC_ABORT frame=" << *online_first_desync_frame_
+                          << " rebases=" << online_corrective_rebases_ << '\n';
             online_trace_.flush();
         }
-        // The selected-state snapshot is sufficient to establish a common
-        // match epoch, but not a complete rollback save state: pointer-owned
-        // world allocations and other simulation-driving state are outside it.
-        // Stop cleanly instead of pretending a partial repair succeeded.
+        // A bounded number of authoritative repairs failed. Stop cleanly
+        // rather than looping forever on state outside the selected snapshot.
         if (online_connection_) online_connection_->leave_online();
     }
 
@@ -2222,6 +2279,9 @@ private:
     std::uint32_t online_gameplay_applied_generation_ = 0;
     bool online_gameplay_snapshot_applied_ = false;
     bool online_gameplay_resync_requested_ = false;
+    std::uint32_t online_corrective_rebases_ = 0;
+    std::optional<std::uint32_t> online_test_desync_frame_;
+    bool online_test_desync_injected_ = false;
     bool rendererless_ = false;
     std::array<bool, btga::InputSynchronizer::max_players> online_peer_seen_{};
 };

@@ -12,6 +12,8 @@ param(
     [switch] $KillClientAfterEpoch,
     [ValidateRange(0, 100)]
     [int] $PeerLossRun = 0,
+    [ValidateRange(0, 100)]
+    [int] $DesyncRecoveryRun = 0,
     [ValidateRange(5, 120)]
     [int] $ProgressTimeoutSeconds = 30,
     [switch] $SkipBuild,
@@ -56,6 +58,12 @@ if ($Rom) {
     if ($PeerLossRun -gt $GameRuns) {
         throw "-PeerLossRun cannot be greater than -GameRuns."
     }
+    if ($DesyncRecoveryRun -gt $GameRuns) {
+        throw "-DesyncRecoveryRun cannot be greater than -GameRuns."
+    }
+    if ($PeerLossRun -gt 0 -and $PeerLossRun -eq $DesyncRecoveryRun) {
+        throw "-PeerLossRun and -DesyncRecoveryRun must target different runs."
+    }
     $resolvedRom = (Resolve-Path $Rom).Path
     $resolvedPak = if ($ControllerPak) { (Resolve-Path $ControllerPak).Path } else { $null }
     $runtime = Join-Path $build "BattleTanxGA.exe"
@@ -83,6 +91,7 @@ if ($Rom) {
     $clientProcess = $null
     $clientKilled = $false
     $injectPeerLoss = $KillClientAfterEpoch -or ($PeerLossRun -eq $gameRun)
+    $injectDesync = $DesyncRecoveryRun -eq $gameRun
     $lastProgressAt = [DateTime]::UtcNow
     $lastProgressSignature = ""
 
@@ -90,6 +99,7 @@ if ($Rom) {
         if ($ShowWindows) { $env:BTGA_HEADLESS_VISIBLE = "1" }
         $env:BTGA_DATA_DIR = $hostData
         $env:BTGA_ONLINE_LOCAL_VIEW = "host"
+        Remove-Item Env:BTGA_TEST_DESYNC_FRAME -ErrorAction SilentlyContinue
         $hostProcess = Start-Process -FilePath $runtime -PassThru `
             -ArgumentList @("--online-headless-host", $BootSeconds, $resolvedRom) `
             -RedirectStandardOutput $hostOut -RedirectStandardError $hostErr
@@ -108,6 +118,7 @@ if ($Rom) {
 
         $env:BTGA_DATA_DIR = $clientData
         $env:BTGA_ONLINE_LOCAL_VIEW = "client"
+        if ($injectDesync) { $env:BTGA_TEST_DESYNC_FRAME = "480" }
         $clientProcess = Start-Process -FilePath $runtime -PassThru `
             -ArgumentList @("--online-headless-join", $BootSeconds, $lobby, $resolvedRom) `
             -RedirectStandardOutput $clientOut -RedirectStandardError $clientErr
@@ -204,8 +215,9 @@ if ($Rom) {
                 throw "Headless $($namedLog[0]) reported a synchronization timeout."
             }
         }
-        if ($hostSync.Contains("DIGEST_MISMATCH") -or
-            $clientSync.Contains("DIGEST_MISMATCH")) {
+        if (!$injectDesync -and
+            ($hostSync.Contains("DIGEST_MISMATCH") -or
+             $clientSync.Contains("DIGEST_MISMATCH"))) {
             throw "A stable headless pair reported a gameplay digest mismatch."
         }
         if ($hostSync.Contains("DESYNC_ABORT") -or
@@ -224,6 +236,15 @@ if ($Rom) {
             ($hostEpochSequence -join "|") -ne ($clientEpochSequence -join "|")) {
             throw "Headless peers did not establish identical gameplay epochs."
         }
+        if ($injectDesync) {
+            if (!$clientSync.Contains("TEST_DESYNC_INJECT") -or
+                !$hostSync.Contains("DESYNC_REBASE_REQUEST") -or
+                !$hostSync.Contains("DESYNC_REBASE_APPLIED") -or
+                !$clientSync.Contains("DESYNC_REBASE_APPLIED") -or
+                $hostEpochs.Count -lt 2) {
+                throw "Injected divergence did not complete an authoritative recovery rebase."
+            }
+        }
         foreach ($syncLog in @($hostSync, $clientSync)) {
             $epochMatches = [regex]::Matches($syncLog, "GAMEPLAY_EPOCH_SYNC frame=(\d+)")
             $frameMatches = [regex]::Matches($syncLog, "FRAME_INPUT frame=(\d+)")
@@ -240,13 +261,21 @@ if ($Rom) {
             ForEach-Object { "$($_.Groups[1].Value):$($_.Groups[2].Value)" }
         $clientSamples = [regex]::Matches($clientSync, $samplePattern) |
             ForEach-Object { "$($_.Groups[1].Value):$($_.Groups[2].Value)" }
-        if ($hostSamples.Count -eq 0 -or
-            ($hostSamples -join "|") -ne ($clientSamples -join "|")) {
+        $samplesMatch = if ($injectDesync) {
+            $hostSamples.Count -gt 0 -and $clientSamples.Count -gt 0 -and
+            $hostSamples[-1] -eq $clientSamples[-1]
+        } else {
+            $hostSamples.Count -gt 0 -and
+            ($hostSamples -join "|") -eq ($clientSamples -join "|")
+        }
+        if (!$samplesMatch) {
             throw "Headless peers did not report identical sampled gameplay states."
         }
         $results.Add([pscustomobject]@{
             run = $gameRun
-            scenario = if ($PeerLossRun -gt 0 -and $gameRun -gt $PeerLossRun) {
+            scenario = if ($injectDesync) {
+                "desync-recovery"
+            } elseif ($PeerLossRun -gt 0 -and $gameRun -gt $PeerLossRun) {
                 "post-fault-recovery"
             } else { "stable" }
             passed = $true
@@ -260,6 +289,7 @@ if ($Rom) {
         Remove-Item Env:BTGA_DATA_DIR -ErrorAction SilentlyContinue
         Remove-Item Env:BTGA_ONLINE_LOCAL_VIEW -ErrorAction SilentlyContinue
         Remove-Item Env:BTGA_HEADLESS_VISIBLE -ErrorAction SilentlyContinue
+        Remove-Item Env:BTGA_TEST_DESYNC_FRAME -ErrorAction SilentlyContinue
         foreach ($process in @($hostProcess, $clientProcess)) {
             if ($null -ne $process -and !$process.HasExited) {
                 Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
@@ -278,6 +308,7 @@ if ($Rom) {
         relay_runs = $RelayRuns
         game_runs = $GameRuns
         peer_loss_run = $PeerLossRun
+        desync_recovery_run = $DesyncRecoveryRun
         results = $results
     }
     $summary | ConvertTo-Json -Depth 5 | Set-Content -Path $report -Encoding UTF8
