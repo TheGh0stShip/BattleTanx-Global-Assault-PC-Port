@@ -9,6 +9,7 @@
 #include <mutex>
 #include <span>
 #include <thread>
+#include <vector>
 
 #include "btga/authoritative_replica.hpp"
 #include "btga/gameplay_digest.hpp"
@@ -16,6 +17,7 @@
 #include "btga/input_sync.hpp"
 #include "btga/online_multiplayer.hpp"
 #include "btga/udp_online_io.hpp"
+#include "dedicated_runtime_bridge.hpp"
 
 extern "C" {
 #include <btga/btga_net.h>
@@ -46,6 +48,7 @@ std::chrono::steady_clock::time_point next_keepalive{};
 std::uint32_t current_random_seed = 0U;
 std::uint32_t expected_random_seed = 0U;
 std::uint32_t observed_authority_head = 0U;
+std::uint32_t installed_snapshot_id = 0U;
 std::uint8_t authority_recovery_mask = 0U;
 bool recovery_wait_announced = false;
 std::chrono::steady_clock::time_point last_authority_contact{};
@@ -138,6 +141,7 @@ bool send_snapshot_subscription_locked() {
     // Zero means this process has not yet installed an authority checkpoint.
     // Once bootstrapped, tick+1 keeps tick zero distinguishable from that state.
     header.acknowledgment = bootstrap_complete ? expected_tick + 1U : 0U;
+    header.acknowledgment_bits = bootstrap_complete ? installed_snapshot_id : 0U;
     header.payload_size = 0U;
     header.peer_id = client_online->relay_slot();
     return btga_net_encode_header(packet.data(), packet.size(), &header) != 0U &&
@@ -195,6 +199,7 @@ bool btga_dedicated_client_enable(
     current_random_seed = 0U;
     expected_random_seed = 0U;
     observed_authority_head = 0U;
+    installed_snapshot_id = 0U;
     authority_recovery_mask = 0U;
     recovery_wait_announced = false;
     last_authority_contact = std::chrono::steady_clock::now();
@@ -227,44 +232,56 @@ extern "C" void btga_dedicated_client_tick_begin(
             pending_snapshot->tick < expected_tick) {
             pending_snapshot.reset();
         }
-        if (pending_snapshot && !bootstrap_complete && pending_snapshot->tick != 0U) {
-            std::fprintf(stderr,
-                         "BTGA_CLIENT rejected pre-bootstrap live snapshot tick=%u\n",
-                         pending_snapshot->tick);
-            pending_snapshot.reset();
-        }
         if (pending_snapshot &&
             (!bootstrap_complete || pending_snapshot->tick >= expected_tick) &&
-            pending_snapshot->state.size() == btga::gameplay_snapshot_size) {
-            std::array<std::uint8_t, btga::gameplay_snapshot_size> current{};
-            const bool captured =
-                btga::capture_gameplay_snapshot({rdram, rdram_size}, current);
+            (pending_snapshot->state.size() == btga::gameplay_snapshot_size ||
+             btga::is_dedicated_checkpoint(pending_snapshot->state))) {
+            const bool extended =
+                btga::is_dedicated_checkpoint(pending_snapshot->state);
+            std::vector<std::uint8_t> current(
+                extended ? 0U : pending_snapshot->state.size());
+            const bool captured = extended
+                ? btga::capture_dedicated_checkpoint({rdram, rdram_size}, current)
+                : btga::capture_gameplay_snapshot({rdram, rdram_size}, current);
             const std::uint64_t current_digest = captured ? state_digest(current) : 0U;
             const bool already_current =
                 captured && current_digest == pending_snapshot->state_digest;
-            // This compact snapshot deliberately excludes host-local and
-            // pointer-owned runtime state. It is safe for the cold-bootstrap
-            // rendezvous, where both processes still share the same clean
-            // runtime topology, but it is not a portable live checkpoint.
-            // Applying it to a running client can splice authority gameplay
-            // fields into unrelated local scheduler/audio state and make the
-            // very next tick diverge. After bootstrap it is verification only;
-            // recovery will use the canonical input journal plus an explicit
-            // portable checkpoint once that schema is complete.
+            // A cold process may restore a checkpoint from any canonical tick.
+            // Host-local audio/timing state is deliberately excluded, and the
+            // complete inner/outer retail mode state is included. Applying a
+            // checkpoint to an already-running process remains verification
+            // only because its host scheduler topology may differ.
             const bool may_restore = !bootstrap_complete;
             bool restored = false;
             if (may_restore && !already_current) {
-                restored = btga::restore_gameplay_snapshot(
-                    {rdram, rdram_size}, pending_snapshot->state);
+                restored = extended
+                    ? btga::restore_dedicated_checkpoint(
+                          {rdram, rdram_size}, pending_snapshot->state)
+                    : btga::restore_gameplay_snapshot(
+                          {rdram, rdram_size}, pending_snapshot->state);
                 if (restored) {
-                    std::array<std::uint8_t, btga::gameplay_snapshot_size> verify{};
-                    restored = btga::capture_gameplay_snapshot(
-                        {rdram, rdram_size}, verify) &&
+                    std::vector<std::uint8_t> verify(
+                        extended ? 0U : pending_snapshot->state.size());
+                    restored = (extended
+                        ? btga::capture_dedicated_checkpoint(
+                              {rdram, rdram_size}, verify)
+                        : btga::capture_gameplay_snapshot(
+                              {rdram, rdram_size}, verify)) &&
                         state_digest(verify) == pending_snapshot->state_digest;
                 }
             }
             if (already_current || restored) {
+                // The client hook runs after the retail outer loop has advanced
+                // these counters for the tick about to be simulated. Restoring
+                // an end-of-previous-tick checkpoint erases that transition, so
+                // reproduce it exactly once before replaying a positive tick.
+                // Tick-zero snapshots are captured at the client's existing
+                // bootstrap boundary and must retain their established path.
+                if (restored && extended && pending_snapshot->tick != 0U) {
+                    btga_advance_retail_mode_counters(rdram);
+                }
                 expected_tick = pending_snapshot->tick;
+                installed_snapshot_id = pending_snapshot->snapshot_id;
                 (void)btga::gameplay_snapshot_random_seed(
                     pending_snapshot->state, current_random_seed);
                 bootstrap_complete = true;

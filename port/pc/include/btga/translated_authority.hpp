@@ -39,9 +39,12 @@ public:
     inputs() const noexcept;
 
     // Called once at the matching exit after the translated game has mutated
-    // RDRAM. A repeated or out-of-order completion is rejected.
+    // RDRAM. `canonical_state` drives the per-tick digest. When supplied,
+    // `checkpoint_state` is the larger portable state persisted at checkpoint
+    // intervals. A repeated or out-of-order completion is rejected.
     [[nodiscard]] std::optional<AuthoritativeFrame> finish_tick(
-        std::uint32_t tick, std::span<const std::uint8_t> rdram);
+        std::uint32_t tick, std::span<const std::uint8_t> canonical_state,
+        std::span<const std::uint8_t> checkpoint_state = {});
 
     [[nodiscard]] const std::optional<AuthoritativeSnapshot>&
     latest_snapshot() const noexcept;

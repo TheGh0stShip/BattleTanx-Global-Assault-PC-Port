@@ -16,7 +16,7 @@ namespace {
 constexpr std::array<std::uint8_t, 8> journal_magic{
     'B', 'T', 'G', 'A', 'J', 'N', 'L', '2'};
 constexpr std::array<std::uint8_t, 8> snapshot_magic{
-    'B', 'T', 'G', 'A', 'S', 'N', 'P', '2'};
+    'B', 'T', 'G', 'A', 'S', 'N', 'P', '3'};
 constexpr std::size_t journal_header_size = 16U;
 constexpr std::size_t journal_record_size = 36U;
 constexpr std::size_t snapshot_header_size = 32U;
@@ -212,25 +212,29 @@ std::span<const OnlineControllerInput, online_player_limit>
 TranslatedAuthority::inputs() const noexcept { return current_inputs_; }
 
 std::optional<AuthoritativeFrame> TranslatedAuthority::finish_tick(
-    std::uint32_t tick, std::span<const std::uint8_t> rdram)
+    std::uint32_t tick, std::span<const std::uint8_t> canonical_state,
+    std::span<const std::uint8_t> checkpoint_state)
 {
-    if (!tick_active_ || tick != active_tick_ || rdram.empty() ||
+    if (!tick_active_ || tick != active_tick_ || canonical_state.empty() ||
         (!disk_journal_enabled_ && canonical_journal_.size() >= journal_limit)) {
         return std::nullopt;
     }
-    const std::uint64_t state_digest = digest(rdram);
+    const std::uint64_t state_digest = digest(canonical_state);
     AuthoritativeFrame frame{tick, current_inputs_, state_digest, received_mask_};
-    if (rdram.size() >= sizeof(frame.random_seed)) {
-        std::memcpy(&frame.random_seed, rdram.data(), sizeof(frame.random_seed));
+    if (canonical_state.size() >= sizeof(frame.random_seed)) {
+        std::memcpy(&frame.random_seed, canonical_state.data(),
+                    sizeof(frame.random_seed));
     }
     if (tick != next_tick_ || !append_journal(frame)) return std::nullopt;
     ++next_tick_;
     tick_active_ = false;
     history_[tick % history_size] = {};
     if (next_tick_ % snapshot_interval_ == 0U) {
+        const auto state = checkpoint_state.empty()
+            ? canonical_state : checkpoint_state;
         snapshot_ = AuthoritativeSnapshot{
-            next_tick_, state_digest,
-            std::vector<std::uint8_t>{rdram.begin(), rdram.end()}};
+            next_tick_, digest(state),
+            std::vector<std::uint8_t>{state.begin(), state.end()}};
         if (persistent_journal_ && !persist_snapshot(*snapshot_)) {
             // The prior alternating checkpoint remains valid. The journal is
             // still canonical and can replay forward from it, so gameplay may

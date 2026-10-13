@@ -205,6 +205,8 @@ try {
                 $replayed = $clientText.Contains("BTGA_CLIENT journal replay active")
                 $replayComplete = $clientText.Contains(
                     "BTGA_CLIENT journal replay complete")
+                $checkpointApplied = $clientText -match `
+                    "BTGA_CLIENT applied snapshot tick=[1-9][0-9]*"
                 $authorityText = ""
                 if (Test-Path $authorityErr) {
                     $content = Get-Content $authorityErr -Raw
@@ -212,7 +214,8 @@ try {
                 }
                 $completedNow = ([regex]::Matches(
                     $authorityText, "BTGA_AUTHORITY recovery complete head=")).Count
-                $reconverged = $replayComplete -and $completedNow -gt $completedBefore
+                $reconverged = $checkpointApplied -and $replayComplete -and `
+                    $completedNow -gt $completedBefore
             } until (($bound -and $replayed -and $reconverged) -or
                 $client.HasExited -or [DateTime]::UtcNow -ge $deadline)
             if (-not $bound) {
@@ -222,8 +225,8 @@ try {
             if ($rotatedCredential -eq $initialCredential) {
                 throw "Resume credential did not rotate in reconnect cycle $cycle."
             }
-            if (-not $replayed -or -not $reconverged) {
-                throw "Reconnect cycle $cycle did not replay and reconverge. See $clientErr."
+            if (-not $checkpointApplied -or -not $replayed -or -not $reconverged) {
+                throw "Reconnect cycle $cycle did not restore a positive checkpoint, replay, and reconverge. See $clientErr."
             }
         }
     }

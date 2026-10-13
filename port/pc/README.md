@@ -302,11 +302,12 @@ preserving abandoned anonymous joins. A rendered Windows client has separately
 passed beyond tick 1,800
 with every checkpoint byte-identical and no authority timeout. Longer
 interactive campaign recovery remains under development. A restarted process
-now reclaims its seat, cold-boots tick zero, replays the authority's targeted
-canonical journal, and reconverges in the unattended gate. A changed-RDRAM
-experiment was rejected after it corrupted live RSP/audio and scheduler state;
-portable checkpoints are still needed to prune long histories. This remains a
-development path rather than a finished public mode.
+now reclaims its seat, installs the newest 30-tick portable checkpoint, replays
+only the bounded journal tail while all players wait at the same authority tick,
+and reconverges in the unattended gate. The schema captures explicit gameplay
+and collision regions rather than opaque RDRAM and excludes host-local audio,
+scheduler, timing, and projection state. This remains a development path rather
+than a finished public mode.
 
 Build and run the current dedicated gate on Windows with:
 

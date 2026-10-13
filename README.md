@@ -262,12 +262,12 @@ interrupt waits. Snapshots are targeted and round-robin rather than broadcast,
 and a returning connection atomically reclaims its stable seat with a rotating
 resume credential. Authority heartbeats confirm only the seats that are
 actually connected, so abandoned anonymous reservations expire instead of
-locking a lobby. Fresh-process recovery now cold-boots the deterministic match,
-restores its tick-zero bootstrap, replays targeted canonical input history, and
-has reconverged with a running authority in the unattended public gate. It does
-not copy opaque RDRAM; an earlier changed-memory experiment was rejected after
-corrupting live RSP/audio and scheduler state. Longer sessions need portable
-checkpoint pruning, and interactive campaign plus cross-architecture validation
+locking a lobby. Fresh-process recovery now installs the newest versioned
+portable checkpoint, replays at most its bounded journal tail while the authority
+holds every player at a stable recovery barrier, and has remained byte-synchronized
+after a cold restart at tick 600. The checkpoint includes gameplay and collision
+state but excludes host-local audio, scheduler, timing, and projection data; it
+never copies opaque RDRAM. Interactive campaign plus cross-architecture validation
 remain required before this becomes a release-ready public multiplayer mode. Live
 service status is available at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/).

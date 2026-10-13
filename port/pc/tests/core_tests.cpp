@@ -159,7 +159,10 @@ int main() {
         // Disconnects become neutral on the next tick and never repeat a
         // stuck drive or fire control.
         rdram[0x1235] = 0xa5U;
-        const auto frame1 = authority.finish_tick(1U, rdram);
+        auto portable_checkpoint = rdram;
+        portable_checkpoint[0x1235] = 0x6cU;
+        const auto frame1 = authority.finish_tick(
+            1U, rdram, portable_checkpoint);
         CHECK(frame1 && authority.latest_snapshot());
         std::array<btga::AuthoritativeFrame, 4> replay{};
         CHECK(authority.copy_journal_from(0U, replay) == 2U);
@@ -170,7 +173,8 @@ int main() {
         CHECK(authority.copy_journal_from(2U, replay) == 0U);
         CHECK(authority.latest_snapshot()->next_tick == 2U);
         CHECK(authority.latest_snapshot()->state.size() == rdram.size());
-        CHECK(authority.latest_snapshot()->state[0x1235] == 0xa5U);
+        CHECK(authority.latest_snapshot()->state[0x1235] == 0x6cU);
+        CHECK(frame1->state_digest != authority.latest_snapshot()->state_digest);
 
         CHECK(authority.ready(5U));
         CHECK(authority.begin_tick(5U));
@@ -572,11 +576,134 @@ int main() {
         CHECK(std::equal(host->begin() + 0x002195D0U,
                          host->begin() + 0x002195E0U,
                          client->begin() + 0x002195D0U));
+        for (std::size_t player = 0; player < 4U; ++player) {
+            CHECK(std::all_of(
+                client->begin() + players + player * 0x250U + 0x120U,
+                client->begin() + players + player * 0x250U + 0x164U,
+                [](std::uint8_t value) { return value == 0xCCU; }));
+        }
         CHECK(std::equal(host->begin() + 0x50000U,
                          host->begin() + 0x50000U + 0x58U,
                          client->begin() + 0x50000U));
         CHECK(!btga::capture_gameplay_snapshot(
             std::span<const std::uint8_t>{host->data(), 1024U}, snapshot));
+
+        constexpr std::size_t grid_descriptors = 0x003977F0U;
+        constexpr std::size_t grid_cells = 0x00320000U;
+        constexpr std::size_t second_grid_cells = 0x00321000U;
+        std::fill(host->begin() + grid_descriptors,
+                  host->begin() + grid_descriptors + 6U * 0x18U,
+                  std::uint8_t{0});
+        auto store_half = [&](std::size_t offset, std::uint16_t value) {
+            std::memcpy(host->data() + (offset ^ 2U), &value, sizeof(value));
+        };
+        store_half(grid_descriptors + 0x08U, 3U);
+        store_half(grid_descriptors + 0x0AU, 2U);
+        const std::uint32_t grid_cells_address = UINT32_C(0x80320000);
+        std::memcpy(host->data() + grid_descriptors + 0x0CU,
+                    &grid_cells_address, sizeof(grid_cells_address));
+        constexpr std::size_t grid_cell_bytes = ((3U * (2U << 2U)) | 1U) * 2U;
+        for (std::size_t index = 0; index < grid_cell_bytes; ++index) {
+            (*host)[grid_cells + index] = static_cast<std::uint8_t>(index ^ 0xA5U);
+        }
+        constexpr std::size_t second_descriptor = grid_descriptors + 0x18U;
+        store_half(second_descriptor + 0x08U, 2U);
+        store_half(second_descriptor + 0x0AU, 1U);
+        const std::uint32_t second_grid_address = UINT32_C(0x80321000);
+        std::memcpy(host->data() + second_descriptor + 0x0CU,
+                    &second_grid_address, sizeof(second_grid_address));
+        constexpr std::size_t second_grid_bytes = ((2U * (1U << 2U)) | 1U) * 2U;
+        for (std::size_t index = 0; index < second_grid_bytes; ++index) {
+            (*host)[second_grid_cells + index] =
+                static_cast<std::uint8_t>(index ^ 0x5AU);
+        }
+        *client = *host;
+        std::vector<std::uint8_t> checkpoint;
+        CHECK(btga::capture_dedicated_checkpoint(*host, checkpoint));
+        CHECK(btga::is_dedicated_checkpoint(checkpoint));
+        CHECK(btga::gameplay_snapshot_random_seed(checkpoint, captured_seed));
+        constexpr std::size_t trailer = btga::dedicated_checkpoint_base_size;
+        auto check_rejected_without_mutation = [&](std::vector<std::uint8_t> malformed) {
+            auto target = *client;
+            const auto original = target;
+            return !btga::restore_dedicated_checkpoint(target, malformed) &&
+                   target == original;
+        };
+        {
+            auto malformed = checkpoint;
+            malformed[trailer] ^= 0x01U;
+            CHECK(!btga::is_dedicated_checkpoint(malformed));
+            CHECK(check_rejected_without_mutation(std::move(malformed)));
+        }
+        {
+            auto malformed = checkpoint;
+            malformed.pop_back();
+            CHECK(!btga::is_dedicated_checkpoint(malformed));
+            CHECK(check_rejected_without_mutation(std::move(malformed)));
+        }
+        {
+            auto malformed = checkpoint;
+            malformed[trailer + 15U] ^= 0x02U; // in-range guest address
+            CHECK(btga::is_dedicated_checkpoint(malformed));
+            CHECK(check_rejected_without_mutation(std::move(malformed)));
+        }
+        {
+            auto malformed = checkpoint;
+            malformed[trailer + 19U] ^= 0x02U; // encoded byte count
+            CHECK(!btga::is_dedicated_checkpoint(malformed));
+            CHECK(check_rejected_without_mutation(std::move(malformed)));
+        }
+        {
+            std::vector<std::uint8_t> arbitrary(
+                btga::dedicated_checkpoint_base_size, std::uint8_t{0});
+            CHECK(!btga::gameplay_snapshot_random_seed(arbitrary, captured_seed));
+        }
+        constexpr std::size_t collision_begin = 0x00397650U;
+        constexpr std::size_t collision_end = 0x003A53A0U;
+        constexpr std::size_t gameplay_bss_begin = 0x003A53A0U;
+        constexpr std::size_t gameplay_bss_end = 0x003AD955U;
+        std::fill(client->begin() + collision_begin,
+                  client->begin() + collision_end, std::uint8_t{0x31});
+        std::fill(client->begin() + gameplay_bss_begin,
+                  client->begin() + gameplay_bss_end, std::uint8_t{0x42});
+        std::fill(client->begin() + grid_cells,
+                  client->begin() + grid_cells + grid_cell_bytes,
+                  std::uint8_t{0x43});
+        std::fill(client->begin() + second_grid_cells,
+                  client->begin() + second_grid_cells + second_grid_bytes,
+                  std::uint8_t{0x44});
+        constexpr std::size_t excluded_after_bss = 0x003AD960U;
+        const std::array<std::uint8_t, 8> host_local_sentinel{
+            0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7};
+        std::copy(host_local_sentinel.begin(), host_local_sentinel.end(),
+                  client->begin() + excluded_after_bss);
+        CHECK(btga::restore_dedicated_checkpoint(*client, checkpoint));
+        CHECK(std::equal(host->begin() + collision_begin,
+                         host->begin() + collision_end,
+                         client->begin() + collision_begin));
+        CHECK(std::equal(host->begin() + gameplay_bss_begin,
+                         host->begin() + gameplay_bss_end,
+                         client->begin() + gameplay_bss_begin));
+        CHECK(std::equal(host->begin() + grid_cells,
+                         host->begin() + grid_cells + grid_cell_bytes,
+                         client->begin() + grid_cells));
+        CHECK(std::equal(host->begin() + second_grid_cells,
+                         host->begin() + second_grid_cells + second_grid_bytes,
+                         client->begin() + second_grid_cells));
+        CHECK(std::equal(host_local_sentinel.begin(), host_local_sentinel.end(),
+                         client->begin() + excluded_after_bss));
+        CHECK(!btga::capture_dedicated_checkpoint(
+            std::span<const std::uint8_t>{host->data(), 1024U}, checkpoint));
+
+        // A world with no allocated collision grids has a valid empty trailer.
+        std::fill(host->begin() + grid_descriptors,
+                  host->begin() + grid_descriptors + 6U * 0x18U,
+                  std::uint8_t{0});
+        CHECK(btga::capture_dedicated_checkpoint(*host, checkpoint));
+        CHECK(checkpoint.size() ==
+              btga::dedicated_checkpoint_base_size + 12U);
+        CHECK(btga::is_dedicated_checkpoint(checkpoint));
+        CHECK(btga::restore_dedicated_checkpoint(*client, checkpoint));
     }
     {
         btga::InputSynchronizer sync;

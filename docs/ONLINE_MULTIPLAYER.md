@@ -19,10 +19,8 @@ explicit opt-in actions.
   broadcasting state to every relay client.
 - A returning connection presents a rotating resume credential and atomically
   reclaims the same seat. A freshly restarted process cold-boots the same match,
-  installs the retained tick-zero bootstrap, replays targeted canonical journal
-  frames, and has caught up to byte-identical periodic checkpoints in the public
-  gate. An experimental changed-RDRAM patch was rejected after it copied live
-  RSP/audio and libultra scheduler state.
+  installs the newest versioned portable checkpoint, and replays only the tail
+  since that 30-tick checkpoint while the authority is paused at a stable head.
 - Authority heartbeats report the exact connected-seat mask. The master uses
   that mask to confirm and renew only genuinely connected reservations; an
   abandoned anonymous join remains provisional and becomes reusable.
@@ -33,21 +31,29 @@ The translated headless Windows client and three protocol peers pass an
 unattended four-seat public-relay gate with every simulated tick checked against
 the authority digest. A rendered client has also run beyond tick 1,800 without
 an authority stall or digest mismatch; every periodic snapshot was confirmed
-byte-for-byte. The portable snapshot schema excludes host-local audio handles.
-Fresh-process recovery uses the authority's canonical input journal; opaque
-RDRAM copying is prohibited. Portable checkpoints are still needed to prune
-long histories. Longer interactive campaign coverage, server-driven
+byte-for-byte. The portable checkpoint schema excludes host-local audio handles,
+clocks, scheduler state, and per-viewport projection matrices. Fresh-process
+recovery uses explicit gameplay, collision, and gameplay-BSS ranges plus the
+authority's canonical input journal; opaque RDRAM copying is prohibited. A cold
+replacement at tick 600 restored checkpoint 600, replayed a four-frame tail,
+released the barrier only after reaching the frozen head, and stayed
+byte-synchronized beyond tick 720. A separate four-seat authority-replacement
+stress run killed the authority three times in one session; the replacements
+restored checkpoints 150, 300, and 450, reclaimed the same lobby, and continued
+through tick 600 without a client desync or authority timeout. Longer interactive
+campaign coverage, server-driven
 interpolation, and cross-architecture validation remain required before this
 is exposed as a finished menu option.
 
-The existing 32,328-byte gameplay snapshot is deliberately **not** a late-join
-checkpoint. A fresh process can install it and verify the bytes it contains,
-but an end-to-end four-seat experiment diverged on the first simulated tick
-when it was installed at a nonzero tick. It omits simulation-driving state that
-is irrelevant to periodic comparison but required to resume execution. Until a
-versioned portable checkpoint captures that complete state, cold clients must
-use the retained tick-zero bootstrap and canonical journal replay. Do not prune
-journal records needed by that path.
+The 32,340-byte gameplay snapshot remains the per-tick digest and tick-zero
+bootstrap format. It is deliberately not used alone for live restoration. The
+dedicated path persists a versioned `BTGASNP3` checkpoint with a 123,225-byte
+fixed base containing that canonical prefix, collision state, and gameplay BSS.
+A `BTGAGRD1` trailer then stores the variable-size cell-head arrays referenced
+by the active collision-grid descriptors. Omitting those arrays mixes restored
+node links with freshly allocated cell heads and can create cyclic collision
+lists after a cold restart. The checkpoint is captured every 30 ticks, so
+recovery cost is bounded by the checkpoint interval rather than total match age.
 
 Repeatedly invoking the translated gameplay update is not a safe shortcut for
 accelerating that replay. A four-seat loopback experiment caught up a restarted
@@ -58,18 +64,19 @@ known mode counters. That implementation was rejected. Recovery must either
 execute the complete retail outer loop or restore a complete, versioned
 checkpoint; do not add a recursive update-only fast-forward path.
 
-After tick-zero bootstrap the authority no longer transmits periodic compact
-snapshots. Clients already verify every canonical frame digest, and the compact
-snapshot cannot be applied to a running process. Removing those packets avoids
-wasting relay bandwidth during journal recovery. Journal windows are paced by
-one millisecond per datagram, and the disk-replay diagnostic is emitted once per
-recovery epoch instead of once per acknowledgment.
+After bootstrap the authority transmits a checkpoint only to a seat that asks
+to recover; it does not broadcast periodic snapshots. Clients verify every
+canonical frame digest. Extended checkpoint chunks are paced to avoid overflowing
+UDP receive buffers, while journal windows remain paced at one millisecond per
+datagram.
 
 A cold or restarted client now enters an authority-owned recovery barrier. The
 authority keeps relay traffic and heartbeat processing active but freezes the
 30 Hz simulation at a stable journal head. All other clients consequently wait
-at the same canonical tick while the recovering process installs the tick-zero
-bootstrap and replays the journal through the normal retail outer loop. When
+at the same canonical tick while the recovering process installs the newest
+portable checkpoint and replays its short journal tail through the normal retail
+outer loop. The checkpoint-generation identifier prevents a delayed packet from
+an older process satisfying the barrier. When
 the recovering seat acknowledges that stable head, the authority releases the
 barrier and all four seats continue together. A disconnected recovery seat is
 removed from the barrier after the normal timeout, so a failed restart cannot
@@ -82,11 +89,13 @@ authority timeout. Replay delivery is matched to client consumption at eight
 frames per acknowledgment (about 32 supplied versus 30 consumed per second),
 which avoids nonblocking UDP backpressure without lengthening the replay.
 
-The bootstrap/checkpoint schema includes both complete inner and outer retail
-mode-state blocks. The prior schema omitted three outer-loop words; a restarted
-process could therefore confirm the compact gameplay bytes and still diverge
-on its first replayed tick. Persistent checkpoint magic was advanced to
-`BTGASNP2`; old incomplete checkpoints fail closed and require a new session.
+The checkpoint schema includes both complete inner and outer retail mode-state
+blocks. Its restore boundary compensates for the client hook occurring after the
+retail outer-loop counter transition. Per-player projection matrices are
+presentation state and are normalized out, preventing headless and rendered
+viewports from causing false desyncs. Persistent envelope magic is `BTGASNP3`,
+and the collision-grid trailer is `BTGAGRD1`; old or structurally incomplete
+checkpoints fail closed and require a new session.
 
 ### Authority-process recovery (development gate)
 

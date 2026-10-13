@@ -72,6 +72,9 @@ std::uint8_t snapshot_cursor = 0;
 std::array<std::chrono::steady_clock::time_point, btga::online_player_limit>
     snapshot_last_sent{};
 std::array<std::uint32_t, btga::online_player_limit> replay_next_tick{};
+std::array<std::uint32_t, btga::online_player_limit> bootstrap_expected_ack{};
+std::array<std::uint32_t, btga::online_player_limit>
+    bootstrap_expected_snapshot_id{};
 std::array<std::uint8_t, btga::gameplay_snapshot_size> initial_snapshot_state{};
 bool initial_snapshot_available = false;
 unsigned int configured_players = 4;
@@ -135,7 +138,7 @@ std::uint32_t server_clock_tick() {
         std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() / 33);
 }
 
-void advance_retail_mode_counters(std::uint8_t* rdram) {
+extern "C" void btga_advance_retail_mode_counters(std::uint8_t* rdram) {
     constexpr gpr inner_previous = static_cast<gpr>(static_cast<std::int32_t>(0x802195C0U));
     constexpr gpr inner_counter = static_cast<gpr>(static_cast<std::int32_t>(0x802195C4U));
     constexpr gpr inner_target = static_cast<gpr>(static_cast<std::int32_t>(0x802195C8U));
@@ -274,6 +277,8 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
     snapshot_cursor = 0U;
     snapshot_last_sent.fill({});
     replay_next_tick.fill(0U);
+    bootstrap_expected_ack.fill(0U);
+    bootstrap_expected_snapshot_id.fill(0U);
     initial_snapshot_available = false;
     for (std::uint8_t seat = 0; seat < btga::online_player_limit; ++seat) {
         (void)authority.set_connected(seat, false);
@@ -406,10 +411,26 @@ void send_pending_bootstrap_snapshot_locked() {
     }
     if (target == UINT8_MAX) return;
     const auto bit = static_cast<std::uint8_t>(1U << target);
+    std::uint32_t checkpoint_tick = 0U;
+    std::span<const std::uint8_t> checkpoint_state{initial_snapshot_state};
+    std::uint64_t checkpoint_digest = 0U;
+    if (const auto& latest = authority.latest_snapshot(); latest &&
+        latest->next_tick <= authority.next_tick() &&
+        btga::is_dedicated_checkpoint(latest->state)) {
+        checkpoint_tick = latest->next_tick;
+        checkpoint_state = latest->state;
+        checkpoint_digest = latest->state_digest;
+    }
     if (encode_and_send_snapshot(
-            0U, static_cast<std::uint16_t>(target + 1U),
-            initial_snapshot_state)) {
+            checkpoint_tick, static_cast<std::uint16_t>(target + 1U),
+            checkpoint_state, checkpoint_digest)) {
         snapshot_last_sent[target] = std::chrono::steady_clock::now();
+        // Keep the authority frozen until the replacement has installed this
+        // checkpoint *and* replayed through the head at which the recovery
+        // barrier began. Releasing at checkpoint_tick strands the client a
+        // fixed number of ticks behind because both sides then run at 30 Hz.
+        bootstrap_expected_ack[target] = authority.next_tick() + 1U;
+        bootstrap_expected_snapshot_id[target] = snapshot_id;
         snapshot_requests &= static_cast<std::uint8_t>(~bit);
         bootstrap_requests &= static_cast<std::uint8_t>(~bit);
         snapshot_cursor = static_cast<std::uint8_t>(
@@ -619,21 +640,45 @@ void btga_dedicated_network_poll()
                         std::chrono::steady_clock::time_point{} ||
                     now - snapshot_last_sent[seat] >= retry_delay;
                 if (bootstrap_missing) {
-                    recovery_barrier.begin(
-                        static_cast<std::uint8_t>(seat), authority.next_tick());
-                    bootstrap_pending |= bit;
-                    bootstrap_requests |= bit;
-                    replay_requests &= static_cast<std::uint8_t>(~bit);
+                    if ((bootstrap_pending & bit) == 0U) {
+                        recovery_barrier.begin(
+                            static_cast<std::uint8_t>(seat), authority.next_tick());
+                        bootstrap_pending |= bit;
+                        bootstrap_expected_ack[seat] = 0U;
+                        bootstrap_expected_snapshot_id[seat] = 0U;
+                        bootstrap_requests |= bit;
+                        replay_requests &= static_cast<std::uint8_t>(~bit);
+                    }
                     if (first_subscription || retry_due) snapshot_requests |= bit;
                 } else if ((bootstrap_pending & bit) != 0U &&
-                           incoming.acknowledgment != 1U) {
+                           (bootstrap_expected_ack[seat] == 0U ||
+                            bootstrap_expected_snapshot_id[seat] == 0U ||
+                            incoming.acknowledgment_bits !=
+                                bootstrap_expected_snapshot_id[seat])) {
                     // A resumed relay seat can still have a delayed PING from
                     // the dead endpoint in flight. Until the replacement
                     // process confirms tick zero, ignore its predecessor's
                     // higher acknowledgment rather than sending a live
                     // snapshot into an unbootstrapped runtime.
+                } else if ((bootstrap_pending & bit) != 0U &&
+                           incoming.acknowledgment <
+                               bootstrap_expected_ack[seat]) {
+                    // The replacement has installed the expected checkpoint
+                    // generation but has not reached the frozen authority
+                    // head. Feed its missing journal tail without releasing
+                    // the barrier; otherwise checkpoint acceptance and replay
+                    // completion form a circular dependency.
+                    replay_next_tick[seat] = incoming.acknowledgment - 1U;
+                    recovery_barrier.acknowledge(
+                        static_cast<std::uint8_t>(seat), replay_next_tick[seat],
+                        authority.next_tick());
+                    if (replay_next_tick[seat] < authority.next_tick()) {
+                        replay_requests |= bit;
+                    }
                 } else {
                     bootstrap_pending &= static_cast<std::uint8_t>(~bit);
+                    bootstrap_expected_ack[seat] = 0U;
+                    bootstrap_expected_snapshot_id[seat] = 0U;
                     bootstrap_requests &= static_cast<std::uint8_t>(~bit);
                     snapshot_requests &= static_cast<std::uint8_t>(~bit);
                     // acknowledgment is encoded as next_tick + 1 so zero can
@@ -727,6 +772,8 @@ void btga_dedicated_network_poll()
             snapshot_requests &= static_cast<std::uint8_t>(~bit);
             bootstrap_requests &= static_cast<std::uint8_t>(~bit);
             bootstrap_pending &= static_cast<std::uint8_t>(~bit);
+            bootstrap_expected_ack[seat] = 0U;
+            bootstrap_expected_snapshot_id[seat] = 0U;
             replay_requests &= static_cast<std::uint8_t>(~bit);
             disk_replay_announced &= static_cast<std::uint8_t>(~bit);
             replay_send_failure_announced &= static_cast<std::uint8_t>(~bit);
@@ -865,7 +912,7 @@ extern "C" void btga_dedicated_run_loop(
                 std::abort();
             }
         }
-        if (!btga::restore_gameplay_snapshot(
+        if (!btga::restore_dedicated_checkpoint(
                 {rdram, rdram_size}, checkpoint->state)) {
             std::fputs("BTGA_AUTHORITY persistent checkpoint restore failed\n", stderr);
             std::abort();
@@ -873,7 +920,7 @@ extern "C" void btga_dedicated_run_loop(
         recovery_replay_running = true;
         for (const auto& frame : replay) {
             active_inputs = frame.inputs;
-            advance_retail_mode_counters(rdram);
+            btga_advance_retail_mode_counters(rdram);
             func_80079FF0(rdram, context);
             func_8009C524(rdram, context);
             // Bootstrap and presentation code can consume the retail RNG
@@ -885,7 +932,8 @@ extern "C" void btga_dedicated_run_loop(
                 std::abort();
             }
             std::array<std::uint8_t, btga::gameplay_snapshot_size> state{};
-            const bool captured = btga::capture_gameplay_snapshot({rdram, rdram_size}, state);
+            const bool captured = btga::capture_gameplay_snapshot(
+                {rdram, rdram_size}, state);
             if (!captured || canonical_state_digest(state) != frame.state_digest) {
                 std::fprintf(stderr,
                              "BTGA_AUTHORITY persistent replay diverged at tick=%u\n",
@@ -964,7 +1012,7 @@ extern "C" void btga_dedicated_run_loop(
             std::this_thread::sleep_for(std::chrono::milliseconds{2});
             continue;
         }
-        advance_retail_mode_counters(rdram);
+        btga_advance_retail_mode_counters(rdram);
         func_80079FF0(rdram, context);
         if (!initial_snapshot_sent) {
             const std::lock_guard lock{authority_mutex};
@@ -984,6 +1032,8 @@ extern "C" void btga_dedicated_run_loop(
                         continue;
                     }
                     snapshot_last_sent[seat] = std::chrono::steady_clock::now();
+                    bootstrap_expected_ack[seat] = 1U;
+                    bootstrap_expected_snapshot_id[seat] = snapshot_id;
                     snapshot_requests &= static_cast<std::uint8_t>(~bit);
                     bootstrap_requests &= static_cast<std::uint8_t>(~bit);
                 }
@@ -1012,7 +1062,17 @@ extern "C" void btga_dedicated_tick_end(
         gameplay_tick_active = false;
         return;
     }
-    const auto frame = authority.finish_tick(active_tick, canonical_state);
+    std::vector<std::uint8_t> checkpoint_state;
+    if ((active_tick + 1U) % 30U == 0U) {
+        if (!btga::capture_dedicated_checkpoint(
+                {rdram, rdram_size}, checkpoint_state)) {
+            std::fputs("Dedicated authority could not capture recovery checkpoint\n", stderr);
+            gameplay_tick_active = false;
+            return;
+        }
+    }
+    const auto frame = authority.finish_tick(
+        active_tick, canonical_state, checkpoint_state);
     gameplay_tick_active = false;
     if (!frame) {
         std::fputs("Dedicated authority rejected translated tick completion\n", stderr);
