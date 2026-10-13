@@ -8,11 +8,32 @@
 #include <winhttp.h>
 
 #include <array>
+#include <cerrno>
+#include <chrono>
+#include <cwchar>
+#include <optional>
 #include <stdexcept>
 
 namespace btga {
 namespace {
 constexpr std::size_t max_body = 64 * 1024;
+
+std::optional<std::chrono::seconds> retry_after(HINTERNET request) {
+    wchar_t value[32]{};
+    DWORD bytes = sizeof(value);
+    if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_CUSTOM,
+                             L"Retry-After", value, &bytes,
+                             WINHTTP_NO_HEADER_INDEX)) {
+        return std::nullopt;
+    }
+    wchar_t* end = nullptr;
+    errno = 0;
+    const unsigned long seconds = std::wcstoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != L'\0' || seconds > 900UL) {
+        return std::nullopt;
+    }
+    return std::chrono::seconds(seconds);
+}
 
 std::wstring wide(std::string_view input) {
     if (input.empty()) return {};
@@ -118,7 +139,7 @@ public:
             }
             response.resize(offset + received);
         }
-        return {static_cast<int>(status), std::move(response)};
+        return {static_cast<int>(status), std::move(response), retry_after(request_handle.get())};
     }
 
 private:

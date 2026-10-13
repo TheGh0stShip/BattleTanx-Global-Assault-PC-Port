@@ -38,7 +38,8 @@ T number(std::string_view text, const char* name, T minimum, T maximum) {
     return value;
 }
 
-bool bind(btga::OnlineMultiplayer& online, std::uint64_t session, std::string_view token) {
+bool bind_relay(btga::OnlineMultiplayer& online, std::uint64_t session,
+                std::string_view token) {
     const auto bytes = std::span{
         reinterpret_cast<const std::uint8_t*>(token.data()), token.size()};
     if (!online.enter_online() || !online.begin_relay(false, session, bytes)) return false;
@@ -91,7 +92,9 @@ int main(int argc, char** argv) {
 
         btga::UdpOnlineIo io{host, static_cast<std::uint16_t>(port)};
         btga::OnlineMultiplayer online{io};
-        if (!bind(online, session, token)) throw std::runtime_error("relay bind timed out");
+        if (!bind_relay(online, session, token)) {
+            throw std::runtime_error("relay bind timed out");
+        }
         if (public_join) {
             seat = online.relay_slot() - 1U;
         } else if (online.relay_slot() != seat + 1U) {

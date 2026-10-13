@@ -1,6 +1,8 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -25,6 +27,7 @@ private:
 struct HttpResponse {
     int status = 0;
     std::string body;
+    std::optional<std::chrono::seconds> retry_after;
 };
 
 class HttpClient {
@@ -77,8 +80,11 @@ struct JoinRegistration {
 
 class MasterClient {
 public:
+    using SleepFunction = std::function<void(std::chrono::milliseconds)>;
+
     static constexpr std::uint16_t protocol_version = 1;
-    explicit MasterClient(HttpClient& http, std::string build = "pc-port-v2");
+    explicit MasterClient(HttpClient& http, std::string build = "pc-port-v2",
+                          SleepFunction sleep = {});
 
     std::vector<OnlineLobby> list_lobbies();
     HostRegistration host(std::string_view name, std::uint16_t max_players,
@@ -95,8 +101,13 @@ public:
     [[nodiscard]] const std::string& build() const noexcept { return build_; }
 
 private:
+    HttpResponse request_with_rate_limit_retry(
+        std::string_view method, std::string_view path,
+        std::string_view body = {}, std::string_view bearer = {});
+
     HttpClient& http_;
     std::string build_;
+    SleepFunction sleep_;
 };
 
 } // namespace btga

@@ -25,6 +25,29 @@ namespace btga {
 namespace {
 constexpr std::size_t max_response = 72 * 1024;
 
+std::optional<std::chrono::seconds> retry_after(std::string_view headers) {
+    constexpr std::string_view key = "retry-after:";
+    std::size_t cursor = 0;
+    for (;;) {
+        cursor = headers.find(key, cursor);
+        if (cursor == std::string_view::npos) return std::nullopt;
+        if (cursor == 0 || headers.substr(cursor - 2, 2) == "\r\n") break;
+        cursor += key.size();
+    }
+    cursor += key.size();
+    while (cursor < headers.size() && (headers[cursor] == ' ' || headers[cursor] == '\t')) {
+        ++cursor;
+    }
+    const std::size_t end = headers.find("\r\n", cursor);
+    const std::string text(headers.substr(cursor, end - cursor));
+    std::size_t consumed = 0;
+    unsigned long seconds = 0;
+    try { seconds = std::stoul(text, &consumed, 10); }
+    catch (...) { return std::nullopt; }
+    if (consumed != text.size() || seconds > 900UL) return std::nullopt;
+    return std::chrono::seconds(seconds);
+}
+
 class Socket {
 public:
     explicit Socket(int value = -1) : value_(value) {}
@@ -289,7 +312,7 @@ public:
             response_body = decode_chunked(response_body);
         }
         if (response_body.size() > 64 * 1024) throw std::runtime_error("master response exceeds 64 KiB");
-        return {status, std::move(response_body)};
+        return {status, std::move(response_body), retry_after(headers)};
     }
 
 private:

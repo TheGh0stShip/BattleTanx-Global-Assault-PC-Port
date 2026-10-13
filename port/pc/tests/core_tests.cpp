@@ -891,6 +891,10 @@ int main() {
             last_path = path;
             last_body = body;
             last_bearer = bearer;
+            methods.emplace_back(method);
+            paths.emplace_back(path);
+            bodies.emplace_back(body);
+            bearers.emplace_back(bearer);
             CHECK_INDEX();
             return responses[index++];
         }
@@ -903,6 +907,10 @@ int main() {
         std::string last_path;
         std::string last_body;
         std::string last_bearer;
+        std::vector<std::string> methods;
+        std::vector<std::string> paths;
+        std::vector<std::string> bodies;
+        std::vector<std::string> bearers;
     } http;
     http.responses = {
         {200, R"({"lobbies":[{"id":"lobby-1","name":"Desert Duel","build":"pc-port-v2","platform":"pc","region":"eastus","state":"lobby","capabilities":2,"max_players":4,"current_players":2}]})"},
@@ -946,6 +954,76 @@ int main() {
         CHECK(std::string_view{service_error.what()}.find("lobby not found") !=
               std::string_view::npos);
     }
+
+    constexpr std::string_view joined_body =
+        R"({"session_id":"1020304050607080","seat":2,"relay":{"address":"relay.example","udp_port":30420},"join_token":"join.token","resume_token":"rotated.token"})";
+    TestHttpClient throttled_join_http;
+    throttled_join_http.responses = {
+        {429, R"({"message":"too many requests; retry later"})",
+         std::chrono::seconds(7)},
+        {200, std::string(joined_body)}
+    };
+    std::vector<std::chrono::milliseconds> retry_delays;
+    btga::MasterClient throttled_join_master{
+        throttled_join_http, "pc-port-v2",
+        [&](std::chrono::milliseconds delay) { retry_delays.push_back(delay); }};
+    const auto resumed = throttled_join_master.join("hosted-1", "resume.token");
+    CHECK(resumed.seat == 2 && resumed.resume_token == "rotated.token");
+    CHECK(throttled_join_http.index == 2 && retry_delays.size() == 1);
+    CHECK(retry_delays[0] == std::chrono::seconds(7));
+    CHECK(throttled_join_http.paths[0] == throttled_join_http.paths[1]);
+    CHECK(throttled_join_http.bodies[0] == throttled_join_http.bodies[1]);
+    CHECK(throttled_join_http.bodies[0].find("resume.token") != std::string::npos);
+
+    TestHttpClient fallback_retry_http;
+    fallback_retry_http.responses = {
+        {429, R"({"message":"slow down"})"},
+        {429, R"({"message":"slow down"})"},
+        {200, R"({"lobbies":[]})"}
+    };
+    retry_delays.clear();
+    btga::MasterClient fallback_retry_master{
+        fallback_retry_http, "pc-port-v2",
+        [&](std::chrono::milliseconds delay) { retry_delays.push_back(delay); }};
+    CHECK(fallback_retry_master.list_lobbies().empty());
+    CHECK((retry_delays == std::vector<std::chrono::milliseconds>{
+        std::chrono::seconds(1), std::chrono::seconds(2)}));
+
+    TestHttpClient capped_retry_http;
+    capped_retry_http.responses = {
+        {429, R"({"message":"slow down"})", std::chrono::seconds(900)},
+        {429, R"({"message":"slow down"})", std::chrono::seconds(900)},
+        {429, R"({"message":"slow down"})", std::chrono::seconds(900)},
+        {429, R"({"message":"still limited"})", std::chrono::seconds(900)}
+    };
+    retry_delays.clear();
+    btga::MasterClient capped_retry_master{
+        capped_retry_http, "pc-port-v2",
+        [&](std::chrono::milliseconds delay) { retry_delays.push_back(delay); }};
+    try {
+        (void)capped_retry_master.list_lobbies();
+        CHECK(false);
+    } catch (const btga::MasterServiceError& service_error) {
+        CHECK(service_error.status() == 429);
+    }
+    CHECK(capped_retry_http.index == 4 && retry_delays.size() == 3);
+    CHECK(std::ranges::all_of(retry_delays, [](std::chrono::milliseconds delay) {
+        return delay == std::chrono::seconds(30);
+    }));
+
+    TestHttpClient no_retry_http;
+    no_retry_http.responses = {{503, R"({"message":"unavailable"})"}};
+    retry_delays.clear();
+    btga::MasterClient no_retry_master{
+        no_retry_http, "pc-port-v2",
+        [&](std::chrono::milliseconds delay) { retry_delays.push_back(delay); }};
+    try {
+        (void)no_retry_master.list_lobbies();
+        CHECK(false);
+    } catch (const btga::MasterServiceError& service_error) {
+        CHECK(service_error.status() == 503);
+    }
+    CHECK(no_retry_http.index == 1 && retry_delays.empty());
 
     class TestOnlineIo final : public btga::OnlineIo {
     public:

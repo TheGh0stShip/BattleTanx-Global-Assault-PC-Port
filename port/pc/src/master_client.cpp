@@ -7,10 +7,12 @@ extern "C" {
 
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <cstdlib>
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 
 namespace btga {
 namespace {
@@ -150,15 +152,40 @@ std::string master_service_url() {
     return std::string{value};
 }
 
-MasterClient::MasterClient(HttpClient& http, std::string build)
-    : http_(http), build_(std::move(build)) {
+MasterClient::MasterClient(HttpClient& http, std::string build, SleepFunction sleep)
+    : http_(http), build_(std::move(build)), sleep_(std::move(sleep)) {
     if (build_.empty() || build_.size() > 64) {
         throw std::invalid_argument("online build identifier is invalid");
     }
+    if (!sleep_) {
+        sleep_ = [](std::chrono::milliseconds duration) {
+            std::this_thread::sleep_for(duration);
+        };
+    }
+}
+
+HttpResponse MasterClient::request_with_rate_limit_retry(
+    std::string_view method, std::string_view path,
+    std::string_view body, std::string_view bearer) {
+    // The master rejects rate-limited requests before their route handler, so
+    // retrying an explicit HTTP 429 cannot duplicate a lobby or seat. Transport
+    // failures remain non-retriable because their commit state is ambiguous.
+    constexpr unsigned maximum_attempts = 4;
+    constexpr auto maximum_delay = std::chrono::seconds(30);
+    for (unsigned attempt = 0; attempt < maximum_attempts; ++attempt) {
+        HttpResponse response = http_.request(method, path, body, bearer);
+        if (response.status != 429 || attempt + 1U == maximum_attempts) {
+            return response;
+        }
+        const auto fallback = std::chrono::seconds(1U << attempt);
+        const auto delay = std::min(response.retry_after.value_or(fallback), maximum_delay);
+        sleep_(std::chrono::duration_cast<std::chrono::milliseconds>(delay));
+    }
+    throw std::logic_error("unreachable master retry state");
 }
 
 std::vector<OnlineLobby> MasterClient::list_lobbies() {
-    const Json body = parse_response(http_.request(
+    const Json body = parse_response(request_with_rate_limit_retry(
         "GET", "/lobbies?protocol=1&build=" + escape_path(build_)), 200);
     if (!body.contains("lobbies") || !body["lobbies"].is_array() ||
         body["lobbies"].size() > 64) {
@@ -178,7 +205,8 @@ HostRegistration MasterClient::host(std::string_view name, std::uint16_t max_pla
         {"region", region}, {"max_players", max_players}, {"current_players", 1},
         {"state", "lobby"}
     };
-    const Json body = parse_response(http_.request("POST", "/lobbies", request.dump()), 201);
+    const Json body = parse_response(request_with_rate_limit_retry(
+        "POST", "/lobbies", request.dump()), 201);
     HostRegistration result;
     result.lobby = decode_lobby(body.at("lobby"));
     result.host_secret = bounded_string(body, "host_secret", 128);
@@ -194,7 +222,7 @@ JoinRegistration MasterClient::join(std::string_view lobby_id,
         {"protocol", protocol_version}, {"build", build_}, {"platform", "pc"}
     };
     if (!resume_token.empty()) request["resume_token"] = resume_token;
-    const Json body = parse_response(http_.request(
+    const Json body = parse_response(request_with_rate_limit_retry(
         "POST", "/lobbies/" + escape_path(lobby_id) + "/join", request.dump()), 200);
     JoinRegistration result;
     result.session_id = decode_session(body);
@@ -217,7 +245,7 @@ std::string MasterClient::heartbeat(std::string_view lobby_id, std::string_view 
     const Json request = {
         {"current_players", players}, {"state", state}, {"seat_mask", seat_mask}
     };
-    const Json body = parse_response(http_.request(
+    const Json body = parse_response(request_with_rate_limit_retry(
         "PUT", "/lobbies/" + escape_path(lobby_id) + "/heartbeat",
         request.dump(), host_secret), 200);
     return bounded_string(body, "relay_token", BTGA_NET_MAX_JOIN_TOKEN_SIZE);
