@@ -35,6 +35,9 @@ exposed as a finished menu option.
     -Rom 'C:\Games\BattleTanxGA.z64'
 ```
 
+Add `-RenderedClient` to exercise the actual Windows renderer/input client
+unattended with the same digest and authority-timeout checks.
+
 The older peer-hosted flow documented below remains available for comparison,
 but it is not the architecture being taken to production.
 

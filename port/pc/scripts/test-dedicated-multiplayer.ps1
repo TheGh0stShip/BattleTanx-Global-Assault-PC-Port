@@ -4,7 +4,8 @@ param(
     [string] $Rom,
     [string] $BuildDirectory = "build-pc-windows",
     [ValidateRange(8, 120)]
-    [int] $Seconds = 15
+    [int] $Seconds = 15,
+    [switch] $RenderedClient
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,8 +46,13 @@ try {
     if (-not $lobbyLine) { throw "Dedicated authority did not publish a lobby." }
     $lobby = $lobbyLine.Substring("ONLINE_LOBBY_ID=".Length)
 
+    $clientArguments = if ($RenderedClient) {
+        @("--dedicated-join", $lobby, $romPath)
+    } else {
+        @("--dedicated-headless", $Seconds, $lobby, $romPath)
+    }
     $client = Start-Process $server -PassThru `
-        -ArgumentList @("--dedicated-headless", $Seconds, $lobby, $romPath) `
+        -ArgumentList $clientArguments `
         -RedirectStandardOutput $clientOut -RedirectStandardError $clientErr
     $processes.Add($client)
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
@@ -95,17 +101,27 @@ try {
         }
         ++$seat
     }
-    $client.WaitForExit(($Seconds + 15) * 1000) | Out-Null
-    $client.Refresh()
-    if (-not $client.HasExited) {
-        throw "Translated dedicated client failed."
+    if ($RenderedClient) {
+        $client.Refresh()
+        if ($client.HasExited) {
+            throw "Rendered translated client exited during the soak."
+        }
+    } else {
+        $client.WaitForExit(($Seconds + 15) * 1000) | Out-Null
+        $client.Refresh()
+        if (-not $client.HasExited) {
+            throw "Translated dedicated client failed."
+        }
     }
     $clientLog = ""
     $content = Get-Content $clientErr -Raw
     if ($null -ne $content) { $clientLog = [string]$content }
-    if ((-not $clientLog.Contains("BTGA_CLIENT applied snapshot tick=0") -and
-         -not $clientLog.Contains("BTGA_CLIENT confirmed snapshot tick=0")) -or
-        -not $clientLog.Contains("Headless boot window elapsed")) {
+    $hasInitialSnapshot =
+        $clientLog.Contains("BTGA_CLIENT applied snapshot tick=0") -or
+        $clientLog.Contains("BTGA_CLIENT confirmed snapshot tick=0")
+    $completedExpectedRun = $RenderedClient -or
+        $clientLog.Contains("Headless boot window elapsed")
+    if (-not $hasInitialSnapshot -or -not $completedExpectedRun) {
         throw "Translated client did not apply authority state and complete its run."
     }
     if ($clientLog.Contains("BTGA_CLIENT DESYNC")) {
@@ -114,7 +130,8 @@ try {
     if ($clientLog.Contains("BTGA_CLIENT authority timeout")) {
         throw "Translated client stopped receiving canonical authority frames. See $clientErr."
     }
-    Write-Host "Dedicated 4-player test passed. Lobby: $lobby"
+    $clientKind = if ($RenderedClient) { "rendered" } else { "headless" }
+    Write-Host "Dedicated 4-player $clientKind test passed. Lobby: $lobby"
     Write-Host "Evidence: $evidence"
 } finally {
     foreach ($process in $processes) {

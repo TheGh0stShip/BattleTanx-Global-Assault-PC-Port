@@ -311,6 +311,9 @@ Build and run the current dedicated gate on Windows with:
     -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows
 ```
 
+Add `-RenderedClient` to run that unattended gate through the actual Windows
+renderer/input client instead of the headless translated client.
+
 For a visible client, leave the authority running, copy the printed lobby ID,
 and launch `BattleTanxGA.exe --dedicated-join LOBBY_ID BattleTanxGA.z64`.
 For a single-command Windows session with a rendered client, dedicated
