@@ -134,10 +134,10 @@ try {
     if ($ReconnectAuthority) {
         for ($authorityCycle = 1; $authorityCycle -le $AuthorityReconnectCycles;
              ++$authorityCycle) {
-            # At 30 simulation ticks/s, seven seconds leaves more than a
-            # 64-frame tail beyond the first 120-tick checkpoint. This makes
-            # -RequireDiskReplay exercise disk rather than accidentally fitting
-            # every recovery frame in the configured memory window.
+            # Leave a non-empty persisted journal tail after the latest
+            # checkpoint so -RequireDiskReplay can prove the replacement
+            # authority actually replayed records rather than only loading a
+            # checkpoint at the journal head.
             $authorityRunSeconds = if ($RequireDiskReplay) { 7 } else { 5 }
             Start-Sleep -Seconds $authorityRunSeconds
             if (-not $authority.HasExited) {
@@ -300,8 +300,19 @@ try {
         $authorityLog = [string]((Get-ChildItem $evidence -File |
             Where-Object { $_.Name -like "authority*.stderr.log" } |
             ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n")
-        if (-not $authorityLog.Contains("BTGA_AUTHORITY disk journal replay")) {
-            throw "No authority incarnation replayed canonical history from disk. See $evidence."
+        $recoveryMatches = [regex]::Matches($authorityLog,
+            "BTGA_AUTHORITY recovered checkpoint=([0-9]+) journal_head=([0-9]+)")
+        $replayedPersistedTail = $false
+        foreach ($match in $recoveryMatches) {
+            $checkpointTick = [uint64]$match.Groups[1].Value
+            $journalHead = [uint64]$match.Groups[2].Value
+            if ($journalHead -gt $checkpointTick) {
+                $replayedPersistedTail = $true
+                break
+            }
+        }
+        if (-not $replayedPersistedTail) {
+            throw "No replacement authority replayed a persisted journal tail. See $evidence."
         }
     }
     $clientKind = if ($RenderedClient) { "rendered" } else { "headless" }
