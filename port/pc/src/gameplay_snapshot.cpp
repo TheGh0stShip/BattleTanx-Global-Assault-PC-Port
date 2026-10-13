@@ -16,7 +16,8 @@ constexpr std::size_t gameplay_globals_offset = 0x00219458U;
 constexpr std::size_t gameplay_globals_size = 0x178U;
 constexpr std::size_t gameplay_clock_fields_offset = 0x20U;   // D_80219478
 constexpr std::size_t gameplay_clock_fields_size = 0x18U;     // through D_8021948C
-constexpr std::size_t gameplay_mode_state_offset = 0x002195D4U;
+constexpr std::size_t gameplay_mode_state_offset = 0x002195D0U;
+constexpr std::size_t gameplay_mode_state_size = 0x10U;
 constexpr std::size_t player_pool_offset = 0x00235F00U;
 constexpr std::size_t player_pool_size = 4U * 0x250U;
 constexpr std::size_t player_size = 0x250U;
@@ -76,7 +77,7 @@ bool capture_gameplay_snapshot(std::span<const std::uint8_t> rdram,
     // state and must never participate in a canonical digest.
     std::memset(snapshot.data() + globals_cursor + gameplay_clock_fields_offset,
                 0, gameplay_clock_fields_size);
-    append(gameplay_mode_state_offset, sizeof(std::uint32_t));
+    append(gameplay_mode_state_offset, gameplay_mode_state_size);
     append(player_pool_offset, player_pool_size);
     for (std::size_t player = 0; player < 4U; ++player) {
         const std::uint32_t address = load_word(
@@ -115,7 +116,7 @@ bool restore_gameplay_snapshot(std::span<std::uint8_t> rdram,
                 gameplay_clock_fields_size,
             gameplay_globals_size - gameplay_clock_fields_offset -
                 gameplay_clock_fields_size);
-    restore(gameplay_mode_state_offset, sizeof(std::uint32_t));
+    restore(gameplay_mode_state_offset, gameplay_mode_state_size);
     restore(player_pool_offset, player_pool_size);
     for (std::size_t player = 0; player < 4U; ++player) {
         const std::uint32_t address = load_word(

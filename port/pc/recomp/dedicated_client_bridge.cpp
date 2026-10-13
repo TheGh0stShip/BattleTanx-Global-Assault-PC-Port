@@ -45,6 +45,7 @@ std::uint64_t expected_digest = 0;
 std::chrono::steady_clock::time_point next_keepalive{};
 std::uint32_t current_random_seed = 0U;
 std::uint32_t expected_random_seed = 0U;
+std::uint32_t observed_authority_head = 0U;
 
 std::uint64_t state_digest(std::span<const std::uint8_t> state) {
     std::uint64_t digest = UINT64_C(1469598103934665603);
@@ -83,6 +84,10 @@ bool poll_frames_locked() {
                          "BTGA_CLIENT journal replay active next=%u authority=%u\n",
                          expected_tick, header.acknowledgment);
             replay_announced = true;
+        }
+        if (static_cast<std::int32_t>(
+                header.acknowledgment - observed_authority_head) > 0) {
+            observed_authority_head = header.acknowledgment;
         }
         if (static_cast<std::int32_t>(frame.tick - expected_tick) < 0 ||
             frame.tick - expected_tick >= history_size) continue;
@@ -170,6 +175,7 @@ bool btga_dedicated_client_enable(
     replay_announced = false;
     current_random_seed = 0U;
     expected_random_seed = 0U;
+    observed_authority_head = 0U;
     next_keepalive = std::chrono::steady_clock::now();
     if (!send_snapshot_subscription_locked() || !send_inputs_locked(0U, {})) {
         error = "could not announce dedicated-client readiness";
@@ -304,6 +310,13 @@ extern "C" void btga_dedicated_client_tick_end(
     }
     current_random_seed = expected_random_seed;
     ++expected_tick;
+    if (replay_announced && expected_tick >= observed_authority_head) {
+        std::fprintf(stderr,
+                     "BTGA_CLIENT journal replay complete next=%u authority=%u\n",
+                     expected_tick, observed_authority_head);
+        std::fflush(stderr);
+        replay_announced = false;
+    }
     tick_active = false;
 }
 

@@ -65,6 +65,22 @@ wasting relay bandwidth during journal recovery. Journal windows are paced by
 one millisecond per datagram, and the disk-replay diagnostic is emitted once per
 recovery epoch instead of once per acknowledgment.
 
+A cold or restarted client now enters an authority-owned recovery barrier. The
+authority keeps relay traffic and heartbeat processing active but freezes the
+30 Hz simulation at a stable journal head. All other clients consequently wait
+at the same canonical tick while the recovering process installs the tick-zero
+bootstrap and replays the journal through the normal retail outer loop. When
+the recovering seat acknowledges that stable head, the authority releases the
+barrier and all four seats continue together. A disconnected recovery seat is
+removed from the barrier after the normal timeout, so a failed restart cannot
+freeze the match indefinitely.
+
+The bootstrap/checkpoint schema includes both complete inner and outer retail
+mode-state blocks. The prior schema omitted three outer-loop words; a restarted
+process could therefore confirm the compact gameplay bytes and still diverge
+on its first replayed tick. Persistent checkpoint magic was advanced to
+`BTGASNP2`; old incomplete checkpoints fail closed and require a new session.
+
 ### Authority-process recovery (development gate)
 
 On Windows, the supported operator entry point is the restart supervisor:
@@ -118,8 +134,9 @@ Add `-RenderedClient` to exercise the actual Windows renderer/input client
 unattended with the same digest and authority-timeout checks.
 For repeatable recovery coverage, add
 `-ReconnectClient -ReconnectCycles 2`. The gate cold-restarts the translated
-client twice and requires seat reclaim, resume-token rotation, bounded journal
-replay, and a positive confirmed authority tick after every restart.
+client twice and requires seat reclaim, resume-token rotation, a server-side
+recovery barrier, bounded journal replay, and an explicit replay-complete
+acknowledgment before the authority resumes after every restart.
 Use `-JournalMemoryFrames 64 -RequireDiskReplay` with that gate to force replay
 to cross from the disk spool into the bounded in-memory tail. Production keeps
 4,096 frames resident. Each older canonical frame occupies a fixed 32-byte,

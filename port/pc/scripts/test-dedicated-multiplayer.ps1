@@ -175,6 +175,13 @@ try {
         }
         for ($cycle = 1; $cycle -le $ReconnectCycles; ++$cycle) {
             $initialCredential = [string](Get-Content $resumeCredential -Raw)
+            $authorityBefore = ""
+            if (Test-Path $authorityErr) {
+                $content = Get-Content $authorityErr -Raw
+                if ($null -ne $content) { $authorityBefore = [string]$content }
+            }
+            $completedBefore = ([regex]::Matches(
+                $authorityBefore, "BTGA_AUTHORITY recovery complete head=")).Count
             Start-Sleep -Seconds $ReconnectAfterSeconds
             if (-not $client.HasExited) {
                 Stop-Process -Id $client.Id -Force
@@ -196,9 +203,16 @@ try {
                 }
                 $bound = $clientText.Contains("BTGA_CLIENT bound authoritative seat=0")
                 $replayed = $clientText.Contains("BTGA_CLIENT journal replay active")
-                $reconverged = [regex]::IsMatch(
-                    $clientText,
-                    "BTGA_CLIENT confirmed snapshot tick=[1-9][0-9]*")
+                $replayComplete = $clientText.Contains(
+                    "BTGA_CLIENT journal replay complete")
+                $authorityText = ""
+                if (Test-Path $authorityErr) {
+                    $content = Get-Content $authorityErr -Raw
+                    if ($null -ne $content) { $authorityText = [string]$content }
+                }
+                $completedNow = ([regex]::Matches(
+                    $authorityText, "BTGA_AUTHORITY recovery complete head=")).Count
+                $reconverged = $replayComplete -and $completedNow -gt $completedBefore
             } until (($bound -and $replayed -and $reconverged) -or
                 $client.HasExited -or [DateTime]::UtcNow -ge $deadline)
             if (-not $bound) {

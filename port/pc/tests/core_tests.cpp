@@ -9,6 +9,7 @@
 #include "btga/input_sync.hpp"
 #include "btga/controller_pak.hpp"
 #include "btga/pc_settings.hpp"
+#include "btga/recovery_barrier.hpp"
 #include "btga/online_multiplayer.hpp"
 #include "btga/online_local_view.hpp"
 #include "btga/master_client.hpp"
@@ -43,6 +44,42 @@ extern "C" {
     } while (false)
 
 int main() {
+    {
+        btga::RecoveryBarrier barrier;
+        CHECK(!barrier.paused());
+        barrier.begin(0U, 0U);
+        CHECK(!barrier.paused());
+
+        barrier.begin(0U, 120U);
+        barrier.begin(2U, 120U);
+        CHECK(barrier.paused());
+        CHECK(barrier.mask() == 0x05U);
+        barrier.acknowledge(0U, 119U, 120U);
+        CHECK(barrier.recovering(0U));
+        barrier.acknowledge(0U, 120U, 120U);
+        CHECK(!barrier.recovering(0U));
+        CHECK(barrier.recovering(2U));
+
+        // The moving head cannot be cleared by an acknowledgment that only
+        // reached an earlier observation of it.
+        barrier.acknowledge(2U, 120U, 121U);
+        CHECK(barrier.paused());
+        barrier.acknowledge(2U, 121U, 121U);
+        CHECK(!barrier.paused());
+
+        barrier.begin(3U, 500U);
+        barrier.disconnect(3U);
+        CHECK(!barrier.paused());
+        barrier.begin(1U, 500U);
+        barrier.reset();
+        CHECK(barrier.mask() == 0U);
+
+        // Invalid seats are ignored rather than shifting outside the mask.
+        barrier.begin(4U, 500U);
+        barrier.acknowledge(4U, 500U, 500U);
+        barrier.disconnect(4U);
+        CHECK(!barrier.paused());
+    }
     {
         const auto path = std::filesystem::temp_directory_path() /
             "btga-authority-lease-test.json";
@@ -511,8 +548,8 @@ int main() {
                   client->begin() + sound_handles);
         std::fill(client->begin() + 0x00219458U,
                   client->begin() + 0x00219458U + 0x178U, std::uint8_t{0xBB});
-        std::fill(client->begin() + 0x002195D4U,
-                  client->begin() + 0x002195D8U, std::uint8_t{0xBC});
+        std::fill(client->begin() + 0x002195D0U,
+                  client->begin() + 0x002195E0U, std::uint8_t{0xBC});
         std::fill(client->begin() + players,
                   client->begin() + players + 4U * 0x250U, std::uint8_t{0xCC});
         for (std::size_t player = 0; player < 3U; ++player) {
@@ -532,9 +569,9 @@ int main() {
                          client->begin() + sound_handles));
         CHECK(btga::gameplay_state_digests(*host).combined ==
               btga::gameplay_state_digests(*client).combined);
-        CHECK(std::equal(host->begin() + 0x002195D4U,
-                         host->begin() + 0x002195D8U,
-                         client->begin() + 0x002195D4U));
+        CHECK(std::equal(host->begin() + 0x002195D0U,
+                         host->begin() + 0x002195E0U,
+                         client->begin() + 0x002195D0U));
         CHECK(std::equal(host->begin() + 0x50000U,
                          host->begin() + 0x50000U + 0x58U,
                          client->begin() + 0x50000U));

@@ -6,7 +6,7 @@
 
 namespace btga {
 
-constexpr std::size_t gameplay_snapshot_size = 32'328U;
+constexpr std::size_t gameplay_snapshot_size = 32'340U;
 
 [[nodiscard]] bool gameplay_snapshot_random_seed(
     std::span<const std::uint8_t> snapshot,

@@ -42,6 +42,7 @@ add_library(btga_pc_core
     src/online_local_view.cpp
     src/online_multiplayer.cpp
     src/pc_settings.cpp
+    src/recovery_barrier.cpp
     src/rom.cpp
     src/sha256.cpp
     src/snapshot_transfer.cpp

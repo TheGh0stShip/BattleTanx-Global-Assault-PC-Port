@@ -16,7 +16,7 @@ namespace {
 constexpr std::array<std::uint8_t, 8> journal_magic{
     'B', 'T', 'G', 'A', 'J', 'N', 'L', '2'};
 constexpr std::array<std::uint8_t, 8> snapshot_magic{
-    'B', 'T', 'G', 'A', 'S', 'N', 'P', '1'};
+    'B', 'T', 'G', 'A', 'S', 'N', 'P', '2'};
 constexpr std::size_t journal_header_size = 16U;
 constexpr std::size_t journal_record_size = 36U;
 constexpr std::size_t snapshot_header_size = 32U;
