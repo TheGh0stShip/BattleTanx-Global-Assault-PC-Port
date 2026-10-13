@@ -134,7 +134,12 @@ try {
     if ($ReconnectAuthority) {
         for ($authorityCycle = 1; $authorityCycle -le $AuthorityReconnectCycles;
              ++$authorityCycle) {
-            Start-Sleep -Seconds 5
+            # At 30 simulation ticks/s, seven seconds leaves more than a
+            # 64-frame tail beyond the first 120-tick checkpoint. This makes
+            # -RequireDiskReplay exercise disk rather than accidentally fitting
+            # every recovery frame in the configured memory window.
+            $authorityRunSeconds = if ($RequireDiskReplay) { 7 } else { 5 }
+            Start-Sleep -Seconds $authorityRunSeconds
             if (-not $authority.HasExited) {
                 Stop-Process -Id $authority.Id -Force
                 $authority.WaitForExit(5000) | Out-Null
@@ -292,9 +297,11 @@ try {
         throw "Resumed client did not catch up and reconverge with the authority. See $clientErr."
     }
     if ($RequireDiskReplay) {
-        $authorityLog = [string](Get-Content $authorityErr -Raw)
+        $authorityLog = [string]((Get-ChildItem $evidence -File |
+            Where-Object { $_.Name -like "authority*.stderr.log" } |
+            ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n")
         if (-not $authorityLog.Contains("BTGA_AUTHORITY disk journal replay")) {
-            throw "Authority did not replay canonical history from disk. See $authorityErr."
+            throw "No authority incarnation replayed canonical history from disk. See $evidence."
         }
     }
     $clientKind = if ($RenderedClient) { "rendered" } else { "headless" }
