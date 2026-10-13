@@ -48,6 +48,10 @@ jobs:
             }
           }
           if ($failed) { throw 'PowerShell parser validation failed.' }
+      - name: Validate command entry points
+        shell: cmd
+        run: |
+          findstr /C:"run-dedicated-server.ps1" "port\pc\scripts\run-dedicated-server.cmd" >NUL || exit /B 1
       - name: Configure
         run: cmake -S port/pc -B build-pc -A x64
       - name: Build

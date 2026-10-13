@@ -309,6 +309,9 @@ If the master has expired a saved lobby, the supervisor now creates a new
 lobby automatically and prints its new `ONLINE_LOBBY_ID`. A client must select
 that newly listed lobby; an old copied ID correctly returns `404 lobby not
 found`. Do not delete `dedicated-state` while recovering a live match.
+The portable Windows package includes **Run Dedicated Server.cmd**; drag the
+same local `.z64` ROM used by the game onto it. Recovery state and logs are
+stored under the package's `userdata\dedicated-state` directory.
 
 ## License
 

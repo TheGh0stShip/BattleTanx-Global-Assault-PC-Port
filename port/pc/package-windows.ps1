@@ -28,6 +28,8 @@ $required = @(
     (Join-Path $build "dxcompiler.dll"),
     (Join-Path $build "dxil.dll"),
     (Join-Path $root "port\pc\launch-windows.cmd"),
+    (Join-Path $root "port\pc\scripts\run-dedicated-server.ps1"),
+    (Join-Path $root "port\pc\scripts\run-dedicated-server.cmd"),
     (Join-Path $root "COPYING"),
     (Join-Path $root "port\pc\README.md")
 )
@@ -49,6 +51,9 @@ Copy-Item (Join-Path $build "SDL2.dll") $staging
 Copy-Item (Join-Path $build "dxcompiler.dll") $staging
 Copy-Item (Join-Path $build "dxil.dll") $staging
 Copy-Item (Join-Path $root "port\pc\launch-windows.cmd") (Join-Path $staging "Launch BattleTanx GA.cmd")
+Copy-Item (Join-Path $root "port\pc\scripts\run-dedicated-server.ps1") $staging
+Copy-Item (Join-Path $root "port\pc\scripts\run-dedicated-server.cmd") `
+    (Join-Path $staging "Run Dedicated Server.cmd")
 Copy-Item (Join-Path $root "COPYING") (Join-Path $staging "COPYING.txt")
 Copy-Item (Join-Path $root "port\pc\README.md") (Join-Path $staging "README.md")
 if ($Portable) {

@@ -11,11 +11,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$root = (Resolve-Path (Join-Path $PSScriptRoot "../../..")).Path
-$build = if ([IO.Path]::IsPathRooted($BuildDirectory)) {
+$repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "../../..")).Path
+$packagedServer = Join-Path $PSScriptRoot "BattleTanxGA.exe"
+$packaged = Test-Path -LiteralPath $packagedServer -PathType Leaf
+$root = if ($packaged) { $PSScriptRoot } else { $repositoryRoot }
+$build = if ($packaged -and $BuildDirectory -eq "build-pc-windows") {
+    $PSScriptRoot
+} elseif ([IO.Path]::IsPathRooted($BuildDirectory)) {
     $BuildDirectory
 } else {
-    Join-Path $root $BuildDirectory
+    Join-Path $repositoryRoot $BuildDirectory
 }
 $romPath = (Resolve-Path -LiteralPath $Rom).Path
 $server = Join-Path $build "BattleTanxGA.exe"
@@ -33,7 +38,11 @@ $state = if ($StateDirectory) {
         Join-Path $root $StateDirectory
     }
 } else {
-    Join-Path $build "dedicated-state"
+    if ($packaged) {
+        Join-Path $PSScriptRoot "userdata\dedicated-state"
+    } else {
+        Join-Path $build "dedicated-state"
+    }
 }
 $logs = Join-Path $state "logs"
 New-Item -ItemType Directory -Path $logs -Force | Out-Null

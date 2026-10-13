@@ -332,6 +332,11 @@ and creates a new lobby. Players must join the newly printed/listed ID; a copied
 expired ID returns `404 lobby not found` by design. Press Ctrl+C once to stop
 the supervisor and its child authority.
 
+The portable ZIP includes `Run Dedicated Server.cmd`. Drag the verified local
+`.z64` ROM onto it to start the same supervisor without a source checkout.
+Packaged recovery state and logs live under `userdata\dedicated-state`; the ROM
+is read locally and is never copied into the package or uploaded.
+
 Add `-RenderedClient` to run that unattended gate through the actual Windows
 renderer/input client instead of the headless translated client.
 Add `-ReconnectClient -ReconnectCycles 2` to kill and cold-restart the
