@@ -40,6 +40,7 @@ bool client_enabled = false;
 bool tick_active = false;
 bool bootstrap_complete = false;
 bool divergence_reported = false;
+bool replay_announced = false;
 std::uint64_t expected_digest = 0;
 std::chrono::steady_clock::time_point next_keepalive{};
 
@@ -72,9 +73,15 @@ bool poll_frames_locked() {
             }
             continue;
         }
-        if (header.message_type != BTGA_NET_MSG_EVENT ||
-            !replica.accept_frame(payload)) continue;
-        const btga::CanonicalFrame frame = *replica.latest_frame();
+        if (header.message_type != BTGA_NET_MSG_EVENT) continue;
+        btga::CanonicalFrame frame{};
+        if (!btga::decode_authoritative_frame(payload, frame)) continue;
+        if (!replay_announced && header.acknowledgment > expected_tick + 8U) {
+            std::fprintf(stderr,
+                         "BTGA_CLIENT journal replay active next=%u authority=%u\n",
+                         expected_tick, header.acknowledgment);
+            replay_announced = true;
+        }
         if (static_cast<std::int32_t>(frame.tick - expected_tick) < 0 ||
             frame.tick - expected_tick >= history_size) continue;
         frames[frame.tick % history_size] = frame;
@@ -158,6 +165,7 @@ bool btga_dedicated_client_enable(
     client_enabled = true;
     bootstrap_complete = false;
     divergence_reported = false;
+    replay_announced = false;
     next_keepalive = std::chrono::steady_clock::now();
     if (!send_snapshot_subscription_locked() || !send_inputs_locked(0U, {})) {
         error = "could not announce dedicated-client readiness";

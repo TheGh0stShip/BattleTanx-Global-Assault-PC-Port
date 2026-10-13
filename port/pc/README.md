@@ -301,11 +301,12 @@ its exact connected-seat mask so the master renews active reservations without
 preserving abandoned anonymous joins. A rendered Windows client has separately
 passed beyond tick 1,800
 with every checkpoint byte-identical and no authority timeout. Longer
-interactive campaign and fresh-process recovery remain under development. A
-changed-RDRAM recovery experiment was rejected after it corrupted live
-RSP/audio and scheduler state; the replacement design uses the authority's
-canonical input journal and explicit portable state. This remains a development
-path rather than a finished public mode.
+interactive campaign recovery remains under development. A restarted process
+now reclaims its seat, cold-boots tick zero, replays the authority's targeted
+canonical journal, and reconverges in the unattended gate. A changed-RDRAM
+experiment was rejected after it corrupted live RSP/audio and scheduler state;
+portable checkpoints are still needed to prune long histories. This remains a
+development path rather than a finished public mode.
 
 Build and run the current dedicated gate on Windows with:
 

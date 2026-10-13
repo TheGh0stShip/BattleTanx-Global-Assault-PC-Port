@@ -29,6 +29,12 @@ struct CanonicalSnapshot {
     std::vector<std::uint8_t> state;
 };
 
+// Decode one authoritative frame without imposing delivery order. Historical
+// journal replay intentionally arrives behind the current live broadcast, so
+// bounded replay consumers must validate and place frames by tick themselves.
+[[nodiscard]] bool decode_authoritative_frame(
+    std::span<const std::uint8_t> payload, CanonicalFrame& frame);
+
 // Minimal portable client state receiver. It does not simulate or adjudicate
 // gameplay; it accepts monotonic server frames and reconstructs reliable full
 // snapshots, including out-of-order and duplicate chunks.

@@ -53,9 +53,14 @@ std::uint32_t outgoing_sequence = 0;
 std::uint32_t snapshot_id = 0;
 std::uint8_t snapshot_subscribers = 0;
 std::uint8_t snapshot_requests = 0;
+std::uint8_t bootstrap_requests = 0;
+std::uint8_t replay_requests = 0;
 std::uint8_t snapshot_cursor = 0;
 std::array<std::chrono::steady_clock::time_point, btga::online_player_limit>
     snapshot_last_sent{};
+std::array<std::uint32_t, btga::online_player_limit> replay_next_tick{};
+std::array<std::uint8_t, btga::gameplay_snapshot_size> initial_snapshot_state{};
+bool initial_snapshot_available = false;
 unsigned int configured_players = 4;
 std::unique_ptr<btga::UdpOnlineIo> udp;
 std::unique_ptr<btga::OnlineMultiplayer> multiplayer;
@@ -154,8 +159,12 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
     client_seen.fill(false);
     snapshot_subscribers = 0U;
     snapshot_requests = 0U;
+    bootstrap_requests = 0U;
+    replay_requests = 0U;
     snapshot_cursor = 0U;
     snapshot_last_sent.fill({});
+    replay_next_tick.fill(0U);
+    initial_snapshot_available = false;
     for (std::uint8_t seat = 0; seat < btga::online_player_limit; ++seat) {
         (void)authority.set_connected(seat, false);
     }
@@ -170,7 +179,9 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
 }
 }
 
-bool encode_and_send_frame(const btga::AuthoritativeFrame& frame)
+bool encode_and_send_frame(
+    const btga::AuthoritativeFrame& frame,
+    std::uint16_t destination_slot = BTGA_RELAY_BROADCAST_SLOT)
 {
     BtgaNetAuthoritativeFrame wire{};
     wire.tick = frame.tick;
@@ -194,13 +205,16 @@ bool encode_and_send_frame(const btga::AuthoritativeFrame& frame)
     header.flags = BTGA_NET_FLAG_RELAYED;
     header.session_id = session_id;
     header.sequence = ++outgoing_sequence;
-    header.acknowledgment = 0;
+    // Advertise the journal head on every live or replayed frame. Clients use
+    // it to decide whether they need accelerated catch-up without trusting a
+    // host-native clock or memory image.
+    header.acknowledgment = authority.next_tick();
     header.acknowledgment_bits = 0;
     header.payload_size = static_cast<std::uint16_t>(payload_size);
     header.peer_id = 0;
     if (btga_net_encode_header(packet.data(), packet.size(), &header) == 0U) return false;
     return multiplayer && multiplayer->send_gameplay(
-        BTGA_RELAY_BROADCAST_SLOT,
+        destination_slot,
         {packet.data(), BTGA_NET_HEADER_SIZE + payload_size});
 }
 
@@ -368,6 +382,20 @@ void btga_dedicated_network_poll()
                 } else if (!bootstrap_missing) {
                     snapshot_requests &= static_cast<std::uint8_t>(~bit);
                 }
+                if (bootstrap_missing) {
+                    bootstrap_requests |= bit;
+                    replay_requests &= static_cast<std::uint8_t>(~bit);
+                } else {
+                    bootstrap_requests &= static_cast<std::uint8_t>(~bit);
+                    // acknowledgment is encoded as next_tick + 1 so zero can
+                    // unambiguously mean "no tick-zero bootstrap installed".
+                    replay_next_tick[seat] = incoming.acknowledgment - 1U;
+                    if (replay_next_tick[seat] < authority.next_tick()) {
+                        replay_requests |= bit;
+                    } else {
+                        replay_requests &= static_cast<std::uint8_t>(~bit);
+                    }
+                }
                 snapshot_subscribers |= bit;
             }
             client_last_seen[seat] = now;
@@ -386,6 +414,28 @@ void btga_dedicated_network_poll()
                          static_cast<unsigned>(rejected.payload_size), size);
         }
     }
+    // One bounded journal window is sent per client acknowledgment. A client
+    // cannot make the authority burst an unbounded match history, while a
+    // recovering client can advance the window by acknowledging consumed
+    // ticks. Existing real-time clients normally request zero or one frame.
+    constexpr std::size_t replay_window = 32U;
+    for (std::uint8_t seat = 0; seat < btga::online_player_limit; ++seat) {
+        const auto bit = static_cast<std::uint8_t>(1U << seat);
+        if ((replay_requests & bit) == 0U) continue;
+        replay_requests &= static_cast<std::uint8_t>(~bit);
+        std::array<btga::AuthoritativeFrame, replay_window> frames{};
+        const std::size_t count = authority.copy_journal_from(
+            replay_next_tick[seat], frames);
+        for (std::size_t index = 0; index < count; ++index) {
+            if (!encode_and_send_frame(
+                    frames[index], static_cast<std::uint16_t>(seat + 1U))) {
+                std::fprintf(stderr,
+                             "BTGA_AUTHORITY journal replay failed seat=%u tick=%u\n",
+                             static_cast<unsigned>(seat), frames[index].tick);
+                break;
+            }
+        }
+    }
     constexpr auto client_timeout = std::chrono::seconds{2};
     for (std::uint8_t seat = 0; seat < btga::online_player_limit; ++seat) {
         if (client_seen[seat] && now - client_last_seen[seat] > client_timeout) {
@@ -393,6 +443,8 @@ void btga_dedicated_network_poll()
             const auto bit = static_cast<std::uint8_t>(1U << seat);
             snapshot_subscribers &= static_cast<std::uint8_t>(~bit);
             snapshot_requests &= static_cast<std::uint8_t>(~bit);
+            bootstrap_requests &= static_cast<std::uint8_t>(~bit);
+            replay_requests &= static_cast<std::uint8_t>(~bit);
             (void)authority.set_connected(seat, false);
         }
     }
@@ -546,6 +598,8 @@ extern "C" void btga_dedicated_run_loop(
                 std::fputs("BTGA_AUTHORITY initial snapshot failed\n", stderr);
                 continue;
             }
+            initial_snapshot_state = state;
+            initial_snapshot_available = true;
             for (std::uint8_t seat = 0; seat < btga::online_player_limit; ++seat) {
                 const auto bit = static_cast<std::uint8_t>(1U << seat);
                 if ((snapshot_subscribers & bit) != 0U) {
@@ -556,6 +610,7 @@ extern "C" void btga_dedicated_run_loop(
                     }
                     snapshot_last_sent[seat] = std::chrono::steady_clock::now();
                     snapshot_requests &= static_cast<std::uint8_t>(~bit);
+                    bootstrap_requests &= static_cast<std::uint8_t>(~bit);
                 }
             }
             initial_snapshot_sent = true;
@@ -587,18 +642,30 @@ extern "C" void btga_dedicated_run_loop(
             }
             if (target != UINT8_MAX) {
                 std::array<std::uint8_t, btga::gameplay_snapshot_size> state{};
-                const bool captured = btga::capture_gameplay_snapshot(
-                    {rdram, rdram_size}, state);
+                const auto bit = static_cast<std::uint8_t>(1U << target);
+                const bool bootstrap = initial_snapshot_available &&
+                    (bootstrap_requests & bit) != 0U;
+                const std::uint32_t snapshot_tick = bootstrap ? 0U : next_tick;
+                bool captured = bootstrap;
+                if (bootstrap) {
+                    state = initial_snapshot_state;
+                } else {
+                    captured = btga::capture_gameplay_snapshot(
+                        {rdram, rdram_size}, state);
+                }
                 std::uint64_t digest = UINT64_C(1469598103934665603);
                 for (const auto byte : state) {
                     digest ^= byte;
                     digest *= UINT64_C(1099511628211);
                 }
                 if (captured && encode_and_send_snapshot(
-                        next_tick, static_cast<std::uint16_t>(target + 1U),
+                        snapshot_tick, static_cast<std::uint16_t>(target + 1U),
                         state, digest)) {
                     snapshot_last_sent[target] = std::chrono::steady_clock::now();
-                    snapshot_requests &= static_cast<std::uint8_t>(~(1U << target));
+                    snapshot_requests &= static_cast<std::uint8_t>(~bit);
+                    if (bootstrap) {
+                        bootstrap_requests &= static_cast<std::uint8_t>(~bit);
+                    }
                     snapshot_cursor = static_cast<std::uint8_t>(
                         (target + 1U) % btga::online_player_limit);
                 } else {

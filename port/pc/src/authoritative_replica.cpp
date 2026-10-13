@@ -17,15 +17,11 @@ bool serial_newer(std::uint32_t candidate, std::uint32_t current) {
 
 } // namespace
 
-bool AuthoritativeReplica::accept_frame(std::span<const std::uint8_t> payload) {
+bool decode_authoritative_frame(
+    std::span<const std::uint8_t> payload, CanonicalFrame& frame) {
     BtgaNetAuthoritativeFrame decoded{};
     if (!btga_net_decode_authoritative_frame(
             &decoded, payload.data(), payload.size())) return false;
-    if (frame_ && !serial_newer(decoded.tick, frame_->tick)) {
-        return decoded.tick == frame_->tick &&
-               decoded.state_digest == frame_->state_digest;
-    }
-    CanonicalFrame frame;
     frame.tick = decoded.tick;
     frame.state_digest = decoded.state_digest;
     frame.occupied_mask = decoded.occupied_mask;
@@ -35,6 +31,16 @@ bool AuthoritativeReplica::accept_frame(std::span<const std::uint8_t> payload) {
         frame.inputs[seat] = {decoded.inputs[seat].buttons,
                               decoded.inputs[seat].stick_x,
                               decoded.inputs[seat].stick_y};
+    }
+    return true;
+}
+
+bool AuthoritativeReplica::accept_frame(std::span<const std::uint8_t> payload) {
+    CanonicalFrame frame;
+    if (!decode_authoritative_frame(payload, frame)) return false;
+    if (frame_ && !serial_newer(frame.tick, frame_->tick)) {
+        return frame.tick == frame_->tick &&
+               frame.state_digest == frame_->state_digest;
     }
     frame_ = frame;
     return true;

@@ -18,9 +18,11 @@ explicit opt-in actions.
   one subscribed seat every eight ticks in round-robin order rather than
   broadcasting state to every relay client.
 - A returning connection presents a rotating resume credential and atomically
-  reclaims the same seat. The credential path is complete; restoring a freshly
-  restarted process mid-match is not. An experimental changed-RDRAM patch was
-  rejected after it copied live RSP/audio and libultra scheduler state.
+  reclaims the same seat. A freshly restarted process cold-boots the same match,
+  installs the retained tick-zero bootstrap, replays targeted canonical journal
+  frames, and has caught up to byte-identical periodic checkpoints in the public
+  gate. An experimental changed-RDRAM patch was rejected after it copied live
+  RSP/audio and libultra scheduler state.
 - Authority heartbeats report the exact connected-seat mask. The master uses
   that mask to confirm and renew only genuinely connected reservations; an
   abandoned anonymous join remains provisional and becomes reusable.
@@ -32,11 +34,11 @@ unattended four-seat public-relay gate with every simulated tick checked against
 the authority digest. A rendered client has also run beyond tick 1,800 without
 an authority stall or digest mismatch; every periodic snapshot was confirmed
 byte-for-byte. The portable snapshot schema excludes host-local audio handles.
-Fresh-process recovery is now being built from the authority's canonical input
-journal plus explicit portable state; opaque RDRAM copying is prohibited.
-Longer interactive campaign coverage, accelerated replay, server-driven
-interpolation, and cross-architecture portable state remain required before
-this is exposed as a finished menu option.
+Fresh-process recovery uses the authority's canonical input journal; opaque
+RDRAM copying is prohibited. Portable checkpoints are still needed to prune
+long histories. Longer interactive campaign coverage, server-driven
+interpolation, and cross-architecture validation remain required before this
+is exposed as a finished menu option.
 
 ```powershell
 .\port\pc\scripts\test-dedicated-multiplayer.ps1 `

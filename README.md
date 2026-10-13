@@ -262,12 +262,13 @@ interrupt waits. Snapshots are targeted and round-robin rather than broadcast,
 and a returning connection atomically reclaims its stable seat with a rotating
 resume credential. Authority heartbeats confirm only the seats that are
 actually connected, so abandoned anonymous reservations expire instead of
-locking a lobby. Fresh-process mid-match recovery is not yet supported: an
-experiment that patched changed RDRAM bytes was rejected after it corrupted
-live RSP/audio and scheduler state. Recovery is being redesigned around a
-canonical input journal and explicit portable state rather than copying opaque
-runtime memory. Longer interactive campaign and cross-architecture validation
-are still required before this becomes a release-ready public multiplayer mode. Live
+locking a lobby. Fresh-process recovery now cold-boots the deterministic match,
+restores its tick-zero bootstrap, replays targeted canonical input history, and
+has reconverged with a running authority in the unattended public gate. It does
+not copy opaque RDRAM; an earlier changed-memory experiment was rejected after
+corrupting live RSP/audio and scheduler state. Longer sessions need portable
+checkpoint pruning, and interactive campaign plus cross-architecture validation
+remain required before this becomes a release-ready public multiplayer mode. Live
 service status is available at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/).
 Opening the Online tab itself remains network-inert; Refresh, Host, and Join are

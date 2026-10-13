@@ -274,6 +274,12 @@ int main() {
         const auto second = server.step(simulation, 4U);
         CHECK(second && second->snapshot_payloads.size() == 1U);
         CHECK(replica.accept_frame(second->frame_payload));
+        btga::CanonicalFrame historical{};
+        CHECK(btga::decode_authoritative_frame(first->frame_payload, historical));
+        CHECK(historical.tick == 0U && historical.received_mask == 0x0fU);
+        // The latest-frame tracker remains monotonic, while journal consumers
+        // can decode and place authenticated historical frames by tick.
+        CHECK(!replica.accept_frame(first->frame_payload));
         CHECK(replica.accept_snapshot_chunk(second->snapshot_payloads[0]));
         CHECK(replica.accept_snapshot_chunk(second->snapshot_payloads[0]));
         CHECK(replica.snapshot_ready());

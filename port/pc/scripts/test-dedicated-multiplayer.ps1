@@ -5,7 +5,10 @@ param(
     [string] $BuildDirectory = "build-pc-windows",
     [ValidateRange(8, 120)]
     [int] $Seconds = 15,
-    [switch] $RenderedClient
+    [switch] $RenderedClient,
+    [switch] $ReconnectClient,
+    [ValidateRange(2, 30)]
+    [int] $ReconnectAfterSeconds = 4
 )
 
 $ErrorActionPreference = "Stop"
@@ -76,6 +79,7 @@ try {
     }
 
     $peerSeconds = $Seconds
+    if ($ReconnectClient) { $peerSeconds += $ReconnectAfterSeconds + 5 }
     for ($seat = 1; $seat -lt 4; ++$seat) {
         $out = Join-Path $evidence "bot-$seat.stdout.log"
         $err = Join-Path $evidence "bot-$seat.stderr.log"
@@ -96,6 +100,38 @@ try {
         } until ($peerBound -or $peer.HasExited -or [DateTime]::UtcNow -ge $deadline)
         if (-not $peerBound) {
             throw "Dedicated protocol peer did not bind seat $seat."
+        }
+    }
+    if ($ReconnectClient) {
+        if ($RenderedClient) {
+            throw "-ReconnectClient currently requires the headless translated client."
+        }
+        $initialCredential = [string](Get-Content $resumeCredential -Raw)
+        Start-Sleep -Seconds $ReconnectAfterSeconds
+        if (-not $client.HasExited) {
+            Stop-Process -Id $client.Id -Force
+            $client.WaitForExit(5000) | Out-Null
+        }
+        $clientOut = Join-Path $evidence "client-resumed.stdout.log"
+        $clientErr = Join-Path $evidence "client-resumed.stderr.log"
+        $client = Start-Process $server -PassThru `
+            -ArgumentList $clientArguments `
+            -RedirectStandardOutput $clientOut -RedirectStandardError $clientErr
+        $processes.Add($client)
+        $deadline = [DateTime]::UtcNow.AddSeconds(15)
+        do {
+            Start-Sleep -Milliseconds 100
+            $clientText = ""
+            if (Test-Path $clientErr) {
+                $content = Get-Content $clientErr -Raw
+                if ($null -ne $content) { $clientText = [string]$content }
+            }
+            $bound = $clientText.Contains("BTGA_CLIENT bound authoritative seat=0")
+        } until ($bound -or $client.HasExited -or [DateTime]::UtcNow -ge $deadline)
+        if (-not $bound) { throw "Resumed translated client did not reclaim seat 0." }
+        $rotatedCredential = [string](Get-Content $resumeCredential -Raw)
+        if ($rotatedCredential -eq $initialCredential) {
+            throw "Resume credential did not rotate after reconnect."
         }
     }
     $seat = 1
@@ -139,6 +175,14 @@ try {
     }
     if ($clientLog.Contains("BTGA_CLIENT authority timeout")) {
         throw "Translated client stopped receiving canonical authority frames. See $clientErr."
+    }
+    if ($ReconnectClient -and
+        -not $clientLog.Contains("BTGA_CLIENT journal replay active")) {
+        throw "Resumed client did not receive canonical journal replay. See $clientErr."
+    }
+    if ($ReconnectClient -and
+        -not [regex]::IsMatch($clientLog, "BTGA_CLIENT confirmed snapshot tick=[1-9][0-9]*")) {
+        throw "Resumed client did not catch up and reconverge with the authority. See $clientErr."
     }
     $clientKind = if ($RenderedClient) { "rendered" } else { "headless" }
     Write-Host "Dedicated 4-player $clientKind test passed. Lobby: $lobby"
