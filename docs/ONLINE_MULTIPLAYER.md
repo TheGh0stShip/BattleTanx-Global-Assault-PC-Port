@@ -139,9 +139,11 @@ The unattended Windows gate has an authority-restart mode:
     -Rom 'C:\Games\BattleTanxGA.z64' -ReconnectAuthority
 ```
 
-This path currently preserves an already-running match. Persisting the
-original tick-zero bootstrap for a brand-new client that first joins after an
-authority restart remains required before this is a finished public feature.
+This path preserves an already-running match. A replacement authority exposes
+its validated portable checkpoint before translated gameplay resumes, so a
+brand-new process with no prior acknowledgment can install that positive-tick
+checkpoint, replay the journal tail, and release the shared recovery barrier.
+It never relabels recovered live state as a tick-zero snapshot.
 
 ```powershell
 .\port\pc\scripts\test-dedicated-multiplayer.ps1 `
@@ -199,6 +201,12 @@ loss in each direction on the translated authority/client path. Node.js is
 needed only to create local signed credentials and run the relay; Azure and the
 public master service are never contacted. CI may instead provide a fresh
 fixture with `-FixturePath ... -ExternalRelay`.
+
+Add `-ColdJoinAfterAuthorityRestart` to force-kill both authority and translated
+client after checkpoint 120, restart the authority from its disk state, and
+require a cold client to install a positive-tick checkpoint under the same loss
+profile. The gate also requires journal replay, barrier release, and canonical
+input echoes from every remaining seat.
 
 The older peer-hosted flow documented below remains available for comparison,
 but it is not the architecture being taken to production.

@@ -318,6 +318,9 @@ use a local networking checkout (Node.js required):
   -NetworkingRoot 'C:\src\BattleTanx-Global-Assault-Networking'
 ```
 
+Add `-ColdJoinAfterAuthorityRestart` to prove that a replacement authority can
+restore disk state and bootstrap a completely new client at a positive tick.
+
 If the master has expired a saved lobby, the supervisor now creates a new
 lobby automatically and prints its new `ONLINE_LOBBY_ID`. A client must select
 that newly listed lobby; an old copied ID correctly returns `404 lobby not

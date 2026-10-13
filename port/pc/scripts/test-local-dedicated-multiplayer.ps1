@@ -11,6 +11,7 @@ param(
     [int] $Seconds = 30,
     [ValidateRange(1, 4)]
     [int] $Players = 4,
+    [switch] $ColdJoinAfterAuthorityRestart,
     [ValidateRange(2, 1000)]
     [int] $DropOutgoingEvery = 10,
     [ValidateRange(2, 1000)]
@@ -70,7 +71,8 @@ $environmentNames = @(
     "BTGA_RELAY_PUBLIC_KEY", "BTGA_RELAY_PORT",
     "BTGA_DEDICATED_SESSION", "BTGA_DEDICATED_RELAY_HOST",
     "BTGA_DEDICATED_RELAY_PORT", "BTGA_DEDICATED_TOKEN",
-    "BTGA_DEDICATED_PLAYERS", "BTGA_NET_TEST_FAULTS",
+    "BTGA_DEDICATED_PLAYERS", "BTGA_DEDICATED_STATE_DIR",
+    "BTGA_NET_TEST_FAULTS",
     "BTGA_NET_TEST_DROP_OUTGOING_EVERY", "BTGA_NET_TEST_DROP_INCOMING_EVERY"
 )
 $previous = @{}
@@ -99,6 +101,13 @@ try {
     $env:BTGA_DEDICATED_RELAY_HOST = [string]$fixture.relay_host
     $env:BTGA_DEDICATED_RELAY_PORT = [string]$fixture.relay_port
     $env:BTGA_DEDICATED_PLAYERS = [string]$Players
+    if ($ColdJoinAfterAuthorityRestart) {
+        $stateDirectory = Join-Path $evidence "authority-state"
+        New-Item $stateDirectory -ItemType Directory | Out-Null
+        $env:BTGA_DEDICATED_STATE_DIR = $stateDirectory
+    } else {
+        $env:BTGA_DEDICATED_STATE_DIR = $null
+    }
     $env:BTGA_NET_TEST_FAULTS = "1"
     $env:BTGA_NET_TEST_DROP_OUTGOING_EVERY = [string]$DropOutgoingEvery
     $env:BTGA_NET_TEST_DROP_INCOMING_EVERY = [string]$DropIncomingEvery
@@ -122,11 +131,18 @@ try {
     # targets the translated authority/client recovery path rather than token
     # admission. Each witness sends a distinct input and verifies its echo.
     Start-Sleep -Milliseconds 250
+    $peerSeconds = if ($ColdJoinAfterAuthorityRestart) {
+        # Cover the initial run, forced restart and replacement-client run,
+        # then finish soon enough for the gate's bounded validation wait.
+        $Seconds + 10
+    } else {
+        $Seconds
+    }
     for ($seat = 1; $seat -lt $Players; ++$seat) {
         $env:BTGA_NET_TEST_FAULTS = $null
         $env:BTGA_DEDICATED_TOKEN = [string]$fixture.client_tokens[$seat]
         $peer = Start-Process $bot -PassThru -WindowStyle Minimized `
-            -ArgumentList @([string]$seat, [string]$Seconds) `
+            -ArgumentList @([string]$seat, [string]$peerSeconds) `
             -RedirectStandardOutput (Join-Path $evidence "bot-$seat.stdout.log") `
             -RedirectStandardError (Join-Path $evidence "bot-$seat.stderr.log")
         $processes.Add($peer)
@@ -134,12 +150,59 @@ try {
         $env:BTGA_NET_TEST_FAULTS = "1"
     }
 
+    $clientErrorPath = Join-Path $evidence "client.stderr.log"
+    $authorityErrorPaths = [System.Collections.Generic.List[string]]::new()
+    $authorityErrorPaths.Add((Join-Path $evidence "authority.stderr.log"))
+    if ($ColdJoinAfterAuthorityRestart) {
+        $tickDeadline = [DateTime]::UtcNow.AddSeconds(20)
+        do {
+            Start-Sleep -Milliseconds 100
+            $beforeRestart = [string](Get-Content $authorityErrorPaths[0] -Raw)
+            $durableTickReached = $beforeRestart -match "BTGA_AUTHORITY tick=1[2-9][0-9]"
+        } until ($durableTickReached -or $authority.HasExited -or
+            [DateTime]::UtcNow -ge $tickDeadline)
+        if (-not $durableTickReached) {
+            throw "Authority did not persist a pre-restart checkpoint."
+        }
+
+        foreach ($process in @($client, $authority)) {
+            if (-not $process.HasExited) {
+                Stop-Process -Id $process.Id -Force
+                $process.WaitForExit(5000) | Out-Null
+            }
+        }
+        Start-Sleep -Milliseconds 250
+
+        $restartAuthorityError = Join-Path $evidence "authority-restart.stderr.log"
+        $authorityErrorPaths.Add($restartAuthorityError)
+        $env:BTGA_DEDICATED_TOKEN = [string]$fixture.authority_restart_token
+        $authority = Start-Process $game -PassThru -WindowStyle Minimized `
+            -ArgumentList @("--dedicated-server", $quotedRom) `
+            -RedirectStandardOutput (Join-Path $evidence "authority-restart.stdout.log") `
+            -RedirectStandardError $restartAuthorityError
+        $processes.Add($authority)
+        Start-Sleep -Milliseconds 750
+
+        $clientErrorPath = Join-Path $evidence "client-restart.stderr.log"
+        $env:BTGA_DEDICATED_TOKEN = [string]$fixture.client_restart_tokens[0]
+        $client = Start-Process $game -PassThru -WindowStyle Minimized `
+            -ArgumentList @("--dedicated-headless-direct", [string]$Seconds, $quotedRom) `
+            -RedirectStandardOutput (Join-Path $evidence "client-restart.stdout.log") `
+            -RedirectStandardError $clientErrorPath
+        $processes.Add($client)
+    }
+
     if (-not $client.WaitForExit(($Seconds + 30) * 1000)) {
         throw "Translated client did not complete its timed run."
     }
     $client.WaitForExit()
-    $clientLog = [string](Get-Content (Join-Path $evidence "client.stderr.log") -Raw)
-    if ($clientLog -notmatch "BTGA_CLIENT (applied|confirmed) snapshot tick=0" -or
+    $clientLog = [string](Get-Content $clientErrorPath -Raw)
+    $requiredSnapshot = if ($ColdJoinAfterAuthorityRestart) {
+        "BTGA_CLIENT (applied|confirmed) snapshot tick=[1-9][0-9]*"
+    } else {
+        "BTGA_CLIENT (applied|confirmed) snapshot tick=0"
+    }
+    if ($clientLog -notmatch $requiredSnapshot -or
         -not $clientLog.Contains("Headless boot window elapsed")) {
         throw "Translated client did not install the bootstrap and complete its run."
     }
@@ -152,11 +215,17 @@ try {
         throw "Translated client did not activate the requested loss profile."
     }
 
-    $authorityLog = [string](Get-Content `
-        (Join-Path $evidence "authority.stderr.log") -Raw)
+    $authorityLog = [string](($authorityErrorPaths | ForEach-Object {
+        Get-Content $_ -Raw
+    }) -join "`n")
     if (-not $authorityLog.Contains("BTGA_AUTHORITY all $Players seats ready") -or
         -not $authorityLog.Contains("BTGA_AUTHORITY test UDP loss $profile")) {
         throw "Authority did not reach the requested lossy $Players-player session."
+    }
+    if ($ColdJoinAfterAuthorityRestart -and
+        $authorityLog -notmatch
+            "BTGA_AUTHORITY recovered checkpoint=[1-9][0-9]* journal_head=[1-9][0-9]*") {
+        throw "Replacement authority did not restore persistent gameplay state."
     }
 
     for ($seat = 1; $seat -lt $Players; ++$seat) {
@@ -169,15 +238,21 @@ try {
             (Join-Path $evidence "bot-$seat.stderr.log") -Raw)
         $peerLog = [string](Get-Content `
             (Join-Path $evidence "bot-$seat.stdout.log") -Raw)
+        $frameMatch = [regex]::Match($peerLog, "canonical_frames=([0-9]+)")
+        $echoMatch = [regex]::Match($peerLog, "echoed_inputs=([0-9]+)")
         if (-not [string]::IsNullOrWhiteSpace($peerError) -or
-            $peerLog -notmatch "canonical_frames=[3-9][0-9]" -or
-            $peerLog -notmatch "echoed_inputs=[1-9][0-9]") {
+            -not $frameMatch.Success -or -not $echoMatch.Success -or
+            [uint32]$frameMatch.Groups[1].Value -lt 30 -or
+            [uint32]$echoMatch.Groups[1].Value -lt 10) {
             throw "Protocol witness seat $seat did not verify canonical input/state."
         }
     }
 
     Write-Host "Local dedicated $Players-player loss gate passed."
     Write-Host "Loss profile: $profile"
+    if ($ColdJoinAfterAuthorityRestart) {
+        Write-Host "Recovery: cold client bootstrapped after authority restart"
+    }
     Write-Host "Evidence: $evidence"
 } finally {
     foreach ($process in $processes) {

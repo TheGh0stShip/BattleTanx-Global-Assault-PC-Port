@@ -290,7 +290,15 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
     bootstrap_expected_ack.fill(0U);
     bootstrap_expected_snapshot_id.fill(0U);
     snapshot_retry_rotation.fill(0U);
-    initial_snapshot_available = false;
+    // A restarted authority already owns a validated portable checkpoint.
+    // Make it available before translated gameplay starts so a genuinely new
+    // client (acknowledgment zero) can bootstrap while the authority waits at
+    // the recovery barrier. The compact tick-zero array is intentionally not
+    // used on this path; send_pending_bootstrap_snapshot_locked selects the
+    // persisted dedicated checkpoint below.
+    initial_snapshot_available = recovery_pending &&
+        authority.latest_snapshot() &&
+        btga::is_dedicated_checkpoint(authority.latest_snapshot()->state);
     for (std::uint8_t seat = 0; seat < btga::online_player_limit; ++seat) {
         (void)authority.set_connected(seat, false);
     }
@@ -413,13 +421,14 @@ bool encode_and_send_snapshot(std::uint32_t tick, std::uint16_t destination_slot
             packet.data() + BTGA_NET_HEADER_SIZE,
             packet.size() - BTGA_NET_HEADER_SIZE, &chunk);
         if (payload_size == 0U) return false;
-        // The small tick-zero state is the only way a cold process can enter
-        // canonical simulation. Send each of its chunks three times so one
-        // bootstrap succeeds even when periodic loss repeatedly targets the
-        // same position in a burst. Larger portable recovery checkpoints use
-        // rotated full retries instead of tripling their bandwidth.
-        const unsigned copies = state.size() <= btga::gameplay_snapshot_size
-            ? 3U : 1U;
+        // A cold process cannot enter canonical simulation until every chunk
+        // arrives. Send three consecutive copies of each chunk: deterministic
+        // periodic loss cannot erase all three, and independent 10% loss has
+        // only a 0.1% chance of doing so. The largest current checkpoint is
+        // about 124 KiB; pacing below keeps its one-off recovery burst within
+        // the relay's configured token-bucket budget. Rotated full retries
+        // remain the fallback for arbitrary burst loss.
+        constexpr unsigned copies = 3U;
         for (unsigned copy = 0U; copy < copies; ++copy) {
             BtgaNetHeader header{};
             header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
@@ -968,6 +977,7 @@ extern "C" void btga_dedicated_run_loop(
     if (dedicated_loop_running) return;
     dedicated_loop_running = true;
 
+    bool restored_persistent_session = false;
     if (recovery_pending) {
         std::optional<btga::AuthoritativeSnapshot> checkpoint;
         std::vector<btga::AuthoritativeFrame> replay;
@@ -990,6 +1000,28 @@ extern "C" void btga_dedicated_run_loop(
             std::fputs("BTGA_AUTHORITY persistent checkpoint restore failed\n", stderr);
             std::abort();
         }
+        std::array<std::uint8_t, btga::gameplay_snapshot_size> restored_state{};
+        if (!btga::capture_gameplay_snapshot(
+                {rdram, rdram_size}, restored_state) ||
+            checkpoint->state.size() < restored_state.size() ||
+            !std::ranges::equal(
+                restored_state,
+                std::span<const std::uint8_t>{checkpoint->state}.first(
+                    restored_state.size()))) {
+            std::size_t first_difference = restored_state.size();
+            if (checkpoint->state.size() >= restored_state.size()) {
+                for (std::size_t index = 0; index < restored_state.size(); ++index) {
+                    if (restored_state[index] != checkpoint->state[index]) {
+                        first_difference = index;
+                        break;
+                    }
+                }
+            }
+            std::fprintf(stderr,
+                         "BTGA_AUTHORITY restored checkpoint differs offset=%zu\n",
+                         first_difference);
+            std::abort();
+        }
         recovery_replay_running = true;
         for (const auto& frame : replay) {
             active_inputs = frame.inputs;
@@ -1007,15 +1039,24 @@ extern "C" void btga_dedicated_run_loop(
             std::array<std::uint8_t, btga::gameplay_snapshot_size> state{};
             const bool captured = btga::capture_gameplay_snapshot(
                 {rdram, rdram_size}, state);
-            if (!captured || canonical_state_digest(state) != frame.state_digest) {
+            const auto actual_digest = captured ? canonical_state_digest(state) : 0U;
+            if (!captured || actual_digest != frame.state_digest) {
+                std::uint32_t actual_seed = 0U;
+                (void)btga::gameplay_snapshot_random_seed(state, actual_seed);
                 std::fprintf(stderr,
-                             "BTGA_AUTHORITY persistent replay diverged at tick=%u\n",
-                             frame.tick);
+                             "BTGA_AUTHORITY persistent replay diverged at tick=%u "
+                             "expected=%016llx actual=%016llx "
+                             "expected_rng=%08x actual_rng=%08x\n",
+                             frame.tick,
+                             static_cast<unsigned long long>(frame.state_digest),
+                             static_cast<unsigned long long>(actual_digest),
+                             frame.random_seed, actual_seed);
                 std::abort();
             }
         }
         recovery_replay_running = false;
         recovery_pending = false;
+        restored_persistent_session = true;
         std::fprintf(stderr,
                      "BTGA_AUTHORITY recovered checkpoint=%u journal_head=%u\n",
                      checkpoint->next_tick, authority.next_tick());
@@ -1029,7 +1070,9 @@ extern "C" void btga_dedicated_run_loop(
     constexpr auto tick_period = std::chrono::microseconds{33333};
     auto deadline = std::chrono::steady_clock::now();
     bool announced_ready = false;
-    bool initial_snapshot_sent = false;
+    // Never relabel a recovered live state as tick zero. Fresh clients are
+    // bootstrapped from the persisted portable checkpoint and journal tail.
+    bool initial_snapshot_sent = restored_persistent_session;
     for (;;) {
         btga_dedicated_network_poll();
         bool wait_for_players = false;

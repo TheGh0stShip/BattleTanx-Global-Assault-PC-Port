@@ -330,6 +330,9 @@ and supply a checkout of the networking repository:
     -NetworkingRoot 'C:\src\BattleTanx-Global-Assault-Networking'
 ```
 
+Use `-ColdJoinAfterAuthorityRestart` to exercise durable authority recovery and
+a brand-new client's positive-tick checkpoint/journal catch-up path.
+
 For an actual persistent authority, use the supervisor rather than launching
 the executable directly:
 
