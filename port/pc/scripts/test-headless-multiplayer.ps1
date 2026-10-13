@@ -10,6 +10,11 @@ param(
     [ValidateRange(1, 100)]
     [int] $GameRuns = 5,
     [switch] $KillClientAfterEpoch,
+    [ValidateRange(0, 100)]
+    [int] $PeerLossRun = 0,
+    [ValidateRange(5, 120)]
+    [int] $ProgressTimeoutSeconds = 30,
+    [switch] $SkipBuild,
     [switch] $ShowWindows
 )
 
@@ -20,18 +25,22 @@ $buildScript = Join-Path $root "port\pc\build-windows.ps1"
 # First build and run the deterministic library-level tests. When -Rom is
 # supplied, the second half also starts two hidden, bounded native runtimes;
 # no visible window or human input is required.
-& $buildScript -BuildDirectory $BuildDirectory
-if ($LASTEXITCODE -ne 0) { throw "Native headless tests failed." }
+if (-not $SkipBuild) {
+    & $buildScript -BuildDirectory $BuildDirectory
+    if ($LASTEXITCODE -ne 0) { throw "Native headless tests failed." }
+}
 
 $build = if ([IO.Path]::IsPathRooted($BuildDirectory)) {
     $BuildDirectory
 } else {
     Join-Path $root $BuildDirectory
 }
-$cmake = Get-Command cmake.exe -ErrorAction SilentlyContinue
-if (-not $cmake) { $cmake = Get-Command cmake -ErrorAction Stop }
-& $cmake.Source --build $build --target btga_pc_native_online_e2e --parallel
-if ($LASTEXITCODE -ne 0) { throw "Native online lifecycle test build failed." }
+if (-not $SkipBuild) {
+    $cmake = Get-Command cmake.exe -ErrorAction SilentlyContinue
+    if (-not $cmake) { $cmake = Get-Command cmake -ErrorAction Stop }
+    & $cmake.Source --build $build --target btga_pc_native_online_e2e --parallel
+    if ($LASTEXITCODE -ne 0) { throw "Native online lifecycle test build failed." }
+}
 
 $e2e = Join-Path $build "btga_pc_native_online_e2e.exe"
 for ($run = 1; $run -le $RelayRuns; ++$run) {
@@ -41,11 +50,18 @@ for ($run = 1; $run -le $RelayRuns; ++$run) {
 }
 
 if ($Rom) {
+    if (-not $ControllerPak) {
+        throw "-ControllerPak is required for deterministic native gameplay scenarios. Use a local profile created by the game; it is copied into isolated per-peer data directories."
+    }
+    if ($PeerLossRun -gt $GameRuns) {
+        throw "-PeerLossRun cannot be greater than -GameRuns."
+    }
     $resolvedRom = (Resolve-Path $Rom).Path
     $resolvedPak = if ($ControllerPak) { (Resolve-Path $ControllerPak).Path } else { $null }
     $runtime = Join-Path $build "BattleTanxGA.exe"
     $evidenceRoot = Join-Path $build "headless-online-evidence"
     Remove-Item $evidenceRoot -Recurse -Force -ErrorAction SilentlyContinue
+    $results = [System.Collections.Generic.List[object]]::new()
     for ($gameRun = 1; $gameRun -le $GameRuns; ++$gameRun) {
     $evidence = Join-Path $evidenceRoot ("run-{0:D2}" -f $gameRun)
     $hostData = Join-Path $evidence "host-data"
@@ -66,6 +82,9 @@ if ($Rom) {
     $hostProcess = $null
     $clientProcess = $null
     $clientKilled = $false
+    $injectPeerLoss = $KillClientAfterEpoch -or ($PeerLossRun -eq $gameRun)
+    $lastProgressAt = [DateTime]::UtcNow
+    $lastProgressSignature = ""
 
     try {
         if ($ShowWindows) { $env:BTGA_HEADLESS_VISIBLE = "1" }
@@ -98,10 +117,21 @@ if ($Rom) {
             Start-Sleep -Milliseconds 100
             $hostProcess.Refresh()
             $clientProcess.Refresh()
-            if ($KillClientAfterEpoch -and !$clientKilled -and
+            $hostSyncCandidate = Join-Path $hostData "btga-net-sync.log"
+            $clientSyncCandidate = Join-Path $clientData "btga-net-sync.log"
+            $progressSignature = @($hostSyncCandidate, $clientSyncCandidate) | ForEach-Object {
+                if (Test-Path $_) {
+                    $item = Get-Item $_
+                    "$($item.Length):$($item.LastWriteTimeUtc.Ticks)"
+                } else { "missing" }
+            }
+            $progressSignature = $progressSignature -join "|"
+            if ($progressSignature -ne $lastProgressSignature) {
+                $lastProgressSignature = $progressSignature
+                $lastProgressAt = [DateTime]::UtcNow
+            }
+            if ($injectPeerLoss -and !$clientKilled -and
                 !$clientProcess.HasExited) {
-                $hostSyncCandidate = Join-Path $hostData "btga-net-sync.log"
-                $clientSyncCandidate = Join-Path $clientData "btga-net-sync.log"
                 if ((Test-Path $hostSyncCandidate) -and
                     (Test-Path $clientSyncCandidate) -and
                     (Get-Content $hostSyncCandidate -Raw).Contains("GAMEPLAY_EPOCH_SYNC") -and
@@ -110,6 +140,16 @@ if ($Rom) {
                     $clientKilled = $true
                     $clientProcess.Refresh()
                 }
+            }
+            $peerLossRecovered = $false
+            if ($injectPeerLoss -and $clientKilled -and (Test-Path $hostSyncCandidate)) {
+                $peerLossRecovered =
+                    (Get-Content $hostSyncCandidate -Raw) -match
+                        "FRAME_BARRIER_TIMEOUT|FRAME_INPUT_TIMEOUT"
+            }
+            if (-not $peerLossRecovered -and
+                [DateTime]::UtcNow -gt $lastProgressAt.AddSeconds($ProgressTimeoutSeconds)) {
+                throw "Headless pair made no synchronization-log progress for $ProgressTimeoutSeconds seconds."
             }
         }
         if (!$hostProcess.HasExited -or !$clientProcess.HasExited) {
@@ -120,14 +160,14 @@ if ($Rom) {
         $hostProcess.Refresh()
         $clientProcess.Refresh()
         if (($null -ne $hostProcess.ExitCode -and $hostProcess.ExitCode -ne 0) -or
-            (!$KillClientAfterEpoch -and
+            (!$injectPeerLoss -and
              ($null -ne $clientProcess.ExitCode -and $clientProcess.ExitCode -ne 0))) {
             throw "Headless runtime exited unsuccessfully (host=$($hostProcess.ExitCode), client=$($clientProcess.ExitCode))."
         }
         $hostLog = (Get-Content $hostErr -Raw)
         $clientLog = (Get-Content $clientErr -Raw)
         if (!$hostLog.Contains("Headless boot window elapsed") -or
-            (!$KillClientAfterEpoch -and
+            (!$injectPeerLoss -and
              !$clientLog.Contains("Headless boot window elapsed"))) {
             throw "Headless game pair did not reach the bounded synchronized boot window."
         }
@@ -138,13 +178,20 @@ if ($Rom) {
         $clientSyncPath = Join-Path $clientData "btga-net-sync.log"
         $hostSync = if (Test-Path $hostSyncPath) { Get-Content $hostSyncPath -Raw } else { "" }
         $clientSync = if (Test-Path $clientSyncPath) { Get-Content $clientSyncPath -Raw } else { "" }
-        if ($KillClientAfterEpoch) {
+        if ($injectPeerLoss) {
             if (!$clientKilled) {
                 throw "Peer-loss injection never reached a synchronized gameplay epoch."
             }
             if ($hostSync -notmatch "FRAME_BARRIER_TIMEOUT|FRAME_INPUT_TIMEOUT") {
                 throw "Host did not leave its network wait after the client was terminated."
             }
+            $results.Add([pscustomobject]@{
+                run = $gameRun
+                scenario = "peer-loss"
+                passed = $true
+                client_terminated = $clientKilled
+                evidence = $evidence
+            })
             Write-Host "Headless peer-loss recovery $gameRun/$GameRuns passed; evidence: $evidence"
             continue
         }
@@ -197,6 +244,16 @@ if ($Rom) {
             ($hostSamples -join "|") -ne ($clientSamples -join "|")) {
             throw "Headless peers did not report identical sampled gameplay states."
         }
+        $results.Add([pscustomobject]@{
+            run = $gameRun
+            scenario = if ($PeerLossRun -gt 0 -and $gameRun -gt $PeerLossRun) {
+                "post-fault-recovery"
+            } else { "stable" }
+            passed = $true
+            epochs = $hostEpochs.Count
+            last_sample = $hostSamples[-1]
+            evidence = $evidence
+        })
         Write-Host "Headless host/join cold boot $gameRun/$GameRuns passed; evidence: $evidence"
     }
     finally {
@@ -210,4 +267,7 @@ if ($Rom) {
         }
     }
     }
+    $report = Join-Path $evidenceRoot "summary.json"
+    $results | ConvertTo-Json -Depth 4 | Set-Content -Path $report -Encoding UTF8
+    Write-Host "Headless multiplayer report: $report"
 }

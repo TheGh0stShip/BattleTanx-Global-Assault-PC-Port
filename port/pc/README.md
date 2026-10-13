@@ -309,3 +309,22 @@ verifies bidirectional encoded controller delivery, updates the public game stat
 lobby through an authenticated cleanup guard. See
 [online multiplayer testing](../../docs/ONLINE_MULTIPLAYER.md) for scope and
 security details.
+
+The native Windows runtime can also exercise hosting, joining, synchronized
+gameplay, peer loss, and a subsequent clean-session recovery without opening
+windows or requiring human input. Supply only local ROM and Controller Pak
+paths; neither file is copied into the repository:
+
+```powershell
+.\port\pc\scripts\test-headless-multiplayer.ps1 `
+  -Rom C:\path\to\BattleTanxGA.z64 `
+  -ControllerPak C:\path\to\battletanx-ga.n64.us.1.0_pak1.mpk `
+  -GameRuns 3 -PeerLossRun 2 -BootSeconds 60
+```
+
+This sequence runs a healthy session, terminates the client during the second
+session, then creates a new lobby and requires the third session to reach
+synchronized gameplay. A progress watchdog rejects frozen pairs, and
+`headless-online-evidence/summary.json` records the result. The evidence,
+temporary ROM copies, saves, and logs remain build artifacts and must not be
+committed.

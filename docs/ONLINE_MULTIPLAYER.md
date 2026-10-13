@@ -91,6 +91,13 @@ store.
     -ControllerPak 'C:\path\to\BattleTanxGA_pak1.mpk' `
     -GameRuns 1 -KillClientAfterEpoch
 
+# Recovery matrix: healthy session, peer loss, then a new lobby/session that
+# must reach synchronized gameplay. Produces summary.json for unattended runs.
+.\port\pc\scripts\test-headless-multiplayer.ps1 `
+    -Rom 'C:\path\to\BattleTanxGA.z64' `
+    -ControllerPak 'C:\path\to\BattleTanxGA_pak1.mpk' `
+    -GameRuns 3 -PeerLossRun 2 -ProgressTimeoutSeconds 30
+
 ```
 
 The script builds and runs `btga_pc_native_online_e2e`. That executable uses
@@ -116,8 +123,9 @@ audio for the bounded interval, navigate the retail two-player front end with
 deterministic scripted controller input, and enter a real two-human gameplay epoch,
 require both peers to report an acknowledged snapshot and continued post-rebase
 frames, require every sampled gameplay checksum to match, reject any digest
-mismatch or synchronization timeout, and exit. A local controller-pak file may
-be copied into each isolated profile with `-ControllerPak`; it is never uploaded.
+mismatch or synchronization timeout, and exit. A local controller-pak file is
+required for deterministic native gameplay scenarios and is copied into each
+isolated profile; it is never uploaded.
 The input script includes bounded periodic confirmation pulses so it can advance
 from valid retail front-end states without forcing player count or game state.
 Logs are retained under
@@ -140,6 +148,12 @@ immediately after both peers establish a real gameplay epoch. It requires the
 host to trip its bounded frame/input watchdog, leave the relay wait, finish its
 headless interval, and remove the lobby. This continuously guards against the
 historical “both games froze after one peer disappeared” failure mode.
+`-PeerLossRun N` injects the same fault into one run of a longer sequence. Runs
+after it must create fresh lobbies and synchronize normally, guarding against
+stale process/session state. Stable sessions also have a synchronization-log
+progress watchdog. Results are written to
+`headless-online-evidence/summary.json`; all logs, saves, and temporary ROM
+copies remain untracked build artifacts.
 
 Do not place admission tokens, host secrets, ROMs, or packet captures containing
 private test data in bug reports or commits.
