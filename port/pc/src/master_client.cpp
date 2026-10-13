@@ -176,18 +176,19 @@ JoinRegistration MasterClient::join(std::string_view lobby_id,
     return result;
 }
 
-void MasterClient::heartbeat(std::string_view lobby_id, std::string_view host_secret,
-                             std::uint16_t players, std::string_view state,
-                             std::uint8_t seat_mask) {
+std::string MasterClient::heartbeat(std::string_view lobby_id, std::string_view host_secret,
+                                    std::uint16_t players, std::string_view state,
+                                    std::uint8_t seat_mask) {
     if ((seat_mask & 0xf0U) != 0U) {
         throw std::invalid_argument("seat mask exceeds four-player limit");
     }
     const Json request = {
         {"current_players", players}, {"state", state}, {"seat_mask", seat_mask}
     };
-    (void)parse_response(http_.request(
+    const Json body = parse_response(http_.request(
         "PUT", "/lobbies/" + escape_path(lobby_id) + "/heartbeat",
         request.dump(), host_secret), 200);
+    return bounded_string(body, "relay_token", BTGA_NET_MAX_JOIN_TOKEN_SIZE);
 }
 
 void MasterClient::remove(std::string_view lobby_id,

@@ -40,6 +40,34 @@ long histories. Longer interactive campaign coverage, server-driven
 interpolation, and cross-architecture validation remain required before this
 is exposed as a finished menu option.
 
+### Authority-process recovery (development gate)
+
+Set `BTGA_DEDICATED_STATE_DIR` to a private directory on durable local storage
+before starting `--dedicated-server-public`. The authority then persists:
+
+- the lobby ID, host credential, gameplay session ID and relay endpoint in an
+  owner-only control record (never a short-lived admission token);
+- the canonical 32-byte-per-tick input journal; and
+- two alternating, checksummed portable gameplay checkpoints.
+
+After a process crash, the replacement process authenticates to the existing
+lobby, obtains a fresh signed authority token, reclaims relay slot zero,
+restores the newest complete portable checkpoint, and runs every later journal
+frame through the real translated update. It aborts instead of publishing if
+any replayed digest differs. Torn final journal records and incomplete
+checkpoints are ignored or rejected without inventing state.
+
+The unattended Windows gate has an authority-restart mode:
+
+```powershell
+.\port\pc\scripts\test-dedicated-multiplayer.ps1 `
+    -Rom 'C:\Games\BattleTanxGA.z64' -ReconnectAuthority
+```
+
+This path currently preserves an already-running match. Persisting the
+original tick-zero bootstrap for a brand-new client that first joins after an
+authority restart remains required before this is a finished public feature.
+
 ```powershell
 .\port\pc\scripts\test-dedicated-multiplayer.ps1 `
     -Rom 'C:\Games\BattleTanxGA.z64'
@@ -55,9 +83,9 @@ Use `-JournalMemoryFrames 64 -RequireDiskReplay` with that gate to force replay
 to cross from the disk spool into the bounded in-memory tail. Production keeps
 4,096 frames resident. Each older canonical frame occupies a fixed 32-byte,
 big-endian record (about 3.5 MiB per hour at 30 Hz), eliminating the previous
-nine-hour rejection cliff without memory growth. The ephemeral journal is
-removed on clean shutdown; authority-process crash recovery still requires a
-portable world checkpoint and remains future work.
+nine-hour rejection cliff without memory growth. Without
+`BTGA_DEDICATED_STATE_DIR` the journal remains ephemeral and is removed on
+clean shutdown; setting it enables the durable recovery mode above.
 
 The older peer-hosted flow documented below remains available for comparison,
 but it is not the architecture being taken to production.

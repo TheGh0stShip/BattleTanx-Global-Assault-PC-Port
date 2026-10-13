@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <limits>
+#include <string>
 
 extern "C" {
 #include <btga/btga_gameplay.h>
@@ -13,8 +15,11 @@ namespace btga {
 namespace {
 constexpr std::array<std::uint8_t, 8> journal_magic{
     'B', 'T', 'G', 'A', 'J', 'N', 'L', '1'};
+constexpr std::array<std::uint8_t, 8> snapshot_magic{
+    'B', 'T', 'G', 'A', 'S', 'N', 'P', '1'};
 constexpr std::size_t journal_header_size = 16U;
 constexpr std::size_t journal_record_size = 32U;
+constexpr std::size_t snapshot_header_size = 32U;
 
 void put_u32_be(std::uint8_t* output, std::uint32_t value) {
     output[0] = static_cast<std::uint8_t>(value >> 24U);
@@ -91,9 +96,11 @@ TranslatedAuthority::TranslatedAuthority(
 TranslatedAuthority::~TranslatedAuthority()
 {
     if (journal_file_.is_open()) journal_file_.close();
-    if (!journal_path_.empty()) {
+    if (remove_journal_on_close_ && !journal_path_.empty()) {
         std::error_code error;
         std::filesystem::remove(journal_path_, error);
+        std::filesystem::remove(journal_path_.string() + ".snapshot.0", error);
+        std::filesystem::remove(journal_path_.string() + ".snapshot.1", error);
     }
 }
 
@@ -217,6 +224,12 @@ std::optional<AuthoritativeFrame> TranslatedAuthority::finish_tick(
         snapshot_ = AuthoritativeSnapshot{
             next_tick_, state_digest,
             std::vector<std::uint8_t>{rdram.begin(), rdram.end()}};
+        if (persistent_journal_ && !persist_snapshot(*snapshot_)) {
+            // The prior alternating checkpoint remains valid. The journal is
+            // still canonical and can replay forward from it, so gameplay may
+            // continue while the operator observes the missing new checkpoint.
+            persistent_storage_healthy_ = false;
+        }
     }
     return frame;
 }
@@ -256,6 +269,19 @@ std::size_t TranslatedAuthority::copy_journal_from(
 bool TranslatedAuthority::enable_disk_journal(
     const std::filesystem::path& path, std::size_t memory_frames)
 {
+    return create_disk_journal(path, memory_frames, true);
+}
+
+bool TranslatedAuthority::enable_persistent_journal(
+    const std::filesystem::path& path, std::size_t memory_frames)
+{
+    return create_disk_journal(path, memory_frames, false);
+}
+
+bool TranslatedAuthority::create_disk_journal(
+    const std::filesystem::path& path, std::size_t memory_frames,
+    bool remove_on_close)
+{
     if (disk_journal_enabled_ || next_tick_ != 0U || tick_active_ || path.empty() ||
         memory_frames == 0U) {
         return false;
@@ -268,6 +294,7 @@ bool TranslatedAuthority::enable_disk_journal(
     put_u32_be(header.data() + 8U, 1U);
     put_u32_be(header.data() + 12U, static_cast<std::uint32_t>(journal_record_size));
     journal_file_.write(reinterpret_cast<const char*>(header.data()), header.size());
+    journal_file_.flush();
     if (!journal_file_) {
         journal_file_.close();
         return false;
@@ -275,11 +302,83 @@ bool TranslatedAuthority::enable_disk_journal(
     journal_path_ = path;
     journal_memory_limit_ = memory_frames;
     disk_journal_enabled_ = true;
+    remove_journal_on_close_ = remove_on_close;
+    persistent_journal_ = !remove_on_close;
     return true;
+}
+
+bool TranslatedAuthority::open_persistent_journal(
+    const std::filesystem::path& path, std::size_t memory_frames)
+{
+    if (disk_journal_enabled_ || next_tick_ != 0U || tick_active_ || path.empty() ||
+        memory_frames == 0U) return false;
+    journal_file_.open(path, std::ios::binary | std::ios::in | std::ios::out);
+    if (!journal_file_) return false;
+    std::array<std::uint8_t, journal_header_size> header{};
+    journal_file_.read(reinterpret_cast<char*>(header.data()), header.size());
+    if (!journal_file_ || !std::equal(journal_magic.begin(), journal_magic.end(), header.begin()) ||
+        get_u32_be(header.data() + 8U) != 1U ||
+        get_u32_be(header.data() + 12U) != journal_record_size) {
+        journal_file_.close();
+        return false;
+    }
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    if (error || size < journal_header_size) {
+        journal_file_.close();
+        return false;
+    }
+    const auto payload = size - journal_header_size;
+    const auto complete = payload / journal_record_size;
+    if (complete > (std::numeric_limits<std::uint32_t>::max)()) {
+        journal_file_.close();
+        return false;
+    }
+    if (payload % journal_record_size != 0U) {
+        journal_file_.close();
+        std::filesystem::resize_file(
+            path, journal_header_size + complete * journal_record_size, error);
+        if (error) return false;
+        journal_file_.open(path, std::ios::binary | std::ios::in | std::ios::out);
+        if (!journal_file_) return false;
+    }
+    canonical_journal_.clear();
+    journal_file_.clear();
+    journal_file_.seekg(journal_header_size, std::ios::beg);
+    for (std::uint32_t tick = 0; tick < complete; ++tick) {
+        std::array<std::uint8_t, journal_record_size> record{};
+        journal_file_.read(reinterpret_cast<char*>(record.data()), record.size());
+        if (!journal_file_) {
+            journal_file_.close();
+            return false;
+        }
+        const auto frame = decode_record(record);
+        if (frame.tick != tick || record[29] != 0U || record[30] != 0U || record[31] != 0U) {
+            journal_file_.close();
+            return false;
+        }
+        canonical_journal_.push_back(frame);
+        if (canonical_journal_.size() > memory_frames) canonical_journal_.pop_front();
+    }
+    next_tick_ = static_cast<std::uint32_t>(complete);
+    journal_base_tick_ = next_tick_ - static_cast<std::uint32_t>(canonical_journal_.size());
+    if (!canonical_journal_.empty()) last_inputs_ = canonical_journal_.back().inputs;
+    journal_path_ = path;
+    journal_memory_limit_ = memory_frames;
+    disk_journal_enabled_ = true;
+    remove_journal_on_close_ = false;
+    persistent_journal_ = true;
+    journal_file_.clear();
+    journal_file_.seekp(0, std::ios::end);
+    return load_persistent_snapshot();
 }
 
 std::uint32_t TranslatedAuthority::journal_base_tick() const noexcept {
     return journal_base_tick_;
+}
+
+bool TranslatedAuthority::persistent_storage_healthy() const noexcept {
+    return persistent_storage_healthy_;
 }
 
 bool TranslatedAuthority::append_journal(const AuthoritativeFrame& frame)
@@ -290,6 +389,7 @@ bool TranslatedAuthority::append_journal(const AuthoritativeFrame& frame)
         journal_file_.seekp(0, std::ios::end);
         journal_file_.write(
             reinterpret_cast<const char*>(record.data()), record.size());
+        journal_file_.flush();
         if (!journal_file_) return false;
     }
     canonical_journal_.push_back(frame);
@@ -298,6 +398,69 @@ bool TranslatedAuthority::append_journal(const AuthoritativeFrame& frame)
         ++journal_base_tick_;
     }
     return true;
+}
+
+bool TranslatedAuthority::persist_snapshot(const AuthoritativeSnapshot& snapshot)
+{
+    if (journal_path_.empty() || snapshot.state.empty() ||
+        digest(snapshot.state) != snapshot.state_digest ||
+        snapshot.state.size() > (std::numeric_limits<std::uint32_t>::max)()) return false;
+    const unsigned slot = (snapshot.next_tick / snapshot_interval_) & 1U;
+    const auto destination = std::filesystem::path{
+        journal_path_.string() + ".snapshot." + std::to_string(slot)};
+    const auto temporary = std::filesystem::path{destination.string() + ".tmp"};
+    std::array<std::uint8_t, snapshot_header_size> header{};
+    std::copy(snapshot_magic.begin(), snapshot_magic.end(), header.begin());
+    put_u32_be(header.data() + 8U, 1U);
+    put_u32_be(header.data() + 12U, snapshot.next_tick);
+    put_u64_be(header.data() + 16U, snapshot.state_digest);
+    put_u32_be(header.data() + 24U, static_cast<std::uint32_t>(snapshot.state.size()));
+    {
+        std::ofstream output{temporary, std::ios::binary | std::ios::trunc};
+        if (!output) return false;
+        output.write(reinterpret_cast<const char*>(header.data()), header.size());
+        output.write(reinterpret_cast<const char*>(snapshot.state.data()),
+                     static_cast<std::streamsize>(snapshot.state.size()));
+        output.flush();
+        if (!output) return false;
+    }
+    std::error_code error;
+    std::filesystem::remove(destination, error);
+    error.clear();
+    std::filesystem::rename(temporary, destination, error);
+    if (error) {
+        std::filesystem::remove(temporary, error);
+        return false;
+    }
+    return true;
+}
+
+bool TranslatedAuthority::load_persistent_snapshot()
+{
+    std::optional<AuthoritativeSnapshot> newest;
+    for (unsigned slot = 0; slot < 2U; ++slot) {
+        const auto path = std::filesystem::path{
+            journal_path_.string() + ".snapshot." + std::to_string(slot)};
+        std::ifstream input{path, std::ios::binary};
+        if (!input) continue;
+        std::array<std::uint8_t, snapshot_header_size> header{};
+        input.read(reinterpret_cast<char*>(header.data()), header.size());
+        if (!input || !std::equal(snapshot_magic.begin(), snapshot_magic.end(), header.begin()) ||
+            get_u32_be(header.data() + 8U) != 1U) continue;
+        const auto tick = get_u32_be(header.data() + 12U);
+        const auto state_digest = get_u64_be(header.data() + 16U);
+        const auto state_size = get_u32_be(header.data() + 24U);
+        if (tick > next_tick_ || state_size == 0U || state_size > 16U * 1024U * 1024U) continue;
+        std::vector<std::uint8_t> state(state_size);
+        input.read(reinterpret_cast<char*>(state.data()), state.size());
+        if (!input || input.peek() != std::ifstream::traits_type::eof() ||
+            digest(state) != state_digest) continue;
+        if (!newest || tick > newest->next_tick) {
+            newest = AuthoritativeSnapshot{tick, state_digest, std::move(state)};
+        }
+    }
+    snapshot_ = std::move(newest);
+    return snapshot_.has_value() || next_tick_ == 0U;
 }
 
 bool TranslatedAuthority::read_disk_journal(

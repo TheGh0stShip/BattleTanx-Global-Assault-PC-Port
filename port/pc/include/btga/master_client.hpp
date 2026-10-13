@@ -67,9 +67,11 @@ public:
                           std::string_view region = "eastus");
     JoinRegistration join(std::string_view lobby_id,
                           std::string_view resume_token = {});
-    void heartbeat(std::string_view lobby_id, std::string_view host_secret,
-                   std::uint16_t players, std::string_view state,
-                   std::uint8_t seat_mask);
+    // Returns a freshly signed authority relay token. A restarted dedicated
+    // process uses it to reclaim relay slot zero without creating a new lobby.
+    std::string heartbeat(std::string_view lobby_id, std::string_view host_secret,
+                          std::uint16_t players, std::string_view state,
+                          std::uint8_t seat_mask);
     void remove(std::string_view lobby_id, std::string_view host_secret) noexcept;
 
     [[nodiscard]] const std::string& build() const noexcept { return build_; }

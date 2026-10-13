@@ -1,4 +1,5 @@
 #include "btga/game.hpp"
+#include "btga/authority_lease.hpp"
 #include "btga/gameplay_digest.hpp"
 #include "btga/authoritative_session.hpp"
 #include "btga/authoritative_server.hpp"
@@ -42,6 +43,27 @@ extern "C" {
     } while (false)
 
 int main() {
+    {
+        const auto path = std::filesystem::temp_directory_path() /
+            "btga-authority-lease-test.json";
+        std::filesystem::remove(path);
+        const btga::PersistentAuthorityLease expected{
+            "lobby-id", "host-secret", UINT64_C(0x1020304050607080),
+            {"relay.example", 30420U}};
+        CHECK(btga::save_authority_lease(path, expected));
+        const auto loaded = btga::load_authority_lease(path);
+        CHECK(loaded && loaded->lobby_id == expected.lobby_id);
+        CHECK(loaded->host_secret == expected.host_secret);
+        CHECK(loaded->session_id == expected.session_id);
+        CHECK(loaded->relay.address == expected.relay.address);
+        CHECK(loaded->relay.port == expected.relay.port);
+        {
+            std::ofstream corrupt{path, std::ios::binary | std::ios::trunc};
+            corrupt << "{not-json";
+        }
+        CHECK(!btga::load_authority_lease(path));
+        std::filesystem::remove(path);
+    }
     const auto translated_journal_path =
         std::filesystem::temp_directory_path() / "btga-translated-authority-test.journal";
     std::filesystem::remove(translated_journal_path);
@@ -143,6 +165,65 @@ int main() {
         CHECK(replay[3].tick == 3U && replay[3].inputs[2].buttons == 0x55U);
     }
     CHECK(!std::filesystem::exists(translated_journal_path));
+    {
+        const auto persistent_path = std::filesystem::temp_directory_path() /
+            "btga-translated-authority-persistent-test.journal";
+        std::filesystem::remove(persistent_path);
+        std::filesystem::remove(persistent_path.string() + ".snapshot.0");
+        std::filesystem::remove(persistent_path.string() + ".snapshot.1");
+        {
+            btga::TranslatedAuthority authority{0U, 2U, 0U};
+            CHECK(authority.enable_persistent_journal(persistent_path, 2U));
+            std::array<std::uint8_t, 4> state{};
+            for (std::uint32_t tick = 0; tick < 4U; ++tick) {
+                state[0] = static_cast<std::uint8_t>(tick + 1U);
+                CHECK(authority.begin_tick(tick));
+                CHECK(authority.finish_tick(tick, state));
+            }
+            CHECK(authority.latest_snapshot());
+            CHECK(authority.latest_snapshot()->next_tick == 4U);
+            CHECK(authority.persistent_storage_healthy());
+        }
+        CHECK(std::filesystem::exists(persistent_path));
+        CHECK(std::filesystem::exists(persistent_path.string() + ".snapshot.0"));
+        CHECK(std::filesystem::exists(persistent_path.string() + ".snapshot.1"));
+
+        // A process can die after writing only part of the next record. The
+        // replacement authority discards that tail, validates every complete
+        // canonical record and selects the newest intact checkpoint.
+        {
+            std::ofstream damaged{persistent_path, std::ios::binary | std::ios::app};
+            const std::array<char, 7> partial{'p', 'a', 'r', 't', 'i', 'a', 'l'};
+            damaged.write(partial.data(), partial.size());
+        }
+        {
+            btga::TranslatedAuthority recovered{0U, 2U, 0U};
+            CHECK(recovered.open_persistent_journal(persistent_path, 2U));
+            CHECK(recovered.next_tick() == 4U);
+            CHECK(recovered.journal_base_tick() == 2U);
+            CHECK(recovered.latest_snapshot());
+            CHECK(recovered.latest_snapshot()->next_tick == 4U);
+            CHECK(recovered.latest_snapshot()->state[0] == 4U);
+            std::array<btga::AuthoritativeFrame, 4> replay{};
+            CHECK(recovered.copy_journal_from(0U, replay) == replay.size());
+            for (std::size_t index = 0; index < replay.size(); ++index) {
+                CHECK(replay[index].tick == index);
+            }
+            CHECK(std::filesystem::file_size(persistent_path) == 16U + 4U * 32U);
+
+            // After the caller restores the portable checkpoint and replays
+            // any newer journal frames, canonical publication can continue at
+            // the recovered tick without changing authority ownership.
+            std::array<std::uint8_t, 4> state{5U, 0U, 0U, 0U};
+            CHECK(recovered.begin_tick(4U));
+            CHECK(recovered.finish_tick(4U, state));
+            CHECK(recovered.next_tick() == 5U);
+        }
+        CHECK(std::filesystem::exists(persistent_path));
+        std::filesystem::remove(persistent_path);
+        std::filesystem::remove(persistent_path.string() + ".snapshot.0");
+        std::filesystem::remove(persistent_path.string() + ".snapshot.1");
+    }
     {
         class FourSeatSimulation final : public btga::AuthoritativeSimulation {
         public:
@@ -670,7 +751,8 @@ int main() {
     CHECK(joined.session_id == hosted.session_id && joined.join_token == "join.token");
     CHECK(joined.seat == 2 && joined.resume_token == "resume.token");
     CHECK(http.last_body.find("resume_token") == std::string::npos);
-    master.heartbeat("hosted-1", "host-secret", 2, "playing", 0x05U);
+    CHECK(master.heartbeat("hosted-1", "host-secret", 2, "playing", 0x05U) ==
+          "refreshed.token");
     CHECK(http.last_method == "PUT" && http.last_bearer == "host-secret");
     CHECK(http.last_body.find("\"seat_mask\":5") != std::string::npos);
     try {

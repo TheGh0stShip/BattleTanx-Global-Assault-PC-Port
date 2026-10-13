@@ -6,7 +6,7 @@ include(FetchContent)
 set(BTGA_NET_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(btga_networking
     GIT_REPOSITORY https://github.com/TheGh0stShip/BattleTanx-Global-Assault-Networking.git
-    GIT_TAG aaab81a7e45d3abeba5eb17ed4437455f7fa4cb7)
+    GIT_TAG 6385c9cc343ecd0e0738c51eabfa2605f24d9242)
 FetchContent_MakeAvailable(btga_networking)
 
 FetchContent_Declare(nlohmann_json
@@ -26,6 +26,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(btga_pc_core
+    src/authority_lease.cpp
     src/authoritative_session.cpp
     src/authoritative_server.cpp
     src/authoritative_replica.cpp

@@ -56,7 +56,17 @@ public:
     // enabled before the first gameplay tick.
     [[nodiscard]] bool enable_disk_journal(
         const std::filesystem::path& path, std::size_t memory_frames = 4096U);
+    // Persistent journals survive process shutdown. Two alternating,
+    // checksummed portable-state checkpoints sit beside the input journal so
+    // a replacement authority can restore the newest complete checkpoint and
+    // replay the remaining canonical frames. `open_persistent_journal` never
+    // trusts a partial record or checkpoint.
+    [[nodiscard]] bool enable_persistent_journal(
+        const std::filesystem::path& path, std::size_t memory_frames = 4096U);
+    [[nodiscard]] bool open_persistent_journal(
+        const std::filesystem::path& path, std::size_t memory_frames = 4096U);
     [[nodiscard]] std::uint32_t journal_base_tick() const noexcept;
+    [[nodiscard]] bool persistent_storage_healthy() const noexcept;
 
 private:
     struct TickInputs {
@@ -82,6 +92,11 @@ private:
     [[nodiscard]] bool read_disk_journal(
         std::uint32_t first_tick, std::span<AuthoritativeFrame> destination,
         std::size_t& copied) const;
+    [[nodiscard]] bool create_disk_journal(
+        const std::filesystem::path& path, std::size_t memory_frames,
+        bool remove_on_close);
+    [[nodiscard]] bool persist_snapshot(const AuthoritativeSnapshot& snapshot);
+    [[nodiscard]] bool load_persistent_snapshot();
 
     std::deque<AuthoritativeFrame> canonical_journal_;
     std::filesystem::path journal_path_;
@@ -89,6 +104,9 @@ private:
     std::size_t journal_memory_limit_ = journal_limit;
     std::uint32_t journal_base_tick_ = 0;
     bool disk_journal_enabled_ = false;
+    bool remove_journal_on_close_ = true;
+    bool persistent_journal_ = false;
+    bool persistent_storage_healthy_ = true;
     std::optional<AuthoritativeSnapshot> snapshot_;
     std::uint32_t next_tick_ = 0;
     std::uint32_t active_tick_ = 0;

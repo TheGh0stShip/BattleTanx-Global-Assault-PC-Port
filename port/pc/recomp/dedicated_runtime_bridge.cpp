@@ -12,10 +12,13 @@
 #include <mutex>
 #include <random>
 #include <span>
+#include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include "btga/authoritative_server.hpp"
+#include "btga/authority_lease.hpp"
 #include "btga/gameplay_digest.hpp"
 #include "btga/gameplay_snapshot.hpp"
 #include "btga/master_client.hpp"
@@ -45,6 +48,8 @@ std::array<bool, btga::online_player_limit> client_seen{};
 std::chrono::steady_clock::time_point authority_started;
 bool enabled = false;
 bool gameplay_tick_active = false;
+bool recovery_replay_running = false;
+bool recovery_pending = false;
 thread_local bool dedicated_loop_running = false;
 std::uint32_t active_tick = 0;
 std::uint32_t inactive_tick_probes = 0;
@@ -73,6 +78,15 @@ std::unique_ptr<btga::MasterClient> master;
 std::string public_lobby_id;
 std::string public_host_secret;
 std::chrono::steady_clock::time_point next_heartbeat{};
+
+std::uint64_t canonical_state_digest(std::span<const std::uint8_t> state) {
+    std::uint64_t value = UINT64_C(1469598103934665603);
+    for (const auto byte : state) {
+        value ^= byte;
+        value *= UINT64_C(1099511628211);
+    }
+    return value;
+}
 
 void poll_master_heartbeat() {
     const auto now = std::chrono::steady_clock::now();
@@ -176,20 +190,46 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
             }
             journal_memory_frames = parsed;
         }
-        const auto directory = std::filesystem::temp_directory_path();
-        std::random_device random;
-        for (unsigned attempt = 0; attempt < 16U && !journal_ready; ++attempt) {
-            const auto nonce = (static_cast<std::uint64_t>(random()) << 32U) |
-                static_cast<std::uint64_t>(random());
-            std::array<char, 64> name{};
-            std::snprintf(name.data(), name.size(),
-                          "btga-authority-%016llx-%016llx.journal",
-                          static_cast<unsigned long long>(requested_session),
-                          static_cast<unsigned long long>(nonce));
-            const auto path = directory / name.data();
-            if (!std::filesystem::exists(path)) {
-                journal_ready = authority.enable_disk_journal(
-                    path, journal_memory_frames);
+        if (const char* configured_directory = std::getenv("BTGA_DEDICATED_STATE_DIR");
+            configured_directory != nullptr && *configured_directory != '\0') {
+            const std::filesystem::path directory{configured_directory};
+            std::error_code filesystem_error;
+            std::filesystem::create_directories(directory, filesystem_error);
+            if (filesystem_error) {
+                error = "could not create BTGA_DEDICATED_STATE_DIR";
+            } else {
+                std::array<char, 64> name{};
+                std::snprintf(name.data(), name.size(), "authority-%016llx.journal",
+                              static_cast<unsigned long long>(requested_session));
+                const auto path = directory / name.data();
+                if (std::filesystem::exists(path)) {
+                    journal_ready = authority.open_persistent_journal(
+                        path, journal_memory_frames);
+                    recovery_pending = journal_ready && authority.next_tick() != 0U;
+                    if (!journal_ready) {
+                        error = "persistent authority journal or checkpoint is invalid";
+                    }
+                } else {
+                    journal_ready = authority.enable_persistent_journal(
+                        path, journal_memory_frames);
+                }
+            }
+        } else {
+            const auto directory = std::filesystem::temp_directory_path();
+            std::random_device random;
+            for (unsigned attempt = 0; attempt < 16U && !journal_ready; ++attempt) {
+                const auto nonce = (static_cast<std::uint64_t>(random()) << 32U) |
+                    static_cast<std::uint64_t>(random());
+                std::array<char, 64> name{};
+                std::snprintf(name.data(), name.size(),
+                              "btga-authority-%016llx-%016llx.journal",
+                              static_cast<unsigned long long>(requested_session),
+                              static_cast<unsigned long long>(nonce));
+                const auto path = directory / name.data();
+                if (!std::filesystem::exists(path)) {
+                    journal_ready = authority.enable_disk_journal(
+                        path, journal_memory_frames);
+                }
             }
         }
     } catch (const std::exception& exception) {
@@ -201,7 +241,8 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
         if (error.empty()) error = "could not create canonical disk journal";
         return false;
     }
-    authority_started = std::chrono::steady_clock::now();
+    authority_started = std::chrono::steady_clock::now() -
+        std::chrono::milliseconds{static_cast<std::int64_t>(authority.next_tick()) * 33};
     client_seen.fill(false);
     snapshot_subscribers = 0U;
     snapshot_requests = 0U;
@@ -351,11 +392,63 @@ bool btga_dedicated_enable_public(std::string_view name, std::string& error) {
         auto http = btga::make_platform_http_client(
             "https://btga.thegh0stship.com/api/v1");
         auto client = std::make_unique<btga::MasterClient>(*http);
+        std::optional<std::filesystem::path> lease_path;
+        if (const char* state_directory = std::getenv("BTGA_DEDICATED_STATE_DIR");
+            state_directory != nullptr && *state_directory != '\0') {
+            const std::filesystem::path directory{state_directory};
+            std::error_code create_error;
+            std::filesystem::create_directories(directory, create_error);
+            if (create_error) {
+                error = "could not create BTGA_DEDICATED_STATE_DIR";
+                return false;
+            }
+            lease_path = directory / "authority-control.json";
+        }
+        if (lease_path && std::filesystem::exists(*lease_path)) {
+            const auto lease = btga::load_authority_lease(*lease_path);
+            if (!lease) {
+                error = "persistent authority control record is invalid";
+                return false;
+            }
+            const std::string relay_token = client->heartbeat(
+                lease->lobby_id, lease->host_secret, 1U, "playing", 0U);
+            {
+                const std::lock_guard lock{authority_mutex};
+                if (!enable_relay(lease->session_id, lease->relay, relay_token, error)) {
+                    return false;
+                }
+                const std::lock_guard master_lock{master_mutex};
+                public_lobby_id = lease->lobby_id;
+                public_host_secret = lease->host_secret;
+                next_heartbeat = std::chrono::steady_clock::now();
+                master_http = std::move(http);
+                master = std::move(client);
+            }
+            std::printf("ONLINE_LOBBY_ID=%s\n", public_lobby_id.c_str());
+            std::fputs("BTGA_AUTHORITY reclaimed persistent lobby authority\n", stderr);
+            std::fflush(stdout);
+            std::fflush(stderr);
+            return true;
+        }
         const btga::HostRegistration registration = client->host(name, 4);
+        if (lease_path && !btga::save_authority_lease(*lease_path, {
+                registration.lobby.id, registration.host_secret,
+                registration.session_id, registration.relay})) {
+            client->remove(registration.lobby.id, registration.host_secret);
+            error = "could not persist authority control record";
+            return false;
+        }
         {
             const std::lock_guard lock{authority_mutex};
             if (!enable_relay(registration.session_id, registration.relay,
-                              registration.relay_token, error)) return false;
+                              registration.relay_token, error)) {
+                client->remove(registration.lobby.id, registration.host_secret);
+                if (lease_path) {
+                    std::error_code remove_error;
+                    std::filesystem::remove(*lease_path, remove_error);
+                }
+                return false;
+            }
             {
                 const std::lock_guard master_lock{master_mutex};
                 public_lobby_id = registration.lobby.id;
@@ -526,6 +619,7 @@ bool btga_dedicated_controller_input(
 extern "C" void btga_dedicated_tick_begin(
     std::uint8_t* rdram, recomp_context*)
 {
+    if (recovery_replay_running || recovery_pending) return;
     // During retail initialization this hook may be the only callback that is
     // running regularly. Keep relay admission and readiness moving here too.
     btga_dedicated_network_poll();
@@ -620,6 +714,51 @@ extern "C" void btga_dedicated_run_loop(
     // second infinite server loop on the same translated thread.
     if (dedicated_loop_running) return;
     dedicated_loop_running = true;
+
+    if (recovery_pending) {
+        std::optional<btga::AuthoritativeSnapshot> checkpoint;
+        std::vector<btga::AuthoritativeFrame> replay;
+        {
+            const std::lock_guard lock{authority_mutex};
+            if (authority.latest_snapshot()) checkpoint = *authority.latest_snapshot();
+            if (!checkpoint || checkpoint->next_tick > authority.next_tick()) {
+                std::fputs("BTGA_AUTHORITY persistent checkpoint unavailable\n", stderr);
+                std::abort();
+            }
+            replay.resize(authority.next_tick() - checkpoint->next_tick);
+            if (!replay.empty() && authority.copy_journal_from(
+                    checkpoint->next_tick, replay) != replay.size()) {
+                std::fputs("BTGA_AUTHORITY persistent replay gap\n", stderr);
+                std::abort();
+            }
+        }
+        if (!btga::restore_gameplay_snapshot(
+                {rdram, rdram_size}, checkpoint->state)) {
+            std::fputs("BTGA_AUTHORITY persistent checkpoint restore failed\n", stderr);
+            std::abort();
+        }
+        recovery_replay_running = true;
+        for (const auto& frame : replay) {
+            active_inputs = frame.inputs;
+            advance_retail_mode_counters(rdram);
+            func_80079FF0(rdram, context);
+            func_8009C524(rdram, context);
+            std::array<std::uint8_t, btga::gameplay_snapshot_size> state{};
+            if (!btga::capture_gameplay_snapshot({rdram, rdram_size}, state) ||
+                canonical_state_digest(state) != frame.state_digest) {
+                std::fprintf(stderr,
+                             "BTGA_AUTHORITY persistent replay diverged at tick=%u\n",
+                             frame.tick);
+                std::abort();
+            }
+        }
+        recovery_replay_running = false;
+        recovery_pending = false;
+        std::fprintf(stderr,
+                     "BTGA_AUTHORITY recovered checkpoint=%u journal_head=%u\n",
+                     checkpoint->next_tick, authority.next_tick());
+        std::fflush(stderr);
+    }
 
     // The retail top-level loop is coupled to graphics-task completion and VI
     // pacing. A server has neither. Own the server clock here and invoke the
@@ -744,6 +883,7 @@ extern "C" void btga_dedicated_run_loop(
 extern "C" void btga_dedicated_tick_end(
     std::uint8_t* rdram, recomp_context*)
 {
+    if (recovery_replay_running) return;
     const std::lock_guard lock{authority_mutex};
     if (!enabled || !gameplay_tick_active) return;
     std::array<std::uint8_t, btga::gameplay_snapshot_size> canonical_state{};
@@ -758,6 +898,10 @@ extern "C" void btga_dedicated_tick_end(
     if (!frame) {
         std::fputs("Dedicated authority rejected translated tick completion\n", stderr);
         return;
+    }
+    if (!authority.persistent_storage_healthy()) {
+        std::fputs("BTGA_AUTHORITY persistent checkpoint storage failed\n", stderr);
+        std::abort();
     }
     if (multiplayer && multiplayer->state() == btga::OnlineState::Lobby &&
         !encode_and_send_frame(*frame)) {
