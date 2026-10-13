@@ -7,8 +7,10 @@
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <span>
 #include <string_view>
 #include <thread>
@@ -54,6 +56,7 @@ std::uint32_t snapshot_id = 0;
 std::uint8_t snapshot_subscribers = 0;
 std::uint8_t snapshot_requests = 0;
 std::uint8_t bootstrap_requests = 0;
+std::uint8_t bootstrap_pending = 0;
 std::uint8_t replay_requests = 0;
 std::uint8_t snapshot_cursor = 0;
 std::array<std::chrono::steady_clock::time_point, btga::online_player_limit>
@@ -155,11 +158,55 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
         error = "dedicated authority relay binding timed out";
         return false;
     }
+    bool journal_ready = false;
+    try {
+        std::size_t journal_memory_frames = 4096U;
+        if (const char* configured = std::getenv(
+                "BTGA_DEDICATED_JOURNAL_MEMORY_FRAMES")) {
+            const std::string_view text{configured};
+            std::size_t parsed = 0U;
+            const auto result = std::from_chars(
+                text.data(), text.data() + text.size(), parsed);
+            if (result.ec != std::errc{} || result.ptr != text.data() + text.size() ||
+                parsed < 32U || parsed > 1'000'000U) {
+                error = "BTGA_DEDICATED_JOURNAL_MEMORY_FRAMES must be 32..1000000";
+                multiplayer.reset();
+                udp.reset();
+                return false;
+            }
+            journal_memory_frames = parsed;
+        }
+        const auto directory = std::filesystem::temp_directory_path();
+        std::random_device random;
+        for (unsigned attempt = 0; attempt < 16U && !journal_ready; ++attempt) {
+            const auto nonce = (static_cast<std::uint64_t>(random()) << 32U) |
+                static_cast<std::uint64_t>(random());
+            std::array<char, 64> name{};
+            std::snprintf(name.data(), name.size(),
+                          "btga-authority-%016llx-%016llx.journal",
+                          static_cast<unsigned long long>(requested_session),
+                          static_cast<unsigned long long>(nonce));
+            const auto path = directory / name.data();
+            if (!std::filesystem::exists(path)) {
+                journal_ready = authority.enable_disk_journal(
+                    path, journal_memory_frames);
+            }
+        }
+    } catch (const std::exception& exception) {
+        error = std::string{"could not create canonical journal: "} + exception.what();
+    }
+    if (!journal_ready) {
+        multiplayer.reset();
+        udp.reset();
+        if (error.empty()) error = "could not create canonical disk journal";
+        return false;
+    }
     authority_started = std::chrono::steady_clock::now();
     client_seen.fill(false);
     snapshot_subscribers = 0U;
     snapshot_requests = 0U;
     bootstrap_requests = 0U;
+    bootstrap_pending = 0U;
     replay_requests = 0U;
     snapshot_cursor = 0U;
     snapshot_last_sent.fill({});
@@ -377,16 +424,22 @@ void btga_dedicated_network_poll()
                 const bool retry_due = snapshot_last_sent[seat] ==
                         std::chrono::steady_clock::time_point{} ||
                     now - snapshot_last_sent[seat] >= retry_delay;
-                if (first_subscription || (bootstrap_missing && retry_due)) {
-                    snapshot_requests |= bit;
-                } else if (!bootstrap_missing) {
-                    snapshot_requests &= static_cast<std::uint8_t>(~bit);
-                }
                 if (bootstrap_missing) {
+                    bootstrap_pending |= bit;
                     bootstrap_requests |= bit;
                     replay_requests &= static_cast<std::uint8_t>(~bit);
+                    if (first_subscription || retry_due) snapshot_requests |= bit;
+                } else if ((bootstrap_pending & bit) != 0U &&
+                           incoming.acknowledgment != 1U) {
+                    // A resumed relay seat can still have a delayed PING from
+                    // the dead endpoint in flight. Until the replacement
+                    // process confirms tick zero, ignore its predecessor's
+                    // higher acknowledgment rather than sending a live
+                    // snapshot into an unbootstrapped runtime.
                 } else {
+                    bootstrap_pending &= static_cast<std::uint8_t>(~bit);
                     bootstrap_requests &= static_cast<std::uint8_t>(~bit);
+                    snapshot_requests &= static_cast<std::uint8_t>(~bit);
                     // acknowledgment is encoded as next_tick + 1 so zero can
                     // unambiguously mean "no tick-zero bootstrap installed".
                     replay_next_tick[seat] = incoming.acknowledgment - 1U;
@@ -424,6 +477,12 @@ void btga_dedicated_network_poll()
         if ((replay_requests & bit) == 0U) continue;
         replay_requests &= static_cast<std::uint8_t>(~bit);
         std::array<btga::AuthoritativeFrame, replay_window> frames{};
+        if (replay_next_tick[seat] < authority.journal_base_tick()) {
+            std::fprintf(stderr,
+                         "BTGA_AUTHORITY disk journal replay seat=%u tick=%u base=%u\n",
+                         static_cast<unsigned>(seat), replay_next_tick[seat],
+                         authority.journal_base_tick());
+        }
         const std::size_t count = authority.copy_journal_from(
             replay_next_tick[seat], frames);
         for (std::size_t index = 0; index < count; ++index) {
@@ -444,6 +503,7 @@ void btga_dedicated_network_poll()
             snapshot_subscribers &= static_cast<std::uint8_t>(~bit);
             snapshot_requests &= static_cast<std::uint8_t>(~bit);
             bootstrap_requests &= static_cast<std::uint8_t>(~bit);
+            bootstrap_pending &= static_cast<std::uint8_t>(~bit);
             replay_requests &= static_cast<std::uint8_t>(~bit);
             (void)authority.set_connected(seat, false);
         }
@@ -644,7 +704,7 @@ extern "C" void btga_dedicated_run_loop(
                 std::array<std::uint8_t, btga::gameplay_snapshot_size> state{};
                 const auto bit = static_cast<std::uint8_t>(1U << target);
                 const bool bootstrap = initial_snapshot_available &&
-                    (bootstrap_requests & bit) != 0U;
+                    (bootstrap_pending & bit) != 0U;
                 const std::uint32_t snapshot_tick = bootstrap ? 0U : next_tick;
                 bool captured = bootstrap;
                 if (bootstrap) {

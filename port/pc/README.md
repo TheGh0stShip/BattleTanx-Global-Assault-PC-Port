@@ -322,6 +322,10 @@ Add `-ReconnectClient -ReconnectCycles 2` to kill and cold-restart the
 translated client twice. Every replacement process must reclaim the same seat,
 rotate its resume credential, replay the canonical journal, and reconverge at a
 positive authority tick.
+Add `-JournalMemoryFrames 64 -RequireDiskReplay` to force that test across the
+disk-journal boundary. Production retains 4,096 recent frames in memory and
+spools older canonical input frames as fixed-width, endian-stable records in a
+per-process temporary file, which is removed on clean authority shutdown.
 
 For a visible client, leave the authority running, copy the printed lobby ID,
 and launch `BattleTanxGA.exe --dedicated-join LOBBY_ID BattleTanxGA.z64`.

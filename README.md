@@ -295,7 +295,8 @@ BattleTanxGA.exe --dedicated-join LOBBY_ID BattleTanxGA.z64
 # canonical journal replay, and reconvergence after each restart
 ./port/pc/scripts/test-dedicated-multiplayer.ps1 `
   -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows `
-  -ReconnectClient -ReconnectCycles 2
+  -ReconnectClient -ReconnectCycles 2 `
+  -JournalMemoryFrames 64 -RequireDiskReplay
 
 ```
 

@@ -51,6 +51,13 @@ For repeatable recovery coverage, add
 `-ReconnectClient -ReconnectCycles 2`. The gate cold-restarts the translated
 client twice and requires seat reclaim, resume-token rotation, bounded journal
 replay, and a positive confirmed authority tick after every restart.
+Use `-JournalMemoryFrames 64 -RequireDiskReplay` with that gate to force replay
+to cross from the disk spool into the bounded in-memory tail. Production keeps
+4,096 frames resident. Each older canonical frame occupies a fixed 32-byte,
+big-endian record (about 3.5 MiB per hour at 30 Hz), eliminating the previous
+nine-hour rejection cliff without memory growth. The ephemeral journal is
+removed on clean shutdown; authority-process crash recovery still requires a
+portable world checkpoint and remains future work.
 
 The older peer-hosted flow documented below remains available for comparison,
 but it is not the architecture being taken to production.

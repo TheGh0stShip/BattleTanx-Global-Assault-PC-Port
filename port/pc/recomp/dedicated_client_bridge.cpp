@@ -196,6 +196,12 @@ extern "C" void btga_dedicated_client_tick_begin(
             pending_snapshot->tick < expected_tick) {
             pending_snapshot.reset();
         }
+        if (pending_snapshot && !bootstrap_complete && pending_snapshot->tick != 0U) {
+            std::fprintf(stderr,
+                         "BTGA_CLIENT rejected pre-bootstrap live snapshot tick=%u\n",
+                         pending_snapshot->tick);
+            pending_snapshot.reset();
+        }
         if (pending_snapshot &&
             (!bootstrap_complete || pending_snapshot->tick >= expected_tick) &&
             pending_snapshot->state.size() == btga::gameplay_snapshot_size) {

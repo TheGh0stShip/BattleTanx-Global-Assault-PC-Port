@@ -3,6 +3,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <span>
 #include <vector>
@@ -19,6 +22,7 @@ public:
     explicit TranslatedAuthority(std::uint8_t occupied_mask = 0x0fU,
                                  std::uint32_t snapshot_interval = 30U,
                                  std::uint32_t jitter_buffer_ticks = 3U);
+    ~TranslatedAuthority();
 
     [[nodiscard]] bool submit(std::uint8_t seat, std::uint32_t tick,
                               OnlineControllerInput input);
@@ -47,6 +51,12 @@ public:
     [[nodiscard]] std::size_t journal_size() const noexcept;
     [[nodiscard]] std::size_t copy_journal_from(
         std::uint32_t first_tick, std::span<AuthoritativeFrame> destination) const;
+    // Spool the complete canonical input history to an endian-stable file
+    // while retaining only a bounded replay tail in memory. This must be
+    // enabled before the first gameplay tick.
+    [[nodiscard]] bool enable_disk_journal(
+        const std::filesystem::path& path, std::size_t memory_frames = 4096U);
+    [[nodiscard]] std::uint32_t journal_base_tick() const noexcept;
 
 private:
     struct TickInputs {
@@ -56,9 +66,9 @@ private:
     };
 
     static constexpr std::size_t history_size = 256;
-    // A little over nine hours at 30 Hz. This is intentionally bounded so an
-    // abandoned authority cannot grow without limit. A future portable world
-    // checkpoint will allow pruning older entries without losing reconnect.
+    // In-memory-only authorities retain the historical safety bound. Runtime
+    // authorities enable the disk journal, removing this match-duration cliff
+    // without allowing resident memory to grow with match age.
     static constexpr std::size_t journal_limit = 1'000'000;
     [[nodiscard]] static std::uint64_t digest(
         std::span<const std::uint8_t> bytes) noexcept;
@@ -68,7 +78,17 @@ private:
     std::array<OnlineControllerInput, online_player_limit> last_inputs_{};
     std::array<std::uint32_t, online_player_limit> latest_sequences_{};
     std::array<bool, online_player_limit> have_sequence_{};
-    std::vector<AuthoritativeFrame> canonical_journal_;
+    [[nodiscard]] bool append_journal(const AuthoritativeFrame& frame);
+    [[nodiscard]] bool read_disk_journal(
+        std::uint32_t first_tick, std::span<AuthoritativeFrame> destination,
+        std::size_t& copied) const;
+
+    std::deque<AuthoritativeFrame> canonical_journal_;
+    std::filesystem::path journal_path_;
+    mutable std::fstream journal_file_;
+    std::size_t journal_memory_limit_ = journal_limit;
+    std::uint32_t journal_base_tick_ = 0;
+    bool disk_journal_enabled_ = false;
     std::optional<AuthoritativeSnapshot> snapshot_;
     std::uint32_t next_tick_ = 0;
     std::uint32_t active_tick_ = 0;

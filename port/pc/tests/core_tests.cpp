@@ -42,11 +42,16 @@ extern "C" {
     } while (false)
 
 int main() {
+    const auto translated_journal_path =
+        std::filesystem::temp_directory_path() / "btga-translated-authority-test.journal";
+    std::filesystem::remove(translated_journal_path);
     {
         // This is the execution model used by the translated dedicated
         // runtime: the guest tick owns the call stack, while the authority
         // freezes inputs at entry and captures canonical RDRAM at exit.
         btga::TranslatedAuthority authority{0x0fU, 2U, 3U};
+        CHECK(authority.enable_disk_journal(translated_journal_path, 2U));
+        CHECK(!authority.enable_disk_journal(translated_journal_path, 2U));
         std::vector<std::uint8_t> rdram(8U * 1024U * 1024U, 0U);
         for (std::uint8_t seat = 0; seat < 4; ++seat) {
             BtgaNetInputBatch batch{};
@@ -128,7 +133,16 @@ int main() {
         CHECK(authority.begin_tick(6U));
         CHECK(authority.inputs()[2].buttons == 0x55U);
         CHECK(authority.finish_tick(3U, rdram));
+        CHECK(authority.journal_size() == 4U);
+        CHECK(authority.journal_base_tick() == 2U);
+        CHECK(authority.copy_journal_from(0U, replay) == 4U);
+        CHECK(std::filesystem::file_size(translated_journal_path) == 16U + 4U * 32U);
+        CHECK(replay[0].tick == 0U && replay[0].inputs[3].buttons == 4U);
+        CHECK(replay[1].tick == 1U && replay[1].inputs[0].buttons == 9U);
+        CHECK(replay[2].tick == 2U && replay[2].inputs[2].buttons == 0U);
+        CHECK(replay[3].tick == 3U && replay[3].inputs[2].buttons == 0x55U);
     }
+    CHECK(!std::filesystem::exists(translated_journal_path));
     {
         class FourSeatSimulation final : public btga::AuthoritativeSimulation {
         public:

@@ -10,7 +10,10 @@ param(
     [ValidateRange(2, 30)]
     [int] $ReconnectAfterSeconds = 4,
     [ValidateRange(1, 3)]
-    [int] $ReconnectCycles = 1
+    [int] $ReconnectCycles = 1,
+    [ValidateRange(32, 1000000)]
+    [int] $JournalMemoryFrames = 4096,
+    [switch] $RequireDiskReplay
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,7 +39,9 @@ $clientOut = Join-Path $evidence "client.stdout.log"
 $clientErr = Join-Path $evidence "client.stderr.log"
 $resumeCredential = Join-Path $evidence "client-resume.credential"
 $previousResumeFile = $env:BTGA_DEDICATED_RESUME_FILE
+$previousJournalMemoryFrames = $env:BTGA_DEDICATED_JOURNAL_MEMORY_FRAMES
 $env:BTGA_DEDICATED_RESUME_FILE = $resumeCredential
+$env:BTGA_DEDICATED_JOURNAL_MEMORY_FRAMES = [string]$JournalMemoryFrames
 $processes = [System.Collections.Generic.List[Diagnostics.Process]]::new()
 $peers = [System.Collections.Generic.List[Diagnostics.Process]]::new()
 try {
@@ -200,6 +205,12 @@ try {
         -not [regex]::IsMatch($clientLog, "BTGA_CLIENT confirmed snapshot tick=[1-9][0-9]*")) {
         throw "Resumed client did not catch up and reconverge with the authority. See $clientErr."
     }
+    if ($RequireDiskReplay) {
+        $authorityLog = [string](Get-Content $authorityErr -Raw)
+        if (-not $authorityLog.Contains("BTGA_AUTHORITY disk journal replay")) {
+            throw "Authority did not replay canonical history from disk. See $authorityErr."
+        }
+    }
     $clientKind = if ($RenderedClient) { "rendered" } else { "headless" }
     Write-Host "Dedicated 4-player $clientKind test passed. Lobby: $lobby"
     Write-Host "Evidence: $evidence"
@@ -211,4 +222,5 @@ try {
         }
     }
     $env:BTGA_DEDICATED_RESUME_FILE = $previousResumeFile
+    $env:BTGA_DEDICATED_JOURNAL_MEMORY_FRAMES = $previousJournalMemoryFrames
 }

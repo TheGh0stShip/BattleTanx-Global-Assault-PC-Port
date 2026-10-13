@@ -1,6 +1,8 @@
 #include "btga/translated_authority.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstring>
 
 extern "C" {
 #include <btga/btga_gameplay.h>
@@ -8,6 +10,72 @@ extern "C" {
 }
 
 namespace btga {
+namespace {
+constexpr std::array<std::uint8_t, 8> journal_magic{
+    'B', 'T', 'G', 'A', 'J', 'N', 'L', '1'};
+constexpr std::size_t journal_header_size = 16U;
+constexpr std::size_t journal_record_size = 32U;
+
+void put_u32_be(std::uint8_t* output, std::uint32_t value) {
+    output[0] = static_cast<std::uint8_t>(value >> 24U);
+    output[1] = static_cast<std::uint8_t>(value >> 16U);
+    output[2] = static_cast<std::uint8_t>(value >> 8U);
+    output[3] = static_cast<std::uint8_t>(value);
+}
+
+void put_u64_be(std::uint8_t* output, std::uint64_t value) {
+    put_u32_be(output, static_cast<std::uint32_t>(value >> 32U));
+    put_u32_be(output + 4U, static_cast<std::uint32_t>(value));
+}
+
+std::uint32_t get_u32_be(const std::uint8_t* input) {
+    return (static_cast<std::uint32_t>(input[0]) << 24U) |
+           (static_cast<std::uint32_t>(input[1]) << 16U) |
+           (static_cast<std::uint32_t>(input[2]) << 8U) |
+           static_cast<std::uint32_t>(input[3]);
+}
+
+std::uint64_t get_u64_be(const std::uint8_t* input) {
+    return (static_cast<std::uint64_t>(get_u32_be(input)) << 32U) |
+           get_u32_be(input + 4U);
+}
+
+std::array<std::uint8_t, journal_record_size> encode_record(
+    const AuthoritativeFrame& frame) {
+    std::array<std::uint8_t, journal_record_size> record{};
+    put_u32_be(record.data(), frame.tick);
+    std::size_t cursor = 4U;
+    for (const auto& input : frame.inputs) {
+        record[cursor++] = static_cast<std::uint8_t>(input.buttons >> 8U);
+        record[cursor++] = static_cast<std::uint8_t>(input.buttons);
+        record[cursor++] = static_cast<std::uint8_t>(input.stick_x);
+        record[cursor++] = static_cast<std::uint8_t>(input.stick_y);
+    }
+    put_u64_be(record.data() + cursor, frame.state_digest);
+    cursor += 8U;
+    record[cursor] = frame.received_mask;
+    return record;
+}
+
+AuthoritativeFrame decode_record(
+    const std::array<std::uint8_t, journal_record_size>& record) {
+    AuthoritativeFrame frame{};
+    frame.tick = get_u32_be(record.data());
+    std::size_t cursor = 4U;
+    for (auto& input : frame.inputs) {
+        input.buttons = static_cast<std::uint16_t>(
+            (static_cast<std::uint16_t>(record[cursor]) << 8U) |
+            record[cursor + 1U]);
+        input.stick_x = static_cast<std::int8_t>(record[cursor + 2U]);
+        input.stick_y = static_cast<std::int8_t>(record[cursor + 3U]);
+        cursor += 4U;
+    }
+    frame.state_digest = get_u64_be(record.data() + cursor);
+    cursor += 8U;
+    frame.received_mask = record[cursor];
+    return frame;
+}
+} // namespace
 
 TranslatedAuthority::TranslatedAuthority(
     std::uint8_t occupied_mask, std::uint32_t snapshot_interval,
@@ -18,6 +86,15 @@ TranslatedAuthority::TranslatedAuthority(
       connected_mask_(occupied_mask_)
 {
     if (snapshot_interval_ == 0U) snapshot_interval_ = 1U;
+}
+
+TranslatedAuthority::~TranslatedAuthority()
+{
+    if (journal_file_.is_open()) journal_file_.close();
+    if (!journal_path_.empty()) {
+        std::error_code error;
+        std::filesystem::remove(journal_path_, error);
+    }
 }
 
 bool TranslatedAuthority::submit(
@@ -127,13 +204,12 @@ std::optional<AuthoritativeFrame> TranslatedAuthority::finish_tick(
     std::uint32_t tick, std::span<const std::uint8_t> rdram)
 {
     if (!tick_active_ || tick != active_tick_ || rdram.empty() ||
-        canonical_journal_.size() >= journal_limit) return std::nullopt;
+        (!disk_journal_enabled_ && canonical_journal_.size() >= journal_limit)) {
+        return std::nullopt;
+    }
     const std::uint64_t state_digest = digest(rdram);
     AuthoritativeFrame frame{tick, current_inputs_, state_digest, received_mask_};
-    // next_tick_ begins at zero and never skips, so the vector index is the
-    // canonical tick. This makes bounded replay reads allocation-free.
-    if (canonical_journal_.size() != tick) return std::nullopt;
-    canonical_journal_.push_back(frame);
+    if (tick != next_tick_ || !append_journal(frame)) return std::nullopt;
     ++next_tick_;
     tick_active_ = false;
     history_[tick % history_size] = {};
@@ -153,18 +229,99 @@ std::uint8_t TranslatedAuthority::occupied_mask() const noexcept { return occupi
 std::uint8_t TranslatedAuthority::connected_mask() const noexcept { return connected_mask_; }
 
 std::size_t TranslatedAuthority::journal_size() const noexcept {
-    return canonical_journal_.size();
+    return next_tick_;
 }
 
 std::size_t TranslatedAuthority::copy_journal_from(
     std::uint32_t first_tick, std::span<AuthoritativeFrame> destination) const
 {
-    const std::size_t first = first_tick;
-    if (first >= canonical_journal_.size() || destination.empty()) return 0U;
-    const std::size_t count = (std::min)(
-        destination.size(), canonical_journal_.size() - first);
-    std::copy_n(canonical_journal_.begin() + first, count, destination.begin());
-    return count;
+    if (first_tick >= next_tick_ || destination.empty()) return 0U;
+    std::size_t copied = 0U;
+    if (first_tick < journal_base_tick_ &&
+        !read_disk_journal(first_tick, destination, copied)) return 0U;
+    const std::uint32_t next = first_tick + static_cast<std::uint32_t>(copied);
+    if (copied < destination.size() && next >= journal_base_tick_) {
+        const std::size_t offset = static_cast<std::size_t>(next - journal_base_tick_);
+        if (offset < canonical_journal_.size()) {
+            const std::size_t count = (std::min)(
+                destination.size() - copied, canonical_journal_.size() - offset);
+            std::copy_n(canonical_journal_.begin() + offset, count,
+                        destination.begin() + copied);
+            copied += count;
+        }
+    }
+    return copied;
+}
+
+bool TranslatedAuthority::enable_disk_journal(
+    const std::filesystem::path& path, std::size_t memory_frames)
+{
+    if (disk_journal_enabled_ || next_tick_ != 0U || tick_active_ || path.empty() ||
+        memory_frames == 0U) {
+        return false;
+    }
+    journal_file_.open(path, std::ios::binary | std::ios::in | std::ios::out |
+        std::ios::trunc);
+    if (!journal_file_) return false;
+    std::array<std::uint8_t, journal_header_size> header{};
+    std::copy(journal_magic.begin(), journal_magic.end(), header.begin());
+    put_u32_be(header.data() + 8U, 1U);
+    put_u32_be(header.data() + 12U, static_cast<std::uint32_t>(journal_record_size));
+    journal_file_.write(reinterpret_cast<const char*>(header.data()), header.size());
+    if (!journal_file_) {
+        journal_file_.close();
+        return false;
+    }
+    journal_path_ = path;
+    journal_memory_limit_ = memory_frames;
+    disk_journal_enabled_ = true;
+    return true;
+}
+
+std::uint32_t TranslatedAuthority::journal_base_tick() const noexcept {
+    return journal_base_tick_;
+}
+
+bool TranslatedAuthority::append_journal(const AuthoritativeFrame& frame)
+{
+    if (disk_journal_enabled_) {
+        const auto record = encode_record(frame);
+        journal_file_.clear();
+        journal_file_.seekp(0, std::ios::end);
+        journal_file_.write(
+            reinterpret_cast<const char*>(record.data()), record.size());
+        if (!journal_file_) return false;
+    }
+    canonical_journal_.push_back(frame);
+    if (canonical_journal_.size() > journal_memory_limit_) {
+        canonical_journal_.pop_front();
+        ++journal_base_tick_;
+    }
+    return true;
+}
+
+bool TranslatedAuthority::read_disk_journal(
+    std::uint32_t first_tick, std::span<AuthoritativeFrame> destination,
+    std::size_t& copied) const
+{
+    copied = 0U;
+    if (!disk_journal_enabled_ || first_tick >= journal_base_tick_) return false;
+    journal_file_.flush();
+    journal_file_.clear();
+    const auto offset = static_cast<std::streamoff>(journal_header_size) +
+        static_cast<std::streamoff>(first_tick) *
+            static_cast<std::streamoff>(journal_record_size);
+    journal_file_.seekg(offset, std::ios::beg);
+    const std::size_t wanted = (std::min)(
+        destination.size(), static_cast<std::size_t>(journal_base_tick_ - first_tick));
+    for (; copied < wanted; ++copied) {
+        std::array<std::uint8_t, journal_record_size> record{};
+        journal_file_.read(reinterpret_cast<char*>(record.data()), record.size());
+        if (!journal_file_) return false;
+        destination[copied] = decode_record(record);
+        if (destination[copied].tick != first_tick + copied) return false;
+    }
+    return true;
 }
 
 std::uint64_t TranslatedAuthority::digest(
