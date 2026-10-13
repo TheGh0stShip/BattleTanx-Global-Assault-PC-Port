@@ -34,7 +34,9 @@ jobs:
             'port/pc/setup-windows.ps1',
             'port/pc/build-windows.ps1',
             'port/pc/package-windows.ps1',
-            'port/pc/scripts/test-headless-multiplayer.ps1'
+            'port/pc/scripts/test-headless-multiplayer.ps1',
+            'port/pc/scripts/test-dedicated-multiplayer.ps1',
+            'port/pc/scripts/play-dedicated-multiplayer.ps1'
           )) {
             $tokens = $null
             $errors = $null
