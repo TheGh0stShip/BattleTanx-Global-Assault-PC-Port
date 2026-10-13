@@ -264,12 +264,16 @@ try {
     $clientLog = ""
     $content = Get-Content $clientErr -Raw
     if ($null -ne $content) { $clientLog = [string]$content }
-    $hasInitialSnapshot =
+    $hasRequiredSnapshot = if ($ReconnectClient) {
+        [regex]::IsMatch($clientLog,
+            "BTGA_CLIENT (applied|confirmed) snapshot tick=[1-9][0-9]*")
+    } else {
         $clientLog.Contains("BTGA_CLIENT applied snapshot tick=0") -or
-        $clientLog.Contains("BTGA_CLIENT confirmed snapshot tick=0")
+            $clientLog.Contains("BTGA_CLIENT confirmed snapshot tick=0")
+    }
     $completedExpectedRun = $RenderedClient -or
         $clientLog.Contains("Headless boot window elapsed")
-    if (-not $hasInitialSnapshot -or -not $completedExpectedRun) {
+    if (-not $hasRequiredSnapshot -or -not $completedExpectedRun) {
         throw "Translated client did not apply authority state and complete its run."
     }
     if ($clientLog.Contains("BTGA_CLIENT DESYNC")) {
@@ -283,7 +287,8 @@ try {
         throw "Resumed client did not receive canonical journal replay. See $clientErr."
     }
     if ($ReconnectClient -and
-        -not [regex]::IsMatch($clientLog, "BTGA_CLIENT confirmed snapshot tick=[1-9][0-9]*")) {
+        -not [regex]::IsMatch($clientLog,
+            "BTGA_CLIENT (applied|confirmed) snapshot tick=[1-9][0-9]*")) {
         throw "Resumed client did not catch up and reconverge with the authority. See $clientErr."
     }
     if ($RequireDiskReplay) {
