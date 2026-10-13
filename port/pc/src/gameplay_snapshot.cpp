@@ -6,6 +6,8 @@ namespace btga {
 namespace {
 constexpr std::size_t rdram_size = 8U * 1024U * 1024U;
 constexpr std::size_t random_seed_offset = 0x00114C80U;
+constexpr std::size_t object_allocator_offset = 0x001AD120U;
+constexpr std::size_t object_allocator_size = 8U;
 constexpr std::size_t object_pool_offset = 0x001AD128U;
 constexpr std::size_t object_size = 0x4CCU;
 constexpr std::size_t object_sound_handles_offset = 0x280U;
@@ -42,6 +44,7 @@ bool capture_gameplay_snapshot(std::span<const std::uint8_t> rdram,
         cursor += size;
     };
     append(random_seed_offset, sizeof(std::uint32_t));
+    append(object_allocator_offset, object_allocator_size);
     for (std::size_t object = 0; object < 24U; ++object) {
         const std::size_t base = object_pool_offset + object * object_size;
         append(base, object_sound_handles_offset);
@@ -76,6 +79,7 @@ bool restore_gameplay_snapshot(std::span<std::uint8_t> rdram,
         cursor += size;
     };
     restore(random_seed_offset, sizeof(std::uint32_t));
+    restore(object_allocator_offset, object_allocator_size);
     for (std::size_t object = 0; object < 24U; ++object) {
         const std::size_t base = object_pool_offset + object * object_size;
         restore(base, object_sound_handles_offset);

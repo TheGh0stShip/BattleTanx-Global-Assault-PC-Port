@@ -6,7 +6,7 @@
 
 namespace btga {
 
-constexpr std::size_t gameplay_snapshot_size = 32'320U;
+constexpr std::size_t gameplay_snapshot_size = 32'328U;
 
 [[nodiscard]] bool capture_gameplay_snapshot(
     std::span<const std::uint8_t> rdram,

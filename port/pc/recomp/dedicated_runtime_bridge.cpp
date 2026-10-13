@@ -434,6 +434,7 @@ extern "C" void btga_dedicated_run_loop(
     auto deadline = std::chrono::steady_clock::now();
     bool announced_ready = false;
     bool initial_snapshot_sent = false;
+    std::uint32_t last_snapshot_tick = 0U;
     for (;;) {
         btga_dedicated_network_poll();
         {
@@ -464,7 +465,21 @@ extern "C" void btga_dedicated_run_loop(
                 continue;
             }
             initial_snapshot_sent = true;
+            last_snapshot_tick = 0U;
             std::fputs("BTGA_AUTHORITY initial snapshot published\n", stderr);
+        } else {
+            const std::lock_guard lock{authority_mutex};
+            const std::uint32_t next_tick = authority.next_tick();
+            if (next_tick > 1U && next_tick != last_snapshot_tick &&
+                next_tick % 30U == 1U) {
+                std::array<std::uint8_t, btga::gameplay_snapshot_size> state{};
+                if (btga::capture_gameplay_snapshot({rdram, rdram_size}, state) &&
+                    encode_and_send_snapshot(next_tick, state)) {
+                    last_snapshot_tick = next_tick;
+                } else {
+                    std::fputs("BTGA_AUTHORITY recovery snapshot failed\n", stderr);
+                }
+            }
         }
         func_8009C524(rdram, context);
         deadline += tick_period;
@@ -495,9 +510,6 @@ extern "C" void btga_dedicated_tick_end(
     if (multiplayer && multiplayer->state() == btga::OnlineState::Lobby &&
         !encode_and_send_frame(*frame)) {
         std::fputs("Dedicated authority could not publish canonical frame\n", stderr);
-    }
-    if (frame->tick != 0U && frame->tick % 30U == 0U) {
-        (void)encode_and_send_snapshot(frame->tick + 1U, canonical_state);
     }
     if (frame->tick % 30U == 0U) {
         std::fprintf(stderr,

@@ -15,9 +15,9 @@ explicit opt-in actions.
 - The server waits for all configured seats before tick zero, but does not
   freeze the match when a connected seat later times out.
 - Canonical gameplay snapshots are sent at startup and every 30 ticks. A new
-  client can bootstrap from authority state; an established client confirms a
-  matching snapshot but never lets a nonmatching partial snapshot overwrite a
-  simulation that is already advancing on canonical frames.
+  match client can bootstrap from initial authority state; an established
+  client confirms a matching snapshot but never lets a nonmatching partial
+  snapshot overwrite a simulation already advancing on canonical frames.
 - The public master, Azure UDP relay, four protocol clients, and a real
   translated headless client are covered by an unattended PowerShell gate.
 
