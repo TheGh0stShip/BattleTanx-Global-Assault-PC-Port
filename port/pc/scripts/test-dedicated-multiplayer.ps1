@@ -8,6 +8,8 @@ param(
     [switch] $RenderedClient,
     [switch] $ReconnectClient,
     [switch] $ReconnectAuthority,
+    [ValidateRange(1, 5)]
+    [int] $AuthorityReconnectCycles = 1,
     [ValidateRange(2, 30)]
     [int] $ReconnectAfterSeconds = 4,
     [ValidateRange(1, 3)]
@@ -68,7 +70,9 @@ try {
     if (-not $lobbyLine) { throw "Dedicated authority did not publish a lobby." }
     $lobby = $lobbyLine.Substring("ONLINE_LOBBY_ID=".Length)
 
-    $clientRunSeconds = $Seconds + $(if ($ReconnectAuthority) { 30 } else { 0 })
+    $clientRunSeconds = $Seconds + $(if ($ReconnectAuthority) {
+        30 * $AuthorityReconnectCycles
+    } else { 0 })
     $clientArguments = if ($RenderedClient) {
         @("--dedicated-join", $lobby, $romPath)
     } else {
@@ -98,7 +102,7 @@ try {
     if ($ReconnectClient) {
         $peerSeconds += $ReconnectCycles * ($ReconnectAfterSeconds + 20)
     }
-    if ($ReconnectAuthority) { $peerSeconds += 30 }
+    if ($ReconnectAuthority) { $peerSeconds += 30 * $AuthorityReconnectCycles }
     for ($seat = 1; $seat -lt 4; ++$seat) {
         $out = Join-Path $evidence "bot-$seat.stdout.log"
         $err = Join-Path $evidence "bot-$seat.stderr.log"
@@ -122,40 +126,47 @@ try {
         }
     }
     if ($ReconnectAuthority) {
-        Start-Sleep -Seconds 5
-        if (-not $authority.HasExited) {
-            Stop-Process -Id $authority.Id -Force
-            $authority.WaitForExit(5000) | Out-Null
-        }
-        $authorityOut = Join-Path $evidence "authority-resumed.stdout.log"
-        $authorityErr = Join-Path $evidence "authority-resumed.stderr.log"
-        $authority = Start-Process $server -PassThru `
-            -ArgumentList @("--dedicated-server-public", $romPath) `
-            -RedirectStandardOutput $authorityOut -RedirectStandardError $authorityErr
-        $processes.Add($authority)
-        $deadline = [DateTime]::UtcNow.AddSeconds(25)
-        do {
-            Start-Sleep -Milliseconds 100
-            $authorityText = ""
-            if (Test-Path $authorityErr) {
-                $content = Get-Content $authorityErr -Raw
-                if ($null -ne $content) { $authorityText = [string]$content }
+        for ($authorityCycle = 1; $authorityCycle -le $AuthorityReconnectCycles;
+             ++$authorityCycle) {
+            Start-Sleep -Seconds 5
+            if (-not $authority.HasExited) {
+                Stop-Process -Id $authority.Id -Force
+                $authority.WaitForExit(5000) | Out-Null
             }
-            $resumedLobbyLine = if (Test-Path $authorityOut) {
-                Get-Content $authorityOut | Where-Object { $_ -like "ONLINE_LOBBY_ID=*" } |
-                    Select-Object -First 1
+            $authorityOut = Join-Path $evidence `
+                "authority-resumed-$authorityCycle.stdout.log"
+            $authorityErr = Join-Path $evidence `
+                "authority-resumed-$authorityCycle.stderr.log"
+            $authority = Start-Process $server -PassThru `
+                -ArgumentList @("--dedicated-server-public", $romPath) `
+                -RedirectStandardOutput $authorityOut -RedirectStandardError $authorityErr
+            $processes.Add($authority)
+            $deadline = [DateTime]::UtcNow.AddSeconds(25)
+            do {
+                Start-Sleep -Milliseconds 100
+                $authorityText = ""
+                if (Test-Path $authorityErr) {
+                    $content = Get-Content $authorityErr -Raw
+                    if ($null -ne $content) { $authorityText = [string]$content }
+                }
+                $resumedLobbyLine = if (Test-Path $authorityOut) {
+                    Get-Content $authorityOut |
+                        Where-Object { $_ -like "ONLINE_LOBBY_ID=*" } |
+                        Select-Object -First 1
+                }
+                $authorityRecovered = $authorityText.Contains(
+                    "BTGA_AUTHORITY recovered checkpoint=") -and
+                    $authorityText.Contains(
+                        "BTGA_AUTHORITY reclaimed persistent lobby authority")
+            } until (($resumedLobbyLine -and $authorityRecovered) -or
+                $authority.HasExited -or [DateTime]::UtcNow -ge $deadline)
+            if (-not $resumedLobbyLine -or
+                $resumedLobbyLine.Substring("ONLINE_LOBBY_ID=".Length) -ne $lobby) {
+                throw "Replacement authority cycle $authorityCycle did not reclaim the lobby."
             }
-            $authorityRecovered = $authorityText.Contains(
-                "BTGA_AUTHORITY recovered checkpoint=") -and
-                $authorityText.Contains("BTGA_AUTHORITY reclaimed persistent lobby authority")
-        } until (($resumedLobbyLine -and $authorityRecovered) -or
-            $authority.HasExited -or [DateTime]::UtcNow -ge $deadline)
-        if (-not $resumedLobbyLine -or
-            $resumedLobbyLine.Substring("ONLINE_LOBBY_ID=".Length) -ne $lobby) {
-            throw "Replacement authority did not reclaim the original lobby."
-        }
-        if (-not $authorityRecovered) {
-            throw "Replacement authority did not restore and replay persistent state."
+            if (-not $authorityRecovered) {
+                throw "Replacement authority cycle $authorityCycle did not restore state."
+            }
         }
     }
     if ($ReconnectClient) {
