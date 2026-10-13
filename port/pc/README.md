@@ -316,6 +316,22 @@ Build and run the current dedicated gate on Windows with:
     -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows
 ```
 
+For an actual persistent authority, use the supervisor rather than launching
+the executable directly:
+
+```powershell
+.\port\pc\scripts\run-dedicated-server.ps1 `
+    -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows
+```
+
+It retains recovery state and per-generation logs in
+`build-pc-windows\dedicated-state`, restarts a failed authority with bounded
+backoff, and prints the active `ONLINE_LOBBY_ID`. If Azure has expired the
+saved lobby, the replacement authority discards only that stale control record
+and creates a new lobby. Players must join the newly printed/listed ID; a copied
+expired ID returns `404 lobby not found` by design. Press Ctrl+C once to stop
+the supervisor and its child authority.
+
 Add `-RenderedClient` to run that unattended gate through the actual Windows
 renderer/input client instead of the headless translated client.
 Add `-ReconnectClient -ReconnectCycles 2` to kill and cold-restart the

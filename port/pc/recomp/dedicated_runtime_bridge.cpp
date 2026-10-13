@@ -421,36 +421,54 @@ bool btga_dedicated_enable_public(std::string_view name, std::string& error) {
                 error = "persistent authority control record is invalid";
                 return false;
             }
-            const std::string relay_token = client->heartbeat(
-                lease->lobby_id, lease->host_secret, 1U, "playing", 0U);
-            // A heartbeat persists the exact sequence at least every 15
-            // seconds. Reserve a gap larger than the maximum packets that can
-            // be emitted in that interval, and persist it before relay bind.
-            lease->packet_sequence += UINT32_C(65536);
-            if (!btga::save_authority_lease(*lease_path, *lease)) {
-                error = "could not reserve replacement authority packet sequence";
-                return false;
-            }
-            {
-                const std::lock_guard lock{authority_mutex};
-                outgoing_sequence = lease->packet_sequence;
-                if (!enable_relay(lease->session_id, lease->relay, relay_token, error)) {
+            std::string relay_token;
+            try {
+                relay_token = client->heartbeat(
+                    lease->lobby_id, lease->host_secret, 1U, "playing", 0U);
+            } catch (const btga::MasterServiceError& service_error) {
+                if (service_error.status() != 404) throw;
+                std::error_code remove_error;
+                std::filesystem::remove(*lease_path, remove_error);
+                if (remove_error) {
+                    error = "expired lobby is gone, but its persistent authority record "
+                            "could not be removed";
                     return false;
                 }
-                const std::lock_guard master_lock{master_mutex};
-                public_lobby_id = lease->lobby_id;
-                public_host_secret = lease->host_secret;
-                persistent_lease_path = lease_path;
-                persistent_lease = *lease;
-                next_heartbeat = std::chrono::steady_clock::now();
-                master_http = std::move(http);
-                master = std::move(client);
+                std::fprintf(stderr,
+                             "BTGA_AUTHORITY saved lobby %s expired; creating a replacement\n",
+                             lease->lobby_id.c_str());
+                lease.reset();
             }
-            std::printf("ONLINE_LOBBY_ID=%s\n", public_lobby_id.c_str());
-            std::fputs("BTGA_AUTHORITY reclaimed persistent lobby authority\n", stderr);
-            std::fflush(stdout);
-            std::fflush(stderr);
-            return true;
+            if (lease) {
+                // A heartbeat persists the exact sequence at least every 15
+                // seconds. Reserve a gap larger than the maximum packets that
+                // can be emitted in that interval, and persist it before relay bind.
+                lease->packet_sequence += UINT32_C(65536);
+                if (!btga::save_authority_lease(*lease_path, *lease)) {
+                    error = "could not reserve replacement authority packet sequence";
+                    return false;
+                }
+                {
+                    const std::lock_guard lock{authority_mutex};
+                    outgoing_sequence = lease->packet_sequence;
+                    if (!enable_relay(lease->session_id, lease->relay, relay_token, error)) {
+                        return false;
+                    }
+                    const std::lock_guard master_lock{master_mutex};
+                    public_lobby_id = lease->lobby_id;
+                    public_host_secret = lease->host_secret;
+                    persistent_lease_path = lease_path;
+                    persistent_lease = *lease;
+                    next_heartbeat = std::chrono::steady_clock::now();
+                    master_http = std::move(http);
+                    master = std::move(client);
+                }
+                std::printf("ONLINE_LOBBY_ID=%s\n", public_lobby_id.c_str());
+                std::fputs("BTGA_AUTHORITY reclaimed persistent lobby authority\n", stderr);
+                std::fflush(stdout);
+                std::fflush(stderr);
+                return true;
+            }
         }
         const btga::HostRegistration registration = client->host(name, 4);
         const btga::PersistentAuthorityLease new_lease{

@@ -3,11 +3,24 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace btga {
+
+class MasterServiceError : public std::runtime_error {
+public:
+    MasterServiceError(int status, std::string message)
+        : std::runtime_error(std::move(message)), status_(status) {}
+
+    [[nodiscard]] int status() const noexcept { return status_; }
+
+private:
+    int status_;
+};
 
 struct HttpResponse {
     int status = 0;

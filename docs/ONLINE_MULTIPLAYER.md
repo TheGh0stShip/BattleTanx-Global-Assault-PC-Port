@@ -42,6 +42,22 @@ is exposed as a finished menu option.
 
 ### Authority-process recovery (development gate)
 
+On Windows, the supported operator entry point is the restart supervisor:
+
+```powershell
+.\port\pc\scripts\run-dedicated-server.ps1 `
+    -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows
+```
+
+It owns the child process, durable state directory, generation logs, bounded
+restart backoff, and clean Ctrl+C shutdown. When the saved master-service lobby
+still exists, a replacement process reclaims it. When that lobby has genuinely
+expired, a heartbeat returns 404; the authority removes the stale control
+record, creates a replacement lobby, persists the new credentials, and prints
+the new `ONLINE_LOBBY_ID`. Other HTTP errors are not converted into new lobbies.
+Clients should refresh the Online tab and select the active listing rather than
+reusing an old copied ID.
+
 Set `BTGA_DEDICATED_STATE_DIR` to a private directory on durable local storage
 before starting `--dedicated-server-public`. The authority then persists:
 

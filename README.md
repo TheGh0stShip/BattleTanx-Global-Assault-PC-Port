@@ -280,6 +280,11 @@ Dedicated-authority developer commands on Windows are:
 # Persistent four-player authority; prints ONLINE_LOBBY_ID=...
 BattleTanxGA.exe --dedicated-server-public BattleTanxGA.z64
 
+# Recommended: supervise and automatically recover the authority process.
+# State and generation logs are kept under build-pc-windows\dedicated-state.
+.\port\pc\scripts\run-dedicated-server.ps1 `
+  -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows
+
 # Normal rendered client
 BattleTanxGA.exe --dedicated-join LOBBY_ID BattleTanxGA.z64
 
@@ -299,6 +304,11 @@ BattleTanxGA.exe --dedicated-join LOBBY_ID BattleTanxGA.z64
   -JournalMemoryFrames 64 -RequireDiskReplay
 
 ```
+
+If the master has expired a saved lobby, the supervisor now creates a new
+lobby automatically and prints its new `ONLINE_LOBBY_ID`. A client must select
+that newly listed lobby; an old copied ID correctly returns `404 lobby not
+found`. Do not delete `dedicated-state` while recovering a live match.
 
 ## License
 

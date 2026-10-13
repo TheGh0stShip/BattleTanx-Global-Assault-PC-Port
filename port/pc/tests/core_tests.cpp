@@ -770,6 +770,19 @@ int main() {
     master.remove("hosted-1", "host-secret");
     CHECK(http.last_method == "DELETE" && http.last_bearer == "host-secret");
 
+    TestHttpClient missing_lobby_http;
+    missing_lobby_http.responses = {{404, R"({"message":"lobby not found"})"}};
+    btga::MasterClient missing_lobby_master{missing_lobby_http};
+    try {
+        (void)missing_lobby_master.heartbeat(
+            "expired-lobby", "expired-secret", 1, "playing", 0U);
+        CHECK(false);
+    } catch (const btga::MasterServiceError& service_error) {
+        CHECK(service_error.status() == 404);
+        CHECK(std::string_view{service_error.what()}.find("lobby not found") !=
+              std::string_view::npos);
+    }
+
     class TestOnlineIo final : public btga::OnlineIo {
     public:
         bool open() override { ++open_calls; return open_result; }

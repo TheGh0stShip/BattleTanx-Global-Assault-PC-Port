@@ -56,9 +56,10 @@ Json parse_response(const HttpResponse& response, int expected) {
             const Json error = Json::parse(response.body);
             detail = error.value("message", "");
         } catch (...) {}
-        throw std::runtime_error(
+        throw MasterServiceError{
+            response.status,
             "master service returned HTTP " + std::to_string(response.status) +
-            (detail.empty() ? "" : ": " + detail));
+                (detail.empty() ? "" : ": " + detail)};
     }
     if (response.body.size() > max_response_size) {
         throw std::runtime_error("master response exceeds 64 KiB");
