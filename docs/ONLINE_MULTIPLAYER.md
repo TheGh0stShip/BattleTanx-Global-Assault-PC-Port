@@ -217,6 +217,15 @@ complete. Any desync, authority timeout, missing checkpoint, missing barrier,
 or witness failure fails the run. The fixture intentionally pre-rotates only
 three credentials, so the accepted range is zero through three cycles.
 
+Use `-ReconnectEverySeat` for the broader seat-identity gate. It replaces all
+four authenticated seats sequentially during one live authority session. The
+translated game client and each protocol witness must install a positive-tick
+snapshot, acknowledge that snapshot, complete journal catch-up, release one
+recovery barrier, and then continue receiving canonical frames. This verifies
+that recovery is keyed by authenticated seat identity rather than special
+treatment of the translated client. It is mutually exclusive with the cold
+authority-restart and repeated-seat gates.
+
 The older peer-hosted flow documented below remains available for comparison,
 but it is not the architecture being taken to production.
 

@@ -796,10 +796,13 @@ void btga_dedicated_network_poll()
                          static_cast<unsigned>(rejected.payload_size), size);
         }
     }
-    // One bounded journal window is sent per client acknowledgment. A client
-    // cannot make the authority burst an unbounded match history, while a
-    // recovering client can advance the window by acknowledging consumed
-    // ticks. Existing real-time clients normally request zero or one frame.
+    // One bounded journal window is attempted per client acknowledgment. A
+    // client cannot make the authority burst an unbounded match history,
+    // while a recovering client can advance the window by acknowledging
+    // contiguous consumed ticks. A failed datagram must not stop the rest of
+    // the window: periodic loss can otherwise phase-lock the first replayed
+    // tick to the fault profile indefinitely. Clients buffer out-of-order
+    // frames and the missing tick is retried with the next acknowledgment.
     // Clients acknowledge about four times per second and consume 30 ticks per
     // second. Eight frames per acknowledgment supplies 32 ticks per second,
     // enough to converge while the recovery barrier is closed without
@@ -830,7 +833,7 @@ void btga_dedicated_network_poll()
                                  static_cast<unsigned>(seat), frames[index].tick);
                     replay_send_failure_announced |= bit;
                 }
-                break;
+                continue;
             }
             if (index + 1U < count) {
                 std::this_thread::sleep_for(std::chrono::milliseconds{1});

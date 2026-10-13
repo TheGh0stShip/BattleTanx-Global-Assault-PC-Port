@@ -14,6 +14,8 @@ extern "C" {
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <map>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -56,8 +58,10 @@ bool bind_relay(btga::OnlineMultiplayer& online, std::uint64_t session,
 int main(int argc, char** argv) {
     try {
         const bool public_join = argc == 5 && std::string_view{argv[1]} == "--join";
-        if (argc != 3 && !public_join) {
-            std::cerr << "usage: btga_dedicated_client_bot SEAT SECONDS\n"
+        const bool recovery_join = argc == 4 &&
+            std::string_view{argv[3]} == "--resume";
+        if ((argc != 3 && !recovery_join) && !public_join) {
+            std::cerr << "usage: btga_dedicated_client_bot SEAT SECONDS [--resume]\n"
                          "   or: btga_dedicated_client_bot --join LOBBY SEAT SECONDS\n";
             return 2;
         }
@@ -106,6 +110,8 @@ int main(int argc, char** argv) {
 
         btga::InputSynchronizer encoder;
         btga::AuthoritativeReplica replica;
+        std::optional<btga::CanonicalFrame> latest_frame;
+        std::map<std::uint32_t, btga::CanonicalFrame> pending_frames;
         std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
         const btga::OnlineControllerInput distinctive{
             static_cast<std::uint16_t>(UINT16_C(0x0100) << seat),
@@ -115,6 +121,8 @@ int main(int argc, char** argv) {
         std::uint32_t next_input_tick = 0;
         std::uint32_t accepted_frames = 0;
         std::uint32_t echoed_frames = 0;
+        std::uint32_t installed_snapshot_id = 0;
+        bool bootstrapped = !recovery_join;
         const auto send_inputs = [&](std::uint32_t first_tick) {
             std::array<btga::OnlineControllerInput, 8> initial{};
             initial.fill(distinctive);
@@ -125,6 +133,24 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("input transmission failed");
             }
         };
+        const auto send_subscription = [&] {
+            std::array<std::uint8_t, BTGA_NET_HEADER_SIZE> message{};
+            BtgaNetHeader header{};
+            header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
+            header.message_type = BTGA_NET_MSG_PING;
+            header.flags = BTGA_NET_FLAG_RELAYED;
+            header.session_id = session;
+            header.sequence = ++sequence;
+            header.acknowledgment = bootstrapped ? next_input_tick + 1U : 0U;
+            header.acknowledgment_bits = bootstrapped ? installed_snapshot_id : 0U;
+            header.payload_size = 0U;
+            header.peer_id = online.relay_slot();
+            if (!btga_net_encode_header(message.data(), message.size(), &header) ||
+                !online.send_gameplay(0U, message)) {
+                throw std::runtime_error("snapshot subscription failed");
+            }
+        };
+        if (recovery_join) send_subscription();
         send_inputs(0U);
         auto next_readiness = std::chrono::steady_clock::now() +
             std::chrono::milliseconds{250};
@@ -137,12 +163,14 @@ int main(int argc, char** argv) {
         while (std::chrono::steady_clock::now() < run_deadline) {
             const auto now = std::chrono::steady_clock::now();
             if (!session_started && now >= next_readiness) {
+                if (recovery_join) send_subscription();
                 send_inputs(0U);
                 next_readiness = now + std::chrono::milliseconds{250};
             } else if (session_started && now >= next_keepalive) {
                 // Keep the relay binding and authority-side seat alive while
                 // a replacement authority restores and replays its journal.
                 // Re-sending the next uncommitted tick is idempotent.
+                if (recovery_join) send_subscription();
                 send_inputs(next_input_tick);
                 next_keepalive = now + std::chrono::milliseconds{250};
             }
@@ -158,30 +186,78 @@ int main(int argc, char** argv) {
                     throw std::runtime_error("invalid authoritative packet");
                 }
                 if (header.message_type == BTGA_NET_MSG_SNAPSHOT) {
+                    const bool accepted = replica.accept_snapshot_chunk(
+                        {packet.data() + BTGA_NET_HEADER_SIZE,
+                         header.payload_size});
+                    // Completed generations are deliberately transmitted more
+                    // than once under loss. Once take_snapshot() retires that
+                    // generation, its remaining duplicate chunks are stale
+                    // rather than fatal.
+                    if (accepted && replica.snapshot_ready()) {
+                        auto snapshot = replica.take_snapshot();
+                        if (!snapshot) {
+                            throw std::runtime_error("completed snapshot disappeared");
+                        }
+                        installed_snapshot_id = snapshot->snapshot_id;
+                        next_input_tick = snapshot->tick;
+                        bootstrapped = true;
+                        std::cout << "BOOTSTRAP_TICK=" << snapshot->tick << '\n'
+                                  << std::flush;
+                        send_subscription();
+                    }
                     continue;
                 }
                 if (header.message_type == BTGA_NET_MSG_PING &&
                     header.payload_size == 0U) {
                     continue;
                 }
-                if (header.message_type != BTGA_NET_MSG_EVENT ||
-                    !replica.accept_frame({packet.data() + BTGA_NET_HEADER_SIZE,
-                                           header.payload_size})) {
-                    throw std::runtime_error("invalid authoritative frame");
+                btga::CanonicalFrame frame{};
+                if (header.message_type != BTGA_NET_MSG_EVENT) {
+                    throw std::runtime_error(
+                        "unexpected authoritative message type " +
+                        std::to_string(header.message_type));
                 }
-                ++accepted_frames;
-                if (!session_started) {
-                    session_started = true;
-                    next_keepalive = std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds{250};
-                    run_deadline = std::chrono::steady_clock::now() +
-                        std::chrono::seconds{seconds};
+                if (!bootstrapped) continue;
+                if (!btga::decode_authoritative_frame(
+                        {packet.data() + BTGA_NET_HEADER_SIZE,
+                         header.payload_size}, frame)) {
+                    throw std::runtime_error(
+                        "invalid authoritative frame payload size " +
+                        std::to_string(header.payload_size));
                 }
-                received_new_frame = true;
-                const auto& frame = *replica.latest_frame();
-                if ((frame.received_mask & (1U << seat)) != 0U &&
-                    frame.inputs[seat] == distinctive) ++echoed_frames;
-                next_input_tick = frame.tick + 1U;
+                if (static_cast<std::int32_t>(frame.tick - next_input_tick) < 0) {
+                    if (latest_frame && frame.tick == latest_frame->tick &&
+                        frame.state_digest != latest_frame->state_digest) {
+                        throw std::runtime_error("conflicting authoritative frame");
+                    }
+                    continue;
+                }
+                const auto [pending, inserted] = pending_frames.emplace(
+                    frame.tick, frame);
+                if (!inserted &&
+                    pending->second.state_digest != frame.state_digest) {
+                    throw std::runtime_error("conflicting pending frame");
+                }
+                while (true) {
+                    const auto contiguous = pending_frames.find(next_input_tick);
+                    if (contiguous == pending_frames.end()) break;
+                    latest_frame = contiguous->second;
+                    pending_frames.erase(contiguous);
+                    ++accepted_frames;
+                    if (!session_started) {
+                        session_started = true;
+                        next_keepalive = std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds{250};
+                        run_deadline = std::chrono::steady_clock::now() +
+                            std::chrono::seconds{seconds};
+                    }
+                    received_new_frame = true;
+                    if ((latest_frame->received_mask & (1U << seat)) != 0U &&
+                        latest_frame->inputs[seat] == distinctive) {
+                        ++echoed_frames;
+                    }
+                    ++next_input_tick;
+                }
             }
 
             if (received_new_frame && next_input_tick != 0U) {
