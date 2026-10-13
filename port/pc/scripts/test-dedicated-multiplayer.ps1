@@ -55,7 +55,7 @@ if ($ReconnectAuthority) {
 $processes = [System.Collections.Generic.List[Diagnostics.Process]]::new()
 $peers = [System.Collections.Generic.List[Diagnostics.Process]]::new()
 try {
-    $authority = Start-Process $server -PassThru `
+    $authority = Start-Process $server -PassThru -WindowStyle Minimized `
         -ArgumentList @("--dedicated-server-public", $romPath) `
         -RedirectStandardOutput $authorityOut -RedirectStandardError $authorityErr
     $processes.Add($authority)
@@ -78,7 +78,7 @@ try {
     } else {
         @("--dedicated-headless", $clientRunSeconds, $lobby, $romPath)
     }
-    $client = Start-Process $server -PassThru `
+    $client = Start-Process $server -PassThru -WindowStyle Minimized `
         -ArgumentList $clientArguments `
         -RedirectStandardOutput $clientOut -RedirectStandardError $clientErr
     $processes.Add($client)
@@ -106,7 +106,7 @@ try {
     for ($seat = 1; $seat -lt 4; ++$seat) {
         $out = Join-Path $evidence "bot-$seat.stdout.log"
         $err = Join-Path $evidence "bot-$seat.stderr.log"
-        $peer = Start-Process $bot -PassThru `
+        $peer = Start-Process $bot -PassThru -WindowStyle Minimized `
             -ArgumentList @("--join", $lobby, $seat, $peerSeconds) `
             -RedirectStandardOutput $out -RedirectStandardError $err
         $processes.Add($peer)
@@ -137,7 +137,7 @@ try {
                 "authority-resumed-$authorityCycle.stdout.log"
             $authorityErr = Join-Path $evidence `
                 "authority-resumed-$authorityCycle.stderr.log"
-            $authority = Start-Process $server -PassThru `
+            $authority = Start-Process $server -PassThru -WindowStyle Minimized `
                 -ArgumentList @("--dedicated-server-public", $romPath) `
                 -RedirectStandardOutput $authorityOut -RedirectStandardError $authorityErr
             $processes.Add($authority)
@@ -189,7 +189,7 @@ try {
             }
             $clientOut = Join-Path $evidence "client-resumed-$cycle.stdout.log"
             $clientErr = Join-Path $evidence "client-resumed-$cycle.stderr.log"
-            $client = Start-Process $server -PassThru `
+            $client = Start-Process $server -PassThru -WindowStyle Minimized `
                 -ArgumentList $clientArguments `
                 -RedirectStandardOutput $clientOut -RedirectStandardError $clientErr
             $processes.Add($client)

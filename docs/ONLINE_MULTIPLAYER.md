@@ -40,7 +40,9 @@ released the barrier only after reaching the frozen head, and stayed
 byte-synchronized beyond tick 720. A separate four-seat authority-replacement
 stress run killed the authority three times in one session; the replacements
 restored checkpoints 150, 300, and 450, reclaimed the same lobby, and continued
-through tick 600 without a client desync or authority timeout. Longer interactive
+through tick 600 without a client desync or authority timeout. The corresponding
+native Windows gate also passed three authority replacements through the public
+HTTPS master and UDP relay. Longer interactive
 campaign coverage, server-driven
 interpolation, and cross-architecture validation remain required before this
 is exposed as a finished menu option.
