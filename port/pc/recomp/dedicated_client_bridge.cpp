@@ -43,6 +43,8 @@ bool divergence_reported = false;
 bool replay_announced = false;
 std::uint64_t expected_digest = 0;
 std::chrono::steady_clock::time_point next_keepalive{};
+std::uint32_t current_random_seed = 0U;
+std::uint32_t expected_random_seed = 0U;
 
 std::uint64_t state_digest(std::span<const std::uint8_t> state) {
     std::uint64_t digest = UINT64_C(1469598103934665603);
@@ -166,6 +168,8 @@ bool btga_dedicated_client_enable(
     bootstrap_complete = false;
     divergence_reported = false;
     replay_announced = false;
+    current_random_seed = 0U;
+    expected_random_seed = 0U;
     next_keepalive = std::chrono::steady_clock::now();
     if (!send_snapshot_subscription_locked() || !send_inputs_locked(0U, {})) {
         error = "could not announce dedicated-client readiness";
@@ -234,6 +238,8 @@ extern "C" void btga_dedicated_client_tick_begin(
             }
             if (already_current || restored) {
                 expected_tick = pending_snapshot->tick;
+                (void)btga::gameplay_snapshot_random_seed(
+                    pending_snapshot->state, current_random_seed);
                 bootstrap_complete = true;
                 if (!already_current) divergence_reported = false;
                 if (may_restore) frames.fill(std::nullopt);
@@ -253,8 +259,13 @@ extern "C" void btga_dedicated_client_tick_begin(
         }
         auto& slot = frames[expected_tick % history_size];
         if (slot && slot->tick == expected_tick) {
+            if (!btga::restore_gameplay_random_seed(
+                    {rdram, rdram_size}, current_random_seed)) {
+                return;
+            }
             std::ranges::copy(slot->inputs, active_inputs.begin());
             expected_digest = slot->state_digest;
+            expected_random_seed = slot->random_seed;
             slot.reset();
             tick_active = true;
             return;
@@ -275,6 +286,10 @@ extern "C" void btga_dedicated_client_tick_end(
     const std::lock_guard lock{client_mutex};
     if (!client_enabled || !tick_active) return;
     std::array<std::uint8_t, btga::gameplay_snapshot_size> canonical_state{};
+    // Presentation and host pacing can consume the retail RNG between or
+    // during authoritative ticks. The server-provided end seed is canonical.
+    (void)btga::restore_gameplay_random_seed(
+        {rdram, rdram_size}, expected_random_seed);
     if (btga::capture_gameplay_snapshot({rdram, rdram_size}, canonical_state)) {
         const std::uint64_t digest = state_digest(canonical_state);
         if (digest != expected_digest && !divergence_reported) {
@@ -287,6 +302,7 @@ extern "C" void btga_dedicated_client_tick_end(
             divergence_reported = true;
         }
     }
+    current_random_seed = expected_random_seed;
     ++expected_tick;
     tick_active = false;
 }

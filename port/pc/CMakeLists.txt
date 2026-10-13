@@ -6,7 +6,7 @@ include(FetchContent)
 set(BTGA_NET_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(btga_networking
     GIT_REPOSITORY https://github.com/TheGh0stShip/BattleTanx-Global-Assault-Networking.git
-    GIT_TAG 6385c9cc343ecd0e0738c51eabfa2605f24d9242)
+    GIT_TAG d5e644301160df1fb558f1d924a375043404be73)
 FetchContent_MakeAvailable(btga_networking)
 
 FetchContent_Declare(nlohmann_json

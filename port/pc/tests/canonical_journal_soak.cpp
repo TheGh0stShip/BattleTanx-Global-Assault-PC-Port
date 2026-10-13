@@ -29,7 +29,7 @@ int main() {
         btga::TranslatedAuthority authority{
             0U, (std::numeric_limits<std::uint32_t>::max)(), 0U};
         CHECK(authority.enable_disk_journal(path, memory_frames));
-        std::array<std::uint8_t, 1> state{};
+        std::array<std::uint8_t, 4> state{};
         for (std::uint32_t tick = 0; tick < total_frames; ++tick) {
             state[0] = static_cast<std::uint8_t>(tick);
             CHECK(authority.ready(tick));
@@ -48,6 +48,8 @@ int main() {
             for (std::size_t index = 0; index < replay.size(); ++index) {
                 CHECK(replay[index].tick == first + index);
                 CHECK(replay[index].received_mask == 0U);
+                CHECK(replay[index].random_seed ==
+                    static_cast<std::uint8_t>(first + index));
                 for (const auto& input : replay[index].inputs) {
                     CHECK(input.buttons == 0U);
                     CHECK(input.stick_x == 0);
@@ -56,7 +58,7 @@ int main() {
             }
         }
         CHECK(std::filesystem::file_size(path) == 16U +
-            static_cast<std::uintmax_t>(total_frames) * 32U);
+            static_cast<std::uintmax_t>(total_frames) * 36U);
     }
     CHECK(!std::filesystem::exists(path));
     std::cout << total_frames

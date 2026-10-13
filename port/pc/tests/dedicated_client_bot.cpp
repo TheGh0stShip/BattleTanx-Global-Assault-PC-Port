@@ -70,8 +70,7 @@ int main(int argc, char** argv) {
         std::string token;
         std::unique_ptr<btga::HttpClient> http;
         if (public_join) {
-            http = btga::make_platform_http_client(
-                "https://btga.thegh0stship.com/api/v1");
+            http = btga::make_platform_http_client(btga::master_service_url());
             btga::MasterClient master{*http};
             const auto registration = master.join(argv[2]);
             session = registration.session_id;
@@ -124,6 +123,7 @@ int main(int argc, char** argv) {
         send_inputs(0U);
         auto next_readiness = std::chrono::steady_clock::now() +
             std::chrono::milliseconds{250};
+        auto next_keepalive = next_readiness;
         const auto startup_deadline = std::chrono::steady_clock::now() +
             std::chrono::seconds{15};
         auto run_deadline = startup_deadline;
@@ -134,6 +134,12 @@ int main(int argc, char** argv) {
             if (!session_started && now >= next_readiness) {
                 send_inputs(0U);
                 next_readiness = now + std::chrono::milliseconds{250};
+            } else if (session_started && now >= next_keepalive) {
+                // Keep the relay binding and authority-side seat alive while
+                // a replacement authority restores and replays its journal.
+                // Re-sending the next uncommitted tick is idempotent.
+                send_inputs(next_input_tick);
+                next_keepalive = now + std::chrono::milliseconds{250};
             }
             bool received_new_frame = false;
             std::uint16_t source = 0;
@@ -157,6 +163,8 @@ int main(int argc, char** argv) {
                 ++accepted_frames;
                 if (!session_started) {
                     session_started = true;
+                    next_keepalive = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds{250};
                     run_deadline = std::chrono::steady_clock::now() +
                         std::chrono::seconds{seconds};
                 }

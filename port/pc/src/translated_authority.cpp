@@ -14,11 +14,11 @@ extern "C" {
 namespace btga {
 namespace {
 constexpr std::array<std::uint8_t, 8> journal_magic{
-    'B', 'T', 'G', 'A', 'J', 'N', 'L', '1'};
+    'B', 'T', 'G', 'A', 'J', 'N', 'L', '2'};
 constexpr std::array<std::uint8_t, 8> snapshot_magic{
     'B', 'T', 'G', 'A', 'S', 'N', 'P', '1'};
 constexpr std::size_t journal_header_size = 16U;
-constexpr std::size_t journal_record_size = 32U;
+constexpr std::size_t journal_record_size = 36U;
 constexpr std::size_t snapshot_header_size = 32U;
 
 void put_u32_be(std::uint8_t* output, std::uint32_t value) {
@@ -58,7 +58,9 @@ std::array<std::uint8_t, journal_record_size> encode_record(
     }
     put_u64_be(record.data() + cursor, frame.state_digest);
     cursor += 8U;
-    record[cursor] = frame.received_mask;
+    record[cursor++] = frame.received_mask;
+    cursor += 3U; // reserved
+    put_u32_be(record.data() + cursor, frame.random_seed);
     return record;
 }
 
@@ -77,7 +79,9 @@ AuthoritativeFrame decode_record(
     }
     frame.state_digest = get_u64_be(record.data() + cursor);
     cursor += 8U;
-    frame.received_mask = record[cursor];
+    frame.received_mask = record[cursor++];
+    cursor += 3U; // reserved
+    frame.random_seed = get_u32_be(record.data() + cursor);
     return frame;
 }
 } // namespace
@@ -216,6 +220,9 @@ std::optional<AuthoritativeFrame> TranslatedAuthority::finish_tick(
     }
     const std::uint64_t state_digest = digest(rdram);
     AuthoritativeFrame frame{tick, current_inputs_, state_digest, received_mask_};
+    if (rdram.size() >= sizeof(frame.random_seed)) {
+        std::memcpy(&frame.random_seed, rdram.data(), sizeof(frame.random_seed));
+    }
     if (tick != next_tick_ || !append_journal(frame)) return std::nullopt;
     ++next_tick_;
     tick_active_ = false;

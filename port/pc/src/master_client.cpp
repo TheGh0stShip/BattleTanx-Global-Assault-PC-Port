@@ -7,7 +7,9 @@ extern "C" {
 
 #include <nlohmann/json.hpp>
 
+#include <cstdlib>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 
 namespace btga {
@@ -15,6 +17,20 @@ namespace {
 using Json = nlohmann::json;
 
 constexpr std::size_t max_response_size = 64 * 1024;
+
+std::optional<std::string> environment_value(const char* name) {
+#ifdef _WIN32
+    char* value = nullptr;
+    std::size_t size = 0U;
+    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return std::nullopt;
+    std::string result{value};
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(name);
+    return value == nullptr ? std::nullopt : std::optional<std::string>{value};
+#endif
+}
 
 std::string escape_path(std::string_view input) {
     static constexpr char hex[] = "0123456789ABCDEF";
@@ -117,6 +133,21 @@ std::uint64_t decode_session(const Json& source) {
     return session;
 }
 } // namespace
+
+std::string master_service_url() {
+    constexpr std::string_view fallback = "https://btga.thegh0stship.com/api/v1";
+    const auto configured = environment_value("BTGA_MASTER_URL");
+    if (!configured || configured->empty()) return std::string{fallback};
+    const std::string_view value{*configured};
+    const bool secure = value.starts_with("https://");
+    const bool loopback = value.starts_with("http://127.0.0.1:") ||
+        value.starts_with("http://localhost:") || value.starts_with("http://[::1]:");
+    if ((!secure && !loopback) || value.size() > 2048U || value.ends_with('/')) {
+        throw std::invalid_argument(
+            "BTGA_MASTER_URL must be HTTPS or an HTTP loopback URL without a trailing slash");
+    }
+    return std::string{value};
+}
 
 MasterClient::MasterClient(HttpClient& http, std::string build)
     : http_(http), build_(std::move(build)) {

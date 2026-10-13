@@ -21,7 +21,8 @@ bool save_authority_lease(const std::filesystem::path& path,
     const nlohmann::json document{
         {"version", 1}, {"lobby_id", lease.lobby_id},
         {"host_secret", lease.host_secret}, {"session_id", lease.session_id},
-        {"relay_address", lease.relay.address}, {"relay_port", lease.relay.port}
+        {"relay_address", lease.relay.address}, {"relay_port", lease.relay.port},
+        {"packet_sequence", lease.packet_sequence}
     };
     {
         std::ofstream output{temporary, std::ios::binary | std::ios::trunc};
@@ -70,6 +71,9 @@ std::optional<PersistentAuthorityLease> load_authority_lease(
         const auto port = document.at("relay_port").get<std::uint64_t>();
         if (port == 0U || port > 65535U) return std::nullopt;
         lease.relay.port = static_cast<std::uint16_t>(port);
+        const auto sequence = document.value("packet_sequence", UINT64_C(0));
+        if (sequence > UINT32_MAX) return std::nullopt;
+        lease.packet_sequence = static_cast<std::uint32_t>(sequence);
         return valid(lease) ? std::optional{std::move(lease)} : std::nullopt;
     } catch (...) {
         return std::nullopt;

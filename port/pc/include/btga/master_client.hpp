@@ -24,6 +24,11 @@ public:
 
 std::unique_ptr<HttpClient> make_platform_http_client(std::string base_url);
 
+// Uses the public service by default. BTGA_MASTER_URL may select another HTTPS
+// service, or an HTTP loopback endpoint for deterministic local integration
+// tests. Plaintext non-loopback endpoints are rejected.
+[[nodiscard]] std::string master_service_url();
+
 struct OnlineLobby {
     std::string id;
     std::string name;

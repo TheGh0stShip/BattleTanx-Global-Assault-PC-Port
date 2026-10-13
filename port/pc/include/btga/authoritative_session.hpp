@@ -18,6 +18,10 @@ struct AuthoritativeFrame {
     std::array<OnlineControllerInput, online_player_limit> inputs{};
     std::uint64_t state_digest = 0;
     std::uint8_t received_mask = 0;
+    // Canonical end-of-tick RNG state. Presentation-only work can consume the
+    // retail RNG during process bootstrap, so restart replay restores this
+    // value before validating and advancing to the next journalled frame.
+    std::uint32_t random_seed = 0;
 };
 
 struct AuthoritativeSnapshot {

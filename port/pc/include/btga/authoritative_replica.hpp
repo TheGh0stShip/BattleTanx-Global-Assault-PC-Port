@@ -16,6 +16,7 @@ constexpr std::size_t canonical_state_limit = 8U * 1024U * 1024U;
 struct CanonicalFrame {
     std::uint32_t tick = 0;
     std::uint64_t state_digest = 0;
+    std::uint32_t random_seed = 0;
     std::uint8_t occupied_mask = 0;
     std::uint8_t connected_mask = 0;
     std::uint8_t received_mask = 0;

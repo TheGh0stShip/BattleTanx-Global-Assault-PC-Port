@@ -17,6 +17,7 @@ struct PersistentAuthorityLease {
     std::string host_secret;
     std::uint64_t session_id = 0;
     RelayEndpoint relay;
+    std::uint32_t packet_sequence = 0;
 };
 
 [[nodiscard]] bool save_authority_lease(

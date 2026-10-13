@@ -78,6 +78,8 @@ std::unique_ptr<btga::MasterClient> master;
 std::string public_lobby_id;
 std::string public_host_secret;
 std::chrono::steady_clock::time_point next_heartbeat{};
+std::optional<std::filesystem::path> persistent_lease_path;
+btga::PersistentAuthorityLease persistent_lease;
 
 std::uint64_t canonical_state_digest(std::span<const std::uint8_t> state) {
     std::uint64_t value = UINT64_C(1469598103934665603);
@@ -92,12 +94,14 @@ void poll_master_heartbeat() {
     const auto now = std::chrono::steady_clock::now();
     unsigned players = 0;
     std::uint8_t seat_mask = 0U;
+    std::uint32_t packet_sequence = 0U;
     {
         const std::lock_guard lock{authority_mutex};
         seat_mask = authority.connected_mask();
         for (unsigned seat = 0; seat < 4; ++seat) {
             players += (seat_mask >> seat) & 1U;
         }
+        packet_sequence = outgoing_sequence;
     }
     const std::lock_guard lock{master_mutex};
     if (!master || now < next_heartbeat) return;
@@ -106,6 +110,13 @@ void poll_master_heartbeat() {
                           static_cast<std::uint16_t>(std::max(1U, players)),
                           players == configured_players ? "playing" : "lobby",
                           seat_mask);
+        if (persistent_lease_path) {
+            persistent_lease.packet_sequence = packet_sequence;
+            if (!btga::save_authority_lease(
+                    *persistent_lease_path, persistent_lease)) {
+                std::fputs("BTGA_AUTHORITY could not persist packet sequence\n", stderr);
+            }
+        }
     } catch (const std::exception& exception) {
         std::fprintf(stderr, "BTGA_AUTHORITY heartbeat failed: %s\n", exception.what());
     }
@@ -274,6 +285,7 @@ bool encode_and_send_frame(
     BtgaNetAuthoritativeFrame wire{};
     wire.tick = frame.tick;
     wire.state_digest = frame.state_digest;
+    wire.random_seed = frame.random_seed;
     wire.occupied_mask = authority.occupied_mask();
     wire.connected_mask = authority.connected_mask();
     wire.received_mask = frame.received_mask;
@@ -389,8 +401,7 @@ bool btga_dedicated_enable_from_environment(std::string& error)
 
 bool btga_dedicated_enable_public(std::string_view name, std::string& error) {
     try {
-        auto http = btga::make_platform_http_client(
-            "https://btga.thegh0stship.com/api/v1");
+        auto http = btga::make_platform_http_client(btga::master_service_url());
         auto client = std::make_unique<btga::MasterClient>(*http);
         std::optional<std::filesystem::path> lease_path;
         if (const char* state_directory = std::getenv("BTGA_DEDICATED_STATE_DIR");
@@ -405,21 +416,32 @@ bool btga_dedicated_enable_public(std::string_view name, std::string& error) {
             lease_path = directory / "authority-control.json";
         }
         if (lease_path && std::filesystem::exists(*lease_path)) {
-            const auto lease = btga::load_authority_lease(*lease_path);
+            auto lease = btga::load_authority_lease(*lease_path);
             if (!lease) {
                 error = "persistent authority control record is invalid";
                 return false;
             }
             const std::string relay_token = client->heartbeat(
                 lease->lobby_id, lease->host_secret, 1U, "playing", 0U);
+            // A heartbeat persists the exact sequence at least every 15
+            // seconds. Reserve a gap larger than the maximum packets that can
+            // be emitted in that interval, and persist it before relay bind.
+            lease->packet_sequence += UINT32_C(65536);
+            if (!btga::save_authority_lease(*lease_path, *lease)) {
+                error = "could not reserve replacement authority packet sequence";
+                return false;
+            }
             {
                 const std::lock_guard lock{authority_mutex};
+                outgoing_sequence = lease->packet_sequence;
                 if (!enable_relay(lease->session_id, lease->relay, relay_token, error)) {
                     return false;
                 }
                 const std::lock_guard master_lock{master_mutex};
                 public_lobby_id = lease->lobby_id;
                 public_host_secret = lease->host_secret;
+                persistent_lease_path = lease_path;
+                persistent_lease = *lease;
                 next_heartbeat = std::chrono::steady_clock::now();
                 master_http = std::move(http);
                 master = std::move(client);
@@ -431,9 +453,10 @@ bool btga_dedicated_enable_public(std::string_view name, std::string& error) {
             return true;
         }
         const btga::HostRegistration registration = client->host(name, 4);
-        if (lease_path && !btga::save_authority_lease(*lease_path, {
-                registration.lobby.id, registration.host_secret,
-                registration.session_id, registration.relay})) {
+        const btga::PersistentAuthorityLease new_lease{
+            registration.lobby.id, registration.host_secret,
+            registration.session_id, registration.relay, 0U};
+        if (lease_path && !btga::save_authority_lease(*lease_path, new_lease)) {
             client->remove(registration.lobby.id, registration.host_secret);
             error = "could not persist authority control record";
             return false;
@@ -453,6 +476,8 @@ bool btga_dedicated_enable_public(std::string_view name, std::string& error) {
                 const std::lock_guard master_lock{master_mutex};
                 public_lobby_id = registration.lobby.id;
                 public_host_secret = registration.host_secret;
+                persistent_lease_path = lease_path;
+                persistent_lease = new_lease;
                 next_heartbeat = std::chrono::steady_clock::now();
                 master_http = std::move(http);
                 master = std::move(client);
@@ -743,9 +768,17 @@ extern "C" void btga_dedicated_run_loop(
             advance_retail_mode_counters(rdram);
             func_80079FF0(rdram, context);
             func_8009C524(rdram, context);
+            // Bootstrap and presentation code can consume the retail RNG
+            // without changing canonical gameplay. Re-anchor it to the
+            // authoritative end-of-tick value before validating the replay.
+            if (!btga::restore_gameplay_random_seed(
+                    {rdram, rdram_size}, frame.random_seed)) {
+                std::fputs("BTGA_AUTHORITY could not restore replay RNG state\n", stderr);
+                std::abort();
+            }
             std::array<std::uint8_t, btga::gameplay_snapshot_size> state{};
-            if (!btga::capture_gameplay_snapshot({rdram, rdram_size}, state) ||
-                canonical_state_digest(state) != frame.state_digest) {
+            const bool captured = btga::capture_gameplay_snapshot({rdram, rdram_size}, state);
+            if (!captured || canonical_state_digest(state) != frame.state_digest) {
                 std::fprintf(stderr,
                              "BTGA_AUTHORITY persistent replay diverged at tick=%u\n",
                              frame.tick);

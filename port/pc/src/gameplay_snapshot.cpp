@@ -14,6 +14,8 @@ constexpr std::size_t object_sound_handles_offset = 0x280U;
 constexpr std::size_t object_sound_handles_size = 3U * sizeof(std::uint32_t);
 constexpr std::size_t gameplay_globals_offset = 0x00219458U;
 constexpr std::size_t gameplay_globals_size = 0x178U;
+constexpr std::size_t gameplay_clock_fields_offset = 0x20U;   // D_80219478
+constexpr std::size_t gameplay_clock_fields_size = 0x18U;     // through D_8021948C
 constexpr std::size_t gameplay_mode_state_offset = 0x002195D4U;
 constexpr std::size_t player_pool_offset = 0x00235F00U;
 constexpr std::size_t player_pool_size = 4U * 0x250U;
@@ -35,6 +37,20 @@ bool guest_offset(std::uint32_t address, std::size_t size, std::size_t& offset) 
 }
 } // namespace
 
+bool gameplay_snapshot_random_seed(std::span<const std::uint8_t> snapshot,
+                                   std::uint32_t& random_seed) {
+    if (snapshot.size() != gameplay_snapshot_size) return false;
+    std::memcpy(&random_seed, snapshot.data(), sizeof(random_seed));
+    return true;
+}
+
+bool restore_gameplay_random_seed(std::span<std::uint8_t> rdram,
+                                  std::uint32_t random_seed) {
+    if (rdram.size() < rdram_size) return false;
+    std::memcpy(rdram.data() + random_seed_offset, &random_seed, sizeof(random_seed));
+    return true;
+}
+
 bool capture_gameplay_snapshot(std::span<const std::uint8_t> rdram,
                                std::span<std::uint8_t> snapshot) {
     if (rdram.size() < rdram_size || snapshot.size() != gameplay_snapshot_size) return false;
@@ -53,7 +69,13 @@ bool capture_gameplay_snapshot(std::span<const std::uint8_t> rdram,
         append(base + object_sound_handles_offset + object_sound_handles_size,
                object_size - object_sound_handles_offset - object_sound_handles_size);
     }
+    const std::size_t globals_cursor = cursor;
     append(gameplay_globals_offset, gameplay_globals_size);
+    // Wall-clock samples, render delta, measured FPS and elapsed host frames
+    // vary after process replacement. They do not drive authoritative world
+    // state and must never participate in a canonical digest.
+    std::memset(snapshot.data() + globals_cursor + gameplay_clock_fields_offset,
+                0, gameplay_clock_fields_size);
     append(gameplay_mode_state_offset, sizeof(std::uint32_t));
     append(player_pool_offset, player_pool_size);
     for (std::size_t player = 0; player < 4U; ++player) {
@@ -87,7 +109,12 @@ bool restore_gameplay_snapshot(std::span<std::uint8_t> rdram,
         restore(base + object_sound_handles_offset + object_sound_handles_size,
                 object_size - object_sound_handles_offset - object_sound_handles_size);
     }
-    restore(gameplay_globals_offset, gameplay_globals_size);
+    restore(gameplay_globals_offset, gameplay_clock_fields_offset);
+    cursor += gameplay_clock_fields_size;
+    restore(gameplay_globals_offset + gameplay_clock_fields_offset +
+                gameplay_clock_fields_size,
+            gameplay_globals_size - gameplay_clock_fields_offset -
+                gameplay_clock_fields_size);
     restore(gameplay_mode_state_offset, sizeof(std::uint32_t));
     restore(player_pool_offset, player_pool_size);
     for (std::size_t player = 0; player < 4U; ++player) {

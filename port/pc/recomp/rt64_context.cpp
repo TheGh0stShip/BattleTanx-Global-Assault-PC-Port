@@ -944,7 +944,7 @@ private:
         try {
             if (!online_http_) {
                 online_http_ = btga::make_platform_http_client(
-                    "https://btga.thegh0stship.com/api/v1");
+                    btga::master_service_url());
                 online_master_ = std::make_unique<btga::MasterClient>(*online_http_);
             }
             return true;

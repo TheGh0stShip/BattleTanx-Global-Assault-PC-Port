@@ -24,6 +24,7 @@ bool decode_authoritative_frame(
             &decoded, payload.data(), payload.size())) return false;
     frame.tick = decoded.tick;
     frame.state_digest = decoded.state_digest;
+    frame.random_seed = decoded.random_seed;
     frame.occupied_mask = decoded.occupied_mask;
     frame.connected_mask = decoded.connected_mask;
     frame.received_mask = decoded.received_mask;

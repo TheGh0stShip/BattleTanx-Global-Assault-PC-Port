@@ -136,9 +136,11 @@ try {
         $deadline = [DateTime]::UtcNow.AddSeconds(25)
         do {
             Start-Sleep -Milliseconds 100
-            $authorityText = if (Test-Path $authorityErr) {
-                [string](Get-Content $authorityErr -Raw)
-            } else { "" }
+            $authorityText = ""
+            if (Test-Path $authorityErr) {
+                $content = Get-Content $authorityErr -Raw
+                if ($null -ne $content) { $authorityText = [string]$content }
+            }
             $resumedLobbyLine = if (Test-Path $authorityOut) {
                 Get-Content $authorityOut | Where-Object { $_ -like "ONLINE_LOBBY_ID=*" } |
                     Select-Object -First 1

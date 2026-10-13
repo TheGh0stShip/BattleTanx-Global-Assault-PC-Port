@@ -760,8 +760,7 @@ void drive_headless_runtime(void*) {
                   << " rsp_requests=" << rsp_requests.load() << '\n';
         if (!headless_host_lobby_id.empty() && !headless_host_secret.empty()) {
             try {
-                auto http = btga::make_platform_http_client(
-                    "https://btga.thegh0stship.com/api/v1");
+                auto http = btga::make_platform_http_client(btga::master_service_url());
                 btga::MasterClient master{*http};
                 master.remove(headless_host_lobby_id, headless_host_secret);
             } catch (const std::exception& error) {
@@ -979,8 +978,7 @@ int runtime_main(int argc, char** argv) {
         }
     }
     if (dedicated_join || dedicated_headless) {
-        auto http = btga::make_platform_http_client(
-            "https://btga.thegh0stship.com/api/v1");
+        auto http = btga::make_platform_http_client(btga::master_service_url());
         btga::MasterClient master{*http};
         const char* lobby_id = dedicated_headless ? argv[3] : argv[2];
         const std::filesystem::path resume_path = dedicated_resume_path();
@@ -1049,8 +1047,7 @@ int runtime_main(int argc, char** argv) {
         }
         preboot_online_requested = true;
     } else if (online_host || online_join) {
-        auto http = btga::make_platform_http_client(
-            "https://btga.thegh0stship.com/api/v1");
+        auto http = btga::make_platform_http_client(btga::master_service_url());
         btga::MasterClient master{*http};
         if (online_host) {
             const btga::HostRegistration registration = master.host("Cold Boot Test", 2);

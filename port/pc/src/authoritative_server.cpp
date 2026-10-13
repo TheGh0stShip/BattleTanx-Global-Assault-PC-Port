@@ -88,6 +88,7 @@ std::optional<AuthorityEmission> AuthoritativeServerCore::step(
     BtgaNetAuthoritativeFrame wire{};
     wire.tick = frame->tick;
     wire.state_digest = frame->state_digest;
+    wire.random_seed = frame->random_seed;
     wire.occupied_mask = session_.occupied_mask();
     wire.connected_mask = session_.connected_mask();
     wire.received_mask = frame->received_mask;

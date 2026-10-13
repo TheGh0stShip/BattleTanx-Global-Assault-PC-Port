@@ -34,7 +34,7 @@ int main() {
     std::string_view stage = "startup";
     try {
         stage = "create HTTP client";
-        auto http = btga::make_platform_http_client("https://btga.thegh0stship.com/api/v1");
+        auto http = btga::make_platform_http_client(btga::master_service_url());
         btga::MasterClient master{*http, "pc-native-e2e-v1"};
         stage = "host lobby";
         btga::HostRegistration hosted = master.host("Native PC end-to-end test", 4);

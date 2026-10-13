@@ -42,8 +42,9 @@ private:
 class WinHttpClient final : public HttpClient {
 public:
     explicit WinHttpClient(std::string base) : base_(std::move(base)) {
-        if (!base_.starts_with("https://") || base_.ends_with('/')) {
-            throw std::invalid_argument("master URL must be an HTTPS URL without a trailing slash");
+        secure_ = base_.starts_with("https://");
+        if ((!secure_ && !base_.starts_with("http://")) || base_.ends_with('/')) {
+            throw std::invalid_argument("master URL must be an HTTP(S) URL without a trailing slash");
         }
     }
 
@@ -57,8 +58,8 @@ public:
         parts.dwUrlPathLength = static_cast<DWORD>(-1);
         parts.dwExtraInfoLength = static_cast<DWORD>(-1);
         if (!WinHttpCrackUrl(url.c_str(), static_cast<DWORD>(url.size()), 0, &parts) ||
-            parts.nScheme != INTERNET_SCHEME_HTTPS) {
-            throw std::runtime_error("could not parse master HTTPS URL");
+            parts.nScheme != (secure_ ? INTERNET_SCHEME_HTTPS : INTERNET_SCHEME_HTTP)) {
+            throw std::runtime_error("could not parse master HTTP URL");
         }
         const std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
         std::wstring target(parts.lpszUrlPath, parts.dwUrlPathLength);
@@ -75,8 +76,9 @@ public:
         const std::wstring method_text = wide(method);
         InternetHandle request_handle(WinHttpOpenRequest(
             connection.get(), method_text.c_str(), target.c_str(), nullptr,
-            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE));
-        if (!request_handle) throw std::runtime_error("could not create HTTPS request");
+            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+            secure_ ? WINHTTP_FLAG_SECURE : 0));
+        if (!request_handle) throw std::runtime_error("could not create HTTP request");
 
         std::wstring headers;
         if (body.size() > 4096) throw std::invalid_argument("HTTPS request body exceeds 4096 bytes");
@@ -121,6 +123,7 @@ public:
 
 private:
     std::string base_;
+    bool secure_ = true;
 };
 } // namespace
 

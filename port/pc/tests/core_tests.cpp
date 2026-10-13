@@ -49,7 +49,7 @@ int main() {
         std::filesystem::remove(path);
         const btga::PersistentAuthorityLease expected{
             "lobby-id", "host-secret", UINT64_C(0x1020304050607080),
-            {"relay.example", 30420U}};
+            {"relay.example", 30420U}, UINT32_C(0x12345678)};
         CHECK(btga::save_authority_lease(path, expected));
         const auto loaded = btga::load_authority_lease(path);
         CHECK(loaded && loaded->lobby_id == expected.lobby_id);
@@ -57,6 +57,7 @@ int main() {
         CHECK(loaded->session_id == expected.session_id);
         CHECK(loaded->relay.address == expected.relay.address);
         CHECK(loaded->relay.port == expected.relay.port);
+        CHECK(loaded->packet_sequence == expected.packet_sequence);
         {
             std::ofstream corrupt{path, std::ios::binary | std::ios::trunc};
             corrupt << "{not-json";
@@ -158,7 +159,7 @@ int main() {
         CHECK(authority.journal_size() == 4U);
         CHECK(authority.journal_base_tick() == 2U);
         CHECK(authority.copy_journal_from(0U, replay) == 4U);
-        CHECK(std::filesystem::file_size(translated_journal_path) == 16U + 4U * 32U);
+        CHECK(std::filesystem::file_size(translated_journal_path) == 16U + 4U * 36U);
         CHECK(replay[0].tick == 0U && replay[0].inputs[3].buttons == 4U);
         CHECK(replay[1].tick == 1U && replay[1].inputs[0].buttons == 9U);
         CHECK(replay[2].tick == 2U && replay[2].inputs[2].buttons == 0U);
@@ -208,8 +209,9 @@ int main() {
             CHECK(recovered.copy_journal_from(0U, replay) == replay.size());
             for (std::size_t index = 0; index < replay.size(); ++index) {
                 CHECK(replay[index].tick == index);
+                CHECK(replay[index].random_seed == index + 1U);
             }
-            CHECK(std::filesystem::file_size(persistent_path) == 16U + 4U * 32U);
+            CHECK(std::filesystem::file_size(persistent_path) == 16U + 4U * 36U);
 
             // After the caller restores the portable checkpoint and replays
             // any newer journal frames, canonical publication can continue at
@@ -493,6 +495,8 @@ int main() {
         }
         std::vector<std::uint8_t> snapshot(btga::gameplay_snapshot_size);
         CHECK(btga::capture_gameplay_snapshot(*host, snapshot));
+        std::uint32_t captured_seed = 0U;
+        CHECK(btga::gameplay_snapshot_random_seed(snapshot, captured_seed));
         *client = *host;
         std::fill(client->begin() + 0x00114C80U,
                   client->begin() + 0x00114C84U, std::uint8_t{0xEE});
@@ -517,6 +521,10 @@ int main() {
                       std::uint8_t{0xDD});
         }
         CHECK(btga::restore_gameplay_snapshot(*client, snapshot));
+        CHECK(btga::restore_gameplay_random_seed(*client, captured_seed));
+        CHECK(std::all_of(client->begin() + 0x00219478U,
+                          client->begin() + 0x00219490U,
+                          [](std::uint8_t value) { return value == 0xBBU; }));
         CHECK(std::equal(host->begin() + 0x001AD120U,
                          host->begin() + 0x001AD128U,
                          client->begin() + 0x001AD120U));
