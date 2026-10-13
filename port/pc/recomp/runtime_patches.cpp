@@ -61,6 +61,17 @@ bool replay_probe_requested() {
     return requested;
 }
 
+bool deterministic_network_clock_enabled() {
+    return btga::preboot_online_seed().has_value() ||
+           btga_dedicated_enabled() != 0 ||
+           btga_dedicated_client_enabled() != 0;
+}
+
+constexpr std::uint64_t synthetic_n64_clock(std::uint32_t frame) {
+    constexpr std::uint64_t n64_ticks_per_network_frame = UINT64_C(1'562'500);
+    return static_cast<std::uint64_t>(frame) * n64_ticks_per_network_frame;
+}
+
 std::uint64_t fnv1a64(const std::uint8_t* bytes, std::size_t size) {
     std::uint64_t hash = UINT64_C(1469598103934665603);
     for (std::size_t index = 0; index < size; ++index) {
@@ -162,11 +173,25 @@ extern "C" void btga_replay_probe_end(std::uint8_t* rdram, recomp_context* ctx) 
 
 extern "C" void btga_online_clock_begin(std::uint8_t* rdram, recomp_context*) {
     if (replay_probe.replaying) return;
-    if (!btga::preboot_online_seed()) return;
-    (void)btga::renderer::online_simulation_frame_barrier();
+    if (!deterministic_network_clock_enabled()) return;
+    // The legacy peer mode needs a frame rendezvous. Dedicated sessions are
+    // already paced by canonical authority frames and must not enter the
+    // peer-to-peer renderer barrier.
+    if (btga::preboot_online_seed()) {
+        (void)btga::renderer::online_simulation_frame_barrier();
+    }
     constexpr gpr frame_counter = static_cast<gpr>(static_cast<std::int32_t>(0x8021945CU));
     online_clock_sample.rdram = rdram;
     online_clock_sample.frame = static_cast<std::uint32_t>(MEM_W(0, frame_counter));
+}
+
+extern "C" void btga_online_clock_source(std::uint8_t* rdram, recomp_context* ctx) {
+    if (!deterministic_network_clock_enabled()) return;
+    constexpr gpr frame_counter = static_cast<gpr>(static_cast<std::int32_t>(0x8021945CU));
+    const auto frame = static_cast<std::uint32_t>(MEM_W(0, frame_counter));
+    const std::uint64_t clock = synthetic_n64_clock(frame);
+    ctx->r2 = static_cast<std::uint32_t>(clock >> 32U);
+    ctx->r3 = static_cast<std::uint32_t>(clock);
 }
 
 extern "C" void btga_online_clock_end(std::uint8_t* rdram, recomp_context*) {
@@ -181,7 +206,8 @@ extern "C" void btga_online_clock_end(std::uint8_t* rdram, recomp_context*) {
         MEM_W(0, frame_step) = static_cast<std::int32_t>(std::bit_cast<std::uint32_t>(1.0F));
         return;
     }
-    if (!btga::preboot_online_seed() || online_clock_sample.rdram != rdram) return;
+    if (!deterministic_network_clock_enabled() ||
+        online_clock_sample.rdram != rdram) return;
     constexpr gpr frame_counter = static_cast<gpr>(static_cast<std::int32_t>(0x8021945CU));
     constexpr gpr frame_step = static_cast<gpr>(static_cast<std::int32_t>(0x80219488U));
     constexpr gpr time_mode = static_cast<gpr>(static_cast<std::int32_t>(0x802195CCU));
@@ -190,6 +216,16 @@ extern "C" void btga_online_clock_end(std::uint8_t* rdram, recomp_context*) {
     MEM_W(0, frame_counter) = static_cast<std::int32_t>(
         online_clock_sample.frame + (paused ? 0U : 1U));
     MEM_W(0, frame_step) = static_cast<std::int32_t>(std::bit_cast<std::uint32_t>(1.0F));
+    const std::uint64_t clock = synthetic_n64_clock(online_clock_sample.frame);
+    const auto high = static_cast<std::int32_t>(clock >> 32U);
+    const auto low = static_cast<std::int32_t>(clock);
+    for (const std::uint32_t address : {UINT32_C(0x80219250),
+                                        UINT32_C(0x80219478),
+                                        UINT32_C(0x80219480)}) {
+        const gpr target = static_cast<gpr>(static_cast<std::int32_t>(address));
+        MEM_W(0, target) = high;
+        MEM_W(4, target) = low;
+    }
 }
 
 void apply_audio_bus_volumes(std::uint8_t* rdram) {

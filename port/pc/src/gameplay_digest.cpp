@@ -13,6 +13,8 @@ constexpr std::size_t object_pool_offset = 0x001AD128U;
 constexpr std::size_t object_pool_size = 24U * 0x4CCU;
 constexpr std::size_t object_size = 0x4CCU;
 constexpr std::size_t object_core_size = 0x290U;
+constexpr std::size_t object_sound_handles_offset = 0x280U;
+constexpr std::size_t object_sound_handles_size = 3U * sizeof(std::uint32_t);
 constexpr std::size_t frame_counter_offset = 0x0021945CU;
 constexpr std::size_t game_mode_offset = 0x002194A0U;
 constexpr std::size_t match_time_offset = 0x002194B0U;
@@ -79,7 +81,15 @@ GameplayStateDigests gameplay_state_digests(
     std::span<const std::uint8_t> rdram) {
     if (rdram.size() < rdram_size) return {};
     constexpr std::uint32_t initial = UINT32_C(2166136261);
-    const auto objects = region(rdram, object_pool_offset, object_pool_size);
+    std::array<std::uint8_t, object_pool_size> canonical_objects{};
+    std::memcpy(canonical_objects.data(), rdram.data() + object_pool_offset,
+                canonical_objects.size());
+    for (std::size_t index = 0; index < 24U; ++index) {
+        std::memset(canonical_objects.data() + index * object_size +
+                        object_sound_handles_offset,
+                    0, object_sound_handles_size);
+    }
+    const auto objects = std::span<const std::uint8_t>{canonical_objects};
     const auto random_seed = region(rdram, random_seed_offset, sizeof(std::uint32_t));
     const auto frame_counter = region(rdram, frame_counter_offset, sizeof(std::uint32_t));
     const auto game_mode = region(rdram, game_mode_offset, sizeof(std::uint32_t));
@@ -89,15 +99,17 @@ GameplayStateDigests gameplay_state_digests(
     std::uint32_t object_tail = initial;
     std::array<std::uint32_t, 24> object_slots{};
     for (std::size_t index = 0; index < 24U; ++index) {
-        const std::size_t base = object_pool_offset + index * object_size;
+        const std::size_t base = index * object_size;
         object_slots[index] = append_fnv1a(
-            initial, region(rdram, base, object_size));
+            initial, std::span<const std::uint8_t>{canonical_objects}.subspan(
+                         base, object_size));
         object_core = append_fnv1a(
-            object_core, region(rdram, base, object_core_size));
+            object_core, std::span<const std::uint8_t>{canonical_objects}.subspan(
+                             base, object_core_size));
         object_tail = append_fnv1a(
             object_tail,
-            region(rdram, base + object_core_size,
-                   object_size - object_core_size));
+            std::span<const std::uint8_t>{canonical_objects}.subspan(
+                base + object_core_size, object_size - object_core_size));
     }
 
     std::uint32_t player_headers = initial;

@@ -92,6 +92,17 @@ text = """
     { extern void btga_online_clock_begin(uint8_t *rdram, recomp_context *ctx); btga_online_clock_begin(rdram, ctx); }
 """
 
+# osGetTime returns in v0/v1 at 0x8009A004. Dedicated and legacy online
+# sessions replace that host-specific sample with a synthetic 30 Hz N64 clock
+# before the translated routine consumes it, keeping its history and branch
+# decisions deterministic on every machine.
+[[patches.hook]]
+func = "func_80099FE8"
+before_vram = 0x8009A004
+text = """
+    { extern void btga_online_clock_source(uint8_t *rdram, recomp_context *ctx); btga_online_clock_source(rdram, ctx); }
+"""
+
 [[patches.hook]]
 func = "func_80099FE8"
 before_vram = 0x8009A4C0

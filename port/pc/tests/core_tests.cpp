@@ -389,6 +389,11 @@ int main() {
                   client->begin() + 0x00114C84U, std::uint8_t{0xEE});
         std::fill(client->begin() + 0x001AD128U,
                   client->begin() + 0x001AD128U + 24U * 0x4CCU, std::uint8_t{0xAA});
+        constexpr std::size_t sound_handles = 0x001AD128U + 0x280U;
+        const std::array<std::uint8_t, 12> client_audio_handles{
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+        std::copy(client_audio_handles.begin(), client_audio_handles.end(),
+                  client->begin() + sound_handles);
         std::fill(client->begin() + 0x00219458U,
                   client->begin() + 0x00219458U + 0x178U, std::uint8_t{0xBB});
         std::fill(client->begin() + 0x002195D4U,
@@ -401,6 +406,8 @@ int main() {
                       std::uint8_t{0xDD});
         }
         CHECK(btga::restore_gameplay_snapshot(*client, snapshot));
+        CHECK(std::equal(client_audio_handles.begin(), client_audio_handles.end(),
+                         client->begin() + sound_handles));
         CHECK(btga::gameplay_state_digests(*host).combined ==
               btga::gameplay_state_digests(*client).combined);
         CHECK(std::equal(host->begin() + 0x002195D4U,

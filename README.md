@@ -256,10 +256,12 @@ The earlier peer-hosted synchronization mode remains experimental and is being
 superseded by a native dedicated authority: the server executes the translated
 gameplay simulation, publishes canonical four-player inputs, and periodically
 rebases clients with canonical world snapshots. The authority and a real
-translated headless client have completed automated public-relay runs with
-three additional protocol clients. Client rendering between authority
-snapshots and seamless reconnect are still active development; this is not yet
-a release-ready public multiplayer mode. Live
+translated Windows client now complete an automated public-relay gate with
+three additional protocol clients while checking every authoritative tick for
+divergence. Periodic recovery snapshots are validated without overwriting a
+synchronized client. Mid-match reconnect from a genuinely diverged process
+still requires a broader causal-state schema, so this is not yet a
+release-ready public multiplayer mode. Live
 service status is available at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/).
 Opening the Online tab itself remains network-inert; Refresh, Host, and Join are

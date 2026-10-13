@@ -14,16 +14,19 @@ explicit opt-in actions.
   canonical input set and broadcasts it with a canonical state digest.
 - The server waits for all configured seats before tick zero, but does not
   freeze the match when a connected seat later times out.
-- Full canonical gameplay snapshots are sent at startup and every 30 ticks.
-  Late clients can rebase onto the server timeline instead of depending on an
-  identical menu history.
+- Canonical gameplay snapshots are sent at startup and every 30 ticks. A new
+  client can bootstrap from authority state; an established client confirms a
+  matching snapshot but never lets a nonmatching partial snapshot overwrite a
+  simulation that is already advancing on canonical frames.
 - The public master, Azure UDP relay, four protocol clients, and a real
   translated headless client are covered by an unattended PowerShell gate.
 
-The translated client currently applies the canonical snapshots but its local
-simulation diverges between rebases. Server-driven rendering/interpolation and
-reliable reconnect snapshot transfer remain required before this is exposed as
-a finished menu option.
+The translated Windows client and three protocol peers pass an unattended
+four-seat public-relay gate with every simulated tick checked against the
+authority digest. The portable snapshot schema excludes host-local audio
+handles. A complete causal-state schema for seamless mid-match reconnect, plus
+server-driven rendering/interpolation, remain required before this is exposed
+as a finished menu option.
 
 ```powershell
 .\port\pc\scripts\test-dedicated-multiplayer.ps1 `

@@ -292,10 +292,13 @@ development. The peer-hosted path is being superseded by a four-player native
 dedicated authority. The authority runs the translated gameplay simulation,
 waits for four authenticated seats before tick zero, continues when a seat
 times out, publishes canonical input frames, and sends periodic canonical
-gameplay snapshots. A real translated headless client plus three protocol peers
-has completed this flow through the public service. The translated client still
-diverges between snapshot rebases, so this is an automated development path,
-not a finished public multiplayer mode.
+gameplay snapshots. A real translated Windows client plus three protocol peers
+has completed this flow through the public service. The gate now rejects any
+client/authority digest divergence instead of accepting a boot-only success.
+An established client confirms matching recovery snapshots and refuses to
+overwrite live state with a nonmatching one. Complete mid-match reconnect is
+still under development, so this remains a development path rather than a
+finished public multiplayer mode.
 
 Build and run the current dedicated gate on Windows with:
 

@@ -23,6 +23,7 @@ if (-not (Test-Path $server) -or -not (Test-Path $bot)) {
 
 $evidence = Join-Path $build "dedicated-evidence"
 New-Item $evidence -ItemType Directory -Force | Out-Null
+Get-ChildItem $evidence -File -ErrorAction SilentlyContinue | Remove-Item -Force
 $authorityOut = Join-Path $evidence "authority.stdout.log"
 $authorityErr = Join-Path $evidence "authority.stderr.log"
 $clientOut = Join-Path $evidence "client.stdout.log"
@@ -102,9 +103,13 @@ try {
     $clientLog = ""
     $content = Get-Content $clientErr -Raw
     if ($null -ne $content) { $clientLog = [string]$content }
-    if (-not $clientLog.Contains("BTGA_CLIENT applied snapshot tick=0") -or
+    if ((-not $clientLog.Contains("BTGA_CLIENT applied snapshot tick=0") -and
+         -not $clientLog.Contains("BTGA_CLIENT confirmed snapshot tick=0")) -or
         -not $clientLog.Contains("Headless boot window elapsed")) {
         throw "Translated client did not apply authority state and complete its run."
+    }
+    if ($clientLog.Contains("BTGA_CLIENT DESYNC")) {
+        throw "Translated client diverged from the dedicated authority. See $clientErr."
     }
     Write-Host "Dedicated 4-player test passed. Lobby: $lobby"
     Write-Host "Evidence: $evidence"
@@ -112,6 +117,7 @@ try {
     foreach ($process in $processes) {
         if ($process -and -not $process.HasExited) {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            $process.WaitForExit(5000) | Out-Null
         }
     }
 }

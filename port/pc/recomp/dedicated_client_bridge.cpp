@@ -38,9 +38,18 @@ std::uint32_t input_sequence = 0;
 std::uint8_t local_seat = 0;
 bool client_enabled = false;
 bool tick_active = false;
+bool bootstrap_complete = false;
 std::uint64_t expected_digest = 0;
 std::chrono::steady_clock::time_point next_keepalive{};
 
+std::uint64_t state_digest(std::span<const std::uint8_t> state) {
+    std::uint64_t digest = UINT64_C(1469598103934665603);
+    for (const std::uint8_t byte : state) {
+        digest ^= byte;
+        digest *= UINT64_C(1099511628211);
+    }
+    return digest;
+}
 bool poll_frames_locked() {
     if (!client_online || client_online->state() != btga::OnlineState::Lobby) return false;
     std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
@@ -118,6 +127,7 @@ bool btga_dedicated_client_enable(
     input_sequence = 0U;
     frames.fill(std::nullopt);
     client_enabled = true;
+    bootstrap_complete = false;
     next_keepalive = std::chrono::steady_clock::now();
     if (!send_inputs_locked(0U, {})) {
         error = "could not announce dedicated-client readiness";
@@ -143,14 +153,30 @@ extern "C" void btga_dedicated_client_tick_begin(
     bool warned = false;
     for (;;) {
         (void)poll_frames_locked();
-        if (pending_snapshot && pending_snapshot->tick >= expected_tick &&
+        if (pending_snapshot && bootstrap_complete &&
+            pending_snapshot->tick < expected_tick) {
+            pending_snapshot.reset();
+        }
+        if (pending_snapshot &&
+            (!bootstrap_complete || pending_snapshot->tick == expected_tick) &&
             pending_snapshot->state.size() == btga::gameplay_snapshot_size) {
-            if (btga::restore_gameplay_snapshot(
-                    {rdram, rdram_size}, pending_snapshot->state)) {
+            std::array<std::uint8_t, btga::gameplay_snapshot_size> current{};
+            const bool already_current =
+                btga::capture_gameplay_snapshot({rdram, rdram_size}, current) &&
+                state_digest(current) == pending_snapshot->state_digest;
+            const bool may_restore = !bootstrap_complete;
+            if (already_current || (may_restore && btga::restore_gameplay_snapshot(
+                    {rdram, rdram_size}, pending_snapshot->state))) {
                 expected_tick = pending_snapshot->tick;
+                bootstrap_complete = true;
                 frames.fill(std::nullopt);
-                std::fprintf(stderr, "BTGA_CLIENT applied snapshot tick=%u\n",
+                std::fprintf(stderr, "BTGA_CLIENT %s snapshot tick=%u\n",
+                             already_current ? "confirmed" : "applied",
                              expected_tick);
+            } else if (bootstrap_complete) {
+                std::fprintf(stderr,
+                             "BTGA_CLIENT ignored nonmatching recovery snapshot tick=%u\n",
+                             pending_snapshot->tick);
             }
             pending_snapshot.reset();
         }
@@ -179,12 +205,8 @@ extern "C" void btga_dedicated_client_tick_end(
     if (!client_enabled || !tick_active) return;
     std::array<std::uint8_t, btga::gameplay_snapshot_size> canonical_state{};
     if (btga::capture_gameplay_snapshot({rdram, rdram_size}, canonical_state)) {
-        std::uint64_t digest = UINT64_C(1469598103934665603);
-        for (const std::uint8_t byte : canonical_state) {
-            digest ^= byte;
-            digest *= UINT64_C(1099511628211);
-        }
-        if (digest != expected_digest && expected_tick % 30U == 0U) {
+        const std::uint64_t digest = state_digest(canonical_state);
+        if (digest != expected_digest) {
             std::fprintf(stderr,
                          "BTGA_CLIENT DESYNC tick=%u authority=%016llx local=%016llx\n",
                          expected_tick,

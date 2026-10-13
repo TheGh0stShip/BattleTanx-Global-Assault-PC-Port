@@ -525,6 +525,10 @@ extern "C" bool btga_extended_visibility_enabled() {
 }
 
 extern "C" bool btga_independent_turret_enabled() {
+    // Turret aim is simulation-affecting state. Until it is represented in the
+    // dedicated protocol, allowing each peer's local setting/input to drive it
+    // would make otherwise identical simulations diverge.
+    if (btga_dedicated_enabled() || btga_dedicated_client_enabled()) return false;
     const std::lock_guard lock(input_settings_mutex);
     return pc_settings.mod_independent_turret;
 }
@@ -545,11 +549,13 @@ extern "C" float btga_screen_shake_intensity() {
 }
 
 extern "C" float btga_turret_stick_x(int player) {
+    if (btga_dedicated_enabled() || btga_dedicated_client_enabled()) return 0.0F;
     if (player < 0 || player >= max_controllers) return 0.0F;
     return turret_stick_x[static_cast<std::size_t>(player)].load(std::memory_order_relaxed);
 }
 
 extern "C" bool btga_turret_aim_active(int player) {
+    if (btga_dedicated_enabled() || btga_dedicated_client_enabled()) return false;
     if (player < 0 || player >= max_controllers) return false;
     if (player == 0 && mouse_turret_aiming.load(std::memory_order_relaxed)) return true;
     return turret_stick_x[static_cast<std::size_t>(player)].load(std::memory_order_relaxed) != 0.0F;

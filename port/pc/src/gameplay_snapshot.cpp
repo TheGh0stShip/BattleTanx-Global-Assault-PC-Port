@@ -7,7 +7,9 @@ namespace {
 constexpr std::size_t rdram_size = 8U * 1024U * 1024U;
 constexpr std::size_t random_seed_offset = 0x00114C80U;
 constexpr std::size_t object_pool_offset = 0x001AD128U;
-constexpr std::size_t object_pool_size = 24U * 0x4CCU;
+constexpr std::size_t object_size = 0x4CCU;
+constexpr std::size_t object_sound_handles_offset = 0x280U;
+constexpr std::size_t object_sound_handles_size = 3U * sizeof(std::uint32_t);
 constexpr std::size_t gameplay_globals_offset = 0x00219458U;
 constexpr std::size_t gameplay_globals_size = 0x178U;
 constexpr std::size_t gameplay_mode_state_offset = 0x002195D4U;
@@ -40,7 +42,14 @@ bool capture_gameplay_snapshot(std::span<const std::uint8_t> rdram,
         cursor += size;
     };
     append(random_seed_offset, sizeof(std::uint32_t));
-    append(object_pool_offset, object_pool_size);
+    for (std::size_t object = 0; object < 24U; ++object) {
+        const std::size_t base = object_pool_offset + object * object_size;
+        append(base, object_sound_handles_offset);
+        std::memset(snapshot.data() + cursor, 0, object_sound_handles_size);
+        cursor += object_sound_handles_size;
+        append(base + object_sound_handles_offset + object_sound_handles_size,
+               object_size - object_sound_handles_offset - object_sound_handles_size);
+    }
     append(gameplay_globals_offset, gameplay_globals_size);
     append(gameplay_mode_state_offset, sizeof(std::uint32_t));
     append(player_pool_offset, player_pool_size);
@@ -67,7 +76,13 @@ bool restore_gameplay_snapshot(std::span<std::uint8_t> rdram,
         cursor += size;
     };
     restore(random_seed_offset, sizeof(std::uint32_t));
-    restore(object_pool_offset, object_pool_size);
+    for (std::size_t object = 0; object < 24U; ++object) {
+        const std::size_t base = object_pool_offset + object * object_size;
+        restore(base, object_sound_handles_offset);
+        cursor += object_sound_handles_size; // host-local audio handles
+        restore(base + object_sound_handles_offset + object_sound_handles_size,
+                object_size - object_sound_handles_offset - object_sound_handles_size);
+    }
     restore(gameplay_globals_offset, gameplay_globals_size);
     restore(gameplay_mode_state_offset, sizeof(std::uint32_t));
     restore(player_pool_offset, player_pool_size);

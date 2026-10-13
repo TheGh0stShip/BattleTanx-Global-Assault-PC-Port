@@ -5,8 +5,8 @@
 #include <array>
 #include <chrono>
 #include <charconv>
-#include <cstdlib>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -63,6 +63,32 @@ std::uint32_t server_clock_tick() {
     const auto elapsed = std::chrono::steady_clock::now() - authority_started;
     return static_cast<std::uint32_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() / 33);
+}
+
+void advance_retail_mode_counters(std::uint8_t* rdram) {
+    constexpr gpr inner_previous = static_cast<gpr>(static_cast<std::int32_t>(0x802195C0U));
+    constexpr gpr inner_counter = static_cast<gpr>(static_cast<std::int32_t>(0x802195C4U));
+    constexpr gpr inner_target = static_cast<gpr>(static_cast<std::int32_t>(0x802195C8U));
+    constexpr gpr inner_current = static_cast<gpr>(static_cast<std::int32_t>(0x802195CCU));
+    constexpr gpr outer_previous = static_cast<gpr>(static_cast<std::int32_t>(0x802195D0U));
+    constexpr gpr outer_counter = static_cast<gpr>(static_cast<std::int32_t>(0x802195D4U));
+    constexpr gpr outer_target = static_cast<gpr>(static_cast<std::int32_t>(0x802195D8U));
+    constexpr gpr outer_current = static_cast<gpr>(static_cast<std::int32_t>(0x802195DCU));
+
+    if (MEM_W(0, outer_current) != MEM_W(0, outer_target)) {
+        MEM_W(0, outer_previous) = MEM_W(0, outer_current);
+        MEM_W(0, outer_current) = MEM_W(0, outer_target);
+        MEM_W(0, outer_counter) = 0;
+    } else {
+        ++MEM_W(0, outer_counter);
+    }
+    if (MEM_W(0, inner_current) != MEM_W(0, inner_target)) {
+        MEM_W(0, inner_previous) = MEM_W(0, inner_current);
+        MEM_W(0, inner_current) = MEM_W(0, inner_target);
+        MEM_W(0, inner_counter) = 0;
+    } else {
+        ++MEM_W(0, inner_counter);
+    }
 }
 
 bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& relay,
@@ -427,6 +453,7 @@ extern "C" void btga_dedicated_run_loop(
                 announced_ready = true;
             }
         }
+        advance_retail_mode_counters(rdram);
         func_80079FF0(rdram, context);
         if (!initial_snapshot_sent) {
             const std::lock_guard lock{authority_mutex};
