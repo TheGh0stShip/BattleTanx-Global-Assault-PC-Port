@@ -118,12 +118,13 @@ lobbies; the default is one.
 When `-Rom` is supplied, the Windows harness additionally launches pairs of real
 recompiled runtimes with isolated data directories. The first creates a lobby,
 the second reads its generated lobby ID and joins, both complete the signed
-pre-boot relay rendezvous, run with a hidden native renderer and discarded
-audio for the bounded interval, navigate the retail two-player front end with
-deterministic scripted controller input, and enter a real two-human gameplay epoch,
-require both peers to report an acknowledged snapshot and continued post-rebase
-frames, require every sampled gameplay checksum to match, reject any digest
-mismatch or synchronization timeout, and exit. A local controller-pak file is
+pre-boot relay rendezvous, run the real game and networking without creating a
+GPU renderer (and with discarded audio) for the bounded interval, navigate the
+retail two-player front end with deterministic scripted controller input, and
+enter a real two-human gameplay epoch. Both peers must report an acknowledged
+snapshot and continued post-rebase frames; every sampled gameplay checksum
+must match, with any digest mismatch or synchronization timeout failing the
+run. A local controller-pak file is
 required for deterministic native gameplay scenarios and is copied into each
 isolated profile; it is never uploaded.
 The input script includes bounded periodic confirmation pulses so it can advance
@@ -133,15 +134,14 @@ Logs are retained under
 required. Five paired boots run by default; `-GameRuns` changes that count. The
 ROM stays local and is never copied or uploaded.
 
-The current automated Windows evidence is five consecutive three-minute cold
-boots. Every pair entered gameplay at simulation frame 381, advanced through
-the end-of-match/intermission states, established a second identical gameplay
-epoch at frame 3714, and remained synchronized through frame 4740. Every
-sampled gameplay checksum matched, no peer emitted a digest mismatch, abort or
-timeout, and every public lobby was removed afterward. The harness compares
-the complete epoch and sampled-checksum sequences, so legitimate match
-transitions are covered without mistaking them for duplicate snapshot
-application.
+The latest recovery matrix ran ten consecutive native Windows sessions. Runs
+1–4 synchronized normally, run 5 deliberately terminated the joining peer,
+and runs 6–10 all created fresh lobbies and synchronized normally afterward.
+Every stable session reached the same final sampled tick and checksum, no peer
+emitted a digest mismatch, abort, or timeout, and every public lobby was
+removed afterward. The harness compares the complete epoch and
+sampled-checksum sequences, so legitimate match transitions are covered
+without mistaking them for duplicate snapshot application.
 
 The optional `-KillClientAfterEpoch` fault mode terminates the joining runtime
 immediately after both peers establish a real gameplay epoch. It requires the
@@ -156,6 +156,11 @@ progress watchdog. Results are written to
 SHA-256 and source Git revision so results cannot be confused with a stale
 local build. All logs, saves, and temporary ROM copies remain untracked build
 artifacts.
+
+Pass `-ShowWindows` when the visible RT64 rendering path itself needs testing.
+The default rendererless mode isolates simulation and networking failures from
+graphics-driver or window-system failures; it does not replace visible
+multiplayer testing.
 
 Do not place admission tokens, host secrets, ROMs, or packet captures containing
 private test data in bug reports or commits.

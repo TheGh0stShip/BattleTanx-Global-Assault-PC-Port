@@ -328,3 +328,8 @@ synchronized gameplay. A progress watchdog rejects frozen pairs, and
 `headless-online-evidence/summary.json` records the result, tested executable
 SHA-256, and source Git revision. Temporary ROM copies, saves, and logs remain
 build artifacts and must not be committed.
+
+By default this unattended gate runs the real game simulation and networking
+without creating a GPU renderer, which keeps graphics-driver failures from
+masquerading as synchronization failures. Add `-ShowWindows` to exercise the
+visible RT64 path as a separate diagnostic.
