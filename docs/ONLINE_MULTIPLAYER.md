@@ -47,6 +47,10 @@ is exposed as a finished menu option.
 
 Add `-RenderedClient` to exercise the actual Windows renderer/input client
 unattended with the same digest and authority-timeout checks.
+For repeatable recovery coverage, add
+`-ReconnectClient -ReconnectCycles 2`. The gate cold-restarts the translated
+client twice and requires seat reclaim, resume-token rotation, bounded journal
+replay, and a positive confirmed authority tick after every restart.
 
 The older peer-hosted flow documented below remains available for comparison,
 but it is not the architecture being taken to production.

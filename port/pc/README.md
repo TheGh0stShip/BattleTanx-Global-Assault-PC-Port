@@ -318,6 +318,10 @@ Build and run the current dedicated gate on Windows with:
 
 Add `-RenderedClient` to run that unattended gate through the actual Windows
 renderer/input client instead of the headless translated client.
+Add `-ReconnectClient -ReconnectCycles 2` to kill and cold-restart the
+translated client twice. Every replacement process must reclaim the same seat,
+rotate its resume credential, replay the canonical journal, and reconverge at a
+positive authority tick.
 
 For a visible client, leave the authority running, copy the printed lobby ID,
 and launch `BattleTanxGA.exe --dedicated-join LOBBY_ID BattleTanxGA.z64`.

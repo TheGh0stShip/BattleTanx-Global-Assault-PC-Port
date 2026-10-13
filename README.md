@@ -291,6 +291,12 @@ BattleTanxGA.exe --dedicated-join LOBBY_ID BattleTanxGA.z64
 ./port/pc/scripts/test-dedicated-multiplayer.ps1 `
   -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows
 
+# Force two cold client restarts and prove seat reclaim, credential rotation,
+# canonical journal replay, and reconvergence after each restart
+./port/pc/scripts/test-dedicated-multiplayer.ps1 `
+  -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows `
+  -ReconnectClient -ReconnectCycles 2
+
 ```
 
 ## License
