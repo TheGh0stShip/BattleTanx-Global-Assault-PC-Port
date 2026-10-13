@@ -92,6 +92,7 @@ if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed." }
 
 & $cmake --build $build --target btga_runtime_probe btga_pc_tests `
     btga_pc_synchronization_soak btga_authoritative_server_soak `
+    btga_canonical_journal_soak `
     btga_dedicated_client_bot --parallel
 if ($LASTEXITCODE -ne 0) { throw "Native build failed." }
 

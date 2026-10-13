@@ -89,6 +89,10 @@ add_executable(btga_authoritative_server_soak tests/authoritative_server_soak.cp
 target_link_libraries(btga_authoritative_server_soak PRIVATE btga_pc_core)
 add_test(NAME btga_authoritative_server_soak COMMAND btga_authoritative_server_soak)
 
+add_executable(btga_canonical_journal_soak tests/canonical_journal_soak.cpp)
+target_link_libraries(btga_canonical_journal_soak PRIVATE btga_pc_core)
+add_test(NAME btga_canonical_journal_soak COMMAND btga_canonical_journal_soak)
+
 add_executable(btga_pc_live_multiplayer_test tests/live_multiplayer_test.cpp)
 target_link_libraries(btga_pc_live_multiplayer_test PRIVATE btga_pc_core)
 
