@@ -24,6 +24,7 @@
 #include <span>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "btga/texture_packs.hpp"
@@ -937,6 +938,7 @@ private:
         std::vector<btga::OnlineLobby> lobbies;
         std::optional<btga::HostRegistration> host;
         std::optional<btga::JoinRegistration> join;
+        int error_status = 0;
         std::string error;
     };
 
@@ -965,6 +967,10 @@ private:
                 OnlineTaskResult result;
                 result.kind = kind;
                 try { operation(result); }
+                catch (const btga::MasterServiceError& error) {
+                    result.error_status = error.status();
+                    result.error = error.what();
+                }
                 catch (const std::exception& error) { result.error = error.what(); }
                 return result;
             });
@@ -1658,7 +1664,16 @@ private:
             online_task_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             OnlineTaskResult result = online_task_.get();
             if (!result.error.empty()) {
-                online_status_ = result.error;
+                if (result.kind == OnlineTaskKind::Join && result.error_status == 404) {
+                    const std::string stale_lobby = std::exchange(online_pending_lobby_, {});
+                    std::erase_if(online_lobbies_, [&stale_lobby](const btga::OnlineLobby& lobby) {
+                        return lobby.id == stale_lobby;
+                    });
+                    online_status_ = "That lobby expired. Refreshing the public lobby list...";
+                    browse_online();
+                } else {
+                    online_status_ = result.error;
+                }
             } else if (result.kind == OnlineTaskKind::Browse) {
                 online_lobbies_ = std::move(result.lobbies);
                 online_status_ = online_lobbies_.empty()

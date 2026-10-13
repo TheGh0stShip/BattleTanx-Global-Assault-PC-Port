@@ -40,6 +40,15 @@ long histories. Longer interactive campaign coverage, server-driven
 interpolation, and cross-architecture validation remain required before this
 is exposed as a finished menu option.
 
+The existing 32,328-byte gameplay snapshot is deliberately **not** a late-join
+checkpoint. A fresh process can install it and verify the bytes it contains,
+but an end-to-end four-seat experiment diverged on the first simulated tick
+when it was installed at a nonzero tick. It omits simulation-driving state that
+is irrelevant to periodic comparison but required to resume execution. Until a
+versioned portable checkpoint captures that complete state, cold clients must
+use the retained tick-zero bootstrap and canonical journal replay. Do not prune
+journal records needed by that path.
+
 ### Authority-process recovery (development gate)
 
 On Windows, the supported operator entry point is the restart supervisor:

@@ -109,6 +109,12 @@ std::atomic_bool online_input_presampled{false};
 std::atomic_bool mouse_turret_aiming{false};
 btga::PcSettings pc_settings = btga::PcSettings::defaults();
 std::mutex input_settings_mutex;
+bool preboot_online_requested = false;
+bool automated_online = false;
+bool automated_online_host = false;
+bool boot_requested = false;
+std::atomic_uint32_t automated_poll_counter{0};
+std::atomic_uint32_t automated_input_tick{0};
 #ifdef BTGA_HAS_RT64
 SDL_Window* window = nullptr;
 SDL_AudioDeviceID audio_device = 0;
@@ -116,12 +122,6 @@ std::mutex audio_mutex;
 std::uint32_t audio_frequency = 44100;
 std::array<SDL_GameController*, max_controllers> gamepads{};
 bool interactive = false;
-bool preboot_online_requested = false;
-bool automated_online = false;
-bool automated_online_host = false;
-bool boot_requested = false;
-std::atomic_uint32_t automated_poll_counter{0};
-std::atomic_uint32_t automated_input_tick{0};
 
 struct KeyboardScancodes {
     SDL_Scancode stick_up = SDL_SCANCODE_W;
@@ -401,7 +401,10 @@ void poll_input() {
             }
         }
     }
-    const int online_slot = btga::renderer::online_local_player_slot();
+    int online_slot = -1;
+#ifdef BTGA_HAS_RT64
+    online_slot = btga::renderer::online_local_player_slot();
+#endif
     if (online_slot >= 0 && online_slot < 2) {
         std::uint16_t buttons = 0;
         float x = 0.0F;
@@ -637,7 +640,10 @@ ultramodern::input::connected_device_info_t connected_device(int controller) {
         return {ultramodern::input::Device::Controller,
                 ultramodern::input::Pak::RumblePak};
     }
-    const int online_slot = btga::renderer::online_local_player_slot();
+    int online_slot = -1;
+#ifdef BTGA_HAS_RT64
+    online_slot = btga::renderer::online_local_player_slot();
+#endif
     if (online_slot >= 0 && (controller == 0 || controller == 1)) {
         return {ultramodern::input::Device::Controller, ultramodern::input::Pak::RumblePak};
     }

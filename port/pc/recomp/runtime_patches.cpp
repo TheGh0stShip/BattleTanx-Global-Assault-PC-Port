@@ -13,9 +13,11 @@
 #include "dedicated_runtime_bridge.hpp"
 #include "dedicated_client_bridge.hpp"
 
+#ifdef BTGA_HAS_RT64
 namespace btga::renderer {
 bool online_simulation_frame_barrier();
 }
+#endif
 
 extern "C" void yield_self_1ms(std::uint8_t* rdram);
 extern "C" bool btga_extended_visibility_enabled();
@@ -178,7 +180,9 @@ extern "C" void btga_online_clock_begin(std::uint8_t* rdram, recomp_context*) {
     // already paced by canonical authority frames and must not enter the
     // peer-to-peer renderer barrier.
     if (btga::preboot_online_seed()) {
+#ifdef BTGA_HAS_RT64
         (void)btga::renderer::online_simulation_frame_barrier();
+#endif
     }
     constexpr gpr frame_counter = static_cast<gpr>(static_cast<std::int32_t>(0x8021945CU));
     online_clock_sample.rdram = rdram;

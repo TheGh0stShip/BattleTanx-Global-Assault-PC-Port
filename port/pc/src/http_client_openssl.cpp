@@ -114,20 +114,36 @@ std::string decode_chunked(std::string_view input) {
 class OpenSslHttpClient final : public HttpClient {
 public:
     explicit OpenSslHttpClient(std::string base) {
-        constexpr std::string_view prefix = "https://";
-        if (!base.starts_with(prefix) || base.ends_with('/')) {
-            throw std::invalid_argument("master URL must be an HTTPS URL without a trailing slash");
+        constexpr std::string_view https_prefix = "https://";
+        constexpr std::string_view http_prefix = "http://";
+        secure_ = base.starts_with(https_prefix);
+        const bool loopback_http = base.starts_with("http://127.0.0.1:") ||
+            base.starts_with("http://localhost:") || base.starts_with("http://[::1]:");
+        if ((!secure_ && !loopback_http) || base.ends_with('/')) {
+            throw std::invalid_argument(
+                "master URL must be HTTPS or an HTTP loopback URL without a trailing slash");
         }
+        const std::string_view prefix = secure_ ? https_prefix : http_prefix;
         const std::size_t path = base.find('/', prefix.size());
         const std::string authority = base.substr(prefix.size(), path - prefix.size());
         base_path_ = path == std::string::npos ? "" : base.substr(path);
-        const std::size_t colon = authority.rfind(':');
-        if (colon != std::string::npos) {
+        host_header_ = authority;
+        if (authority.starts_with('[')) {
+            const std::size_t close = authority.find(']');
+            if (close == std::string::npos || close == 1U ||
+                (close + 1U < authority.size() && authority[close + 1U] != ':')) {
+                throw std::invalid_argument("master URL is invalid");
+            }
+            host_ = authority.substr(1U, close - 1U);
+            port_ = close + 1U < authority.size()
+                ? authority.substr(close + 2U) : (secure_ ? "443" : "80");
+        } else if (const std::size_t colon = authority.rfind(':');
+                   colon != std::string::npos) {
             host_ = authority.substr(0, colon);
             port_ = authority.substr(colon + 1);
         } else {
             host_ = authority;
-            port_ = "443";
+            port_ = secure_ ? "443" : "80";
         }
         if (host_.empty() || has_controls(host_) || base_path_.find("..") != std::string::npos) {
             throw std::invalid_argument("master URL is invalid");
@@ -175,22 +191,26 @@ public:
         }
         if (!socket) throw std::runtime_error("master connection failed");
 
-        std::unique_ptr<SSL_CTX, SslContextDeleter> context(SSL_CTX_new(TLS_client_method()));
-        if (!context || SSL_CTX_set_min_proto_version(context.get(), TLS1_2_VERSION) != 1 ||
-            SSL_CTX_set_default_verify_paths(context.get()) != 1) {
-            throw std::runtime_error("TLS initialization failed");
-        }
-        SSL_CTX_set_verify(context.get(), SSL_VERIFY_PEER, nullptr);
-        std::unique_ptr<SSL, SslDeleter> ssl(SSL_new(context.get()));
-        if (!ssl || SSL_set_tlsext_host_name(ssl.get(), host_.c_str()) != 1 ||
-            X509_VERIFY_PARAM_set1_host(SSL_get0_param(ssl.get()), host_.c_str(), 0) != 1 ||
-            SSL_set_fd(ssl.get(), socket.get()) != 1 || SSL_connect(ssl.get()) != 1 ||
-            SSL_get_verify_result(ssl.get()) != X509_V_OK) {
-            throw std::runtime_error("TLS connection or certificate verification failed");
+        std::unique_ptr<SSL_CTX, SslContextDeleter> context;
+        std::unique_ptr<SSL, SslDeleter> ssl;
+        if (secure_) {
+            context.reset(SSL_CTX_new(TLS_client_method()));
+            if (!context || SSL_CTX_set_min_proto_version(context.get(), TLS1_2_VERSION) != 1 ||
+                SSL_CTX_set_default_verify_paths(context.get()) != 1) {
+                throw std::runtime_error("TLS initialization failed");
+            }
+            SSL_CTX_set_verify(context.get(), SSL_VERIFY_PEER, nullptr);
+            ssl.reset(SSL_new(context.get()));
+            if (!ssl || SSL_set_tlsext_host_name(ssl.get(), host_.c_str()) != 1 ||
+                X509_VERIFY_PARAM_set1_host(SSL_get0_param(ssl.get()), host_.c_str(), 0) != 1 ||
+                SSL_set_fd(ssl.get(), socket.get()) != 1 || SSL_connect(ssl.get()) != 1 ||
+                SSL_get_verify_result(ssl.get()) != X509_V_OK) {
+                throw std::runtime_error("TLS connection or certificate verification failed");
+            }
         }
 
         std::string request_text = std::string(method) + " " + base_path_ +
-            std::string(path) + " HTTP/1.1\r\nHost: " + host_ +
+            std::string(path) + " HTTP/1.1\r\nHost: " + host_header_ +
             "\r\nAccept: application/json\r\nConnection: close\r\nUser-Agent: BattleTanxGA-PC/1\r\n";
         if (!bearer.empty()) request_text += "Authorization: Bearer " + std::string(bearer) + "\r\n";
         if (!body.empty()) request_text += "Content-Type: application/json\r\n";
@@ -200,23 +220,30 @@ public:
         const auto io_deadline = std::chrono::steady_clock::now() +
             std::chrono::seconds(30);
         while (sent < request_text.size()) {
-            const int count = SSL_write(ssl.get(), request_text.data() + sent,
-                                        static_cast<int>(request_text.size() - sent));
+            const int count = secure_
+                ? SSL_write(ssl.get(), request_text.data() + sent,
+                            static_cast<int>(request_text.size() - sent))
+                : static_cast<int>(::send(socket.get(), request_text.data() + sent,
+                                          request_text.size() - sent, 0));
             if (count <= 0) {
-                const int error = SSL_get_error(ssl.get(), count);
-                const bool retry = error == SSL_ERROR_WANT_READ ||
-                                   error == SSL_ERROR_WANT_WRITE ||
-                                   (error == SSL_ERROR_SYSCALL &&
-                                    (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK));
+                const int error = secure_ ? SSL_get_error(ssl.get(), count) : SSL_ERROR_SYSCALL;
+                const bool retry = secure_
+                    ? error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE ||
+                        (error == SSL_ERROR_SYSCALL &&
+                         (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
+                    : errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK;
                 if (retry && std::chrono::steady_clock::now() < io_deadline) continue;
-                throw std::runtime_error("HTTPS request write failed");
+                throw std::runtime_error(secure_ ? "HTTPS request write failed"
+                                                 : "HTTP request write failed");
             }
             sent += static_cast<std::size_t>(count);
         }
         std::string raw;
         std::array<char, 4096> buffer{};
         for (;;) {
-            const int count = SSL_read(ssl.get(), buffer.data(), static_cast<int>(buffer.size()));
+            const int count = secure_
+                ? SSL_read(ssl.get(), buffer.data(), static_cast<int>(buffer.size()))
+                : static_cast<int>(::recv(socket.get(), buffer.data(), buffer.size(), 0));
             if (count > 0) {
                 if (static_cast<std::size_t>(count) > max_response - raw.size()) {
                     throw std::runtime_error("master response exceeds limit");
@@ -225,7 +252,8 @@ public:
                 if (response_framing_complete(raw)) break;
                 continue;
             }
-            const int error = SSL_get_error(ssl.get(), count);
+            if (!secure_ && count == 0) break;
+            const int error = secure_ ? SSL_get_error(ssl.get(), count) : SSL_ERROR_SYSCALL;
             const bool retry = error == SSL_ERROR_WANT_READ ||
                                error == SSL_ERROR_WANT_WRITE ||
                                (error == SSL_ERROR_SYSCALL &&
@@ -252,7 +280,7 @@ public:
         const std::size_t status_end = raw.find("\r\n");
         if (header_end == std::string::npos || status_end == std::string::npos ||
             !raw.starts_with("HTTP/1.1 ") || status_end < 12) {
-            throw std::runtime_error("invalid HTTPS response");
+            throw std::runtime_error("invalid HTTP response");
         }
         const int status = std::stoi(raw.substr(9, 3));
         const std::string headers = lower(raw.substr(status_end + 2, header_end - status_end - 2));
@@ -265,7 +293,9 @@ public:
     }
 
 private:
+    bool secure_ = true;
     std::string host_;
+    std::string host_header_;
     std::string port_;
     std::string base_path_;
 };
