@@ -332,6 +332,11 @@ and supply a checkout of the networking repository:
 
 Use `-ColdJoinAfterAuthorityRestart` to exercise durable authority recovery and
 a brand-new client's positive-tick checkpoint/journal catch-up path.
+Use `-ClientReconnectCycles 3` to exercise three consecutive authenticated
+client-process replacements on one seat while the authority and three witness
+players remain live. Every replacement must bootstrap at a positive tick and
+complete canonical journal replay. This cannot be combined with the cold
+authority-restart gate.
 
 For an actual persistent authority, use the supervisor rather than launching
 the executable directly:

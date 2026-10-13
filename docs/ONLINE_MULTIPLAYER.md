@@ -208,6 +208,15 @@ require a cold client to install a positive-tick checkpoint under the same loss
 profile. The gate also requires journal replay, barrier release, and canonical
 input echoes from every remaining seat.
 
+Use `-ClientReconnectCycles 3` as a separate recovery gate. It keeps the
+authority and three witness seats alive while force-terminating and replacing
+the translated client three times with successively rotated admission tokens.
+Each process must bind the same seat, install a positive-tick checkpoint,
+replay the canonical journal, and cause exactly one recovery barrier to
+complete. Any desync, authority timeout, missing checkpoint, missing barrier,
+or witness failure fails the run. The fixture intentionally pre-rotates only
+three credentials, so the accepted range is zero through three cycles.
+
 The older peer-hosted flow documented below remains available for comparison,
 but it is not the architecture being taken to production.
 

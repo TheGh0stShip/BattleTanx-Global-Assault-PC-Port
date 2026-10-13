@@ -12,6 +12,8 @@ param(
     [ValidateRange(1, 4)]
     [int] $Players = 4,
     [switch] $ColdJoinAfterAuthorityRestart,
+    [ValidateRange(0, 3)]
+    [int] $ClientReconnectCycles = 0,
     [ValidateRange(2, 1000)]
     [int] $DropOutgoingEvery = 10,
     [ValidateRange(2, 1000)]
@@ -21,6 +23,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($ColdJoinAfterAuthorityRestart -and $ClientReconnectCycles -ne 0) {
+    throw "ColdJoinAfterAuthorityRestart and ClientReconnectCycles are separate gates."
+}
 $root = (Resolve-Path (Join-Path $PSScriptRoot "../../..")).Path
 $build = if ([IO.Path]::IsPathRooted($BuildDirectory)) {
     (Resolve-Path $BuildDirectory).Path
@@ -135,6 +140,8 @@ try {
         # Cover the initial run, forced restart and replacement-client run,
         # then finish soon enough for the gate's bounded validation wait.
         $Seconds + 10
+    } elseif ($ClientReconnectCycles -ne 0) {
+        $Seconds + 15 + 5 * $ClientReconnectCycles
     } else {
         $Seconds
     }
@@ -151,9 +158,11 @@ try {
     }
 
     $clientErrorPath = Join-Path $evidence "client.stderr.log"
+    $clientErrorPaths = [System.Collections.Generic.List[string]]::new()
+    $clientErrorPaths.Add($clientErrorPath)
     $authorityErrorPaths = [System.Collections.Generic.List[string]]::new()
     $authorityErrorPaths.Add((Join-Path $evidence "authority.stderr.log"))
-    if ($ColdJoinAfterAuthorityRestart) {
+    if ($ColdJoinAfterAuthorityRestart -or $ClientReconnectCycles -ne 0) {
         $tickDeadline = [DateTime]::UtcNow.AddSeconds(20)
         do {
             Start-Sleep -Milliseconds 100
@@ -162,8 +171,11 @@ try {
         } until ($durableTickReached -or $authority.HasExited -or
             [DateTime]::UtcNow -ge $tickDeadline)
         if (-not $durableTickReached) {
-            throw "Authority did not persist a pre-restart checkpoint."
+            throw "Authority did not reach a positive recovery checkpoint."
         }
+    }
+
+    if ($ColdJoinAfterAuthorityRestart) {
 
         foreach ($process in @($client, $authority)) {
             if (-not $process.HasExited) {
@@ -184,12 +196,59 @@ try {
         Start-Sleep -Milliseconds 750
 
         $clientErrorPath = Join-Path $evidence "client-restart.stderr.log"
+        $clientErrorPaths.Add($clientErrorPath)
         $env:BTGA_DEDICATED_TOKEN = [string]$fixture.client_restart_tokens[0]
         $client = Start-Process $game -PassThru -WindowStyle Minimized `
             -ArgumentList @("--dedicated-headless-direct", [string]$Seconds, $quotedRom) `
             -RedirectStandardOutput (Join-Path $evidence "client-restart.stdout.log") `
             -RedirectStandardError $clientErrorPath
         $processes.Add($client)
+    } elseif ($ClientReconnectCycles -ne 0) {
+        for ($cycle = 1; $cycle -le $ClientReconnectCycles; ++$cycle) {
+            if (-not $client.HasExited) {
+                Stop-Process -Id $client.Id -Force
+                $client.WaitForExit(5000) | Out-Null
+            }
+            Start-Sleep -Milliseconds 250
+
+            $clientErrorPath = Join-Path $evidence `
+                ("client-reconnect-{0}.stderr.log" -f $cycle)
+            $clientErrorPaths.Add($clientErrorPath)
+            $env:BTGA_DEDICATED_TOKEN =
+                [string]$fixture.client_reconnect_tokens[0][$cycle - 1]
+            $client = Start-Process $game -PassThru -WindowStyle Minimized `
+                -ArgumentList @("--dedicated-headless-direct", [string]$Seconds, $quotedRom) `
+                -RedirectStandardOutput (Join-Path $evidence `
+                    ("client-reconnect-{0}.stdout.log" -f $cycle)) `
+                -RedirectStandardError $clientErrorPath
+            $processes.Add($client)
+
+            $reconnectDeadline = [DateTime]::UtcNow.AddSeconds(20)
+            do {
+                Start-Sleep -Milliseconds 100
+                $reconnectLog = if (Test-Path $clientErrorPath) {
+                    [string](Get-Content $clientErrorPath -Raw)
+                } else { "" }
+                $reconnected = $reconnectLog -match
+                    "BTGA_CLIENT (applied|confirmed) snapshot tick=[1-9][0-9]*"
+            } until ($reconnected -or $client.HasExited -or
+                [DateTime]::UtcNow -ge $reconnectDeadline)
+            if (-not $reconnected) {
+                throw "Translated client reconnect cycle $cycle did not catch up."
+            }
+            $barrierDeadline = [DateTime]::UtcNow.AddSeconds(30)
+            do {
+                Start-Sleep -Milliseconds 100
+                $liveAuthorityLog = [string](Get-Content $authorityErrorPaths[0] -Raw)
+                $completedBarriers = [regex]::Matches(
+                    $liveAuthorityLog,
+                    "BTGA_AUTHORITY recovery complete head=[1-9][0-9]*").Count
+            } until ($completedBarriers -ge $cycle -or $authority.HasExited -or
+                [DateTime]::UtcNow -ge $barrierDeadline)
+            if ($completedBarriers -lt $cycle) {
+                throw "Authority did not release reconnect barrier $cycle."
+            }
+        }
     }
 
     if (-not $client.WaitForExit(($Seconds + 30) * 1000)) {
@@ -197,7 +256,8 @@ try {
     }
     $client.WaitForExit()
     $clientLog = [string](Get-Content $clientErrorPath -Raw)
-    $requiredSnapshot = if ($ColdJoinAfterAuthorityRestart) {
+    $requiredSnapshot = if ($ColdJoinAfterAuthorityRestart -or
+        $ClientReconnectCycles -ne 0) {
         "BTGA_CLIENT (applied|confirmed) snapshot tick=[1-9][0-9]*"
     } else {
         "BTGA_CLIENT (applied|confirmed) snapshot tick=0"
@@ -205,10 +265,6 @@ try {
     if ($clientLog -notmatch $requiredSnapshot -or
         -not $clientLog.Contains("Headless boot window elapsed")) {
         throw "Translated client did not install the bootstrap and complete its run."
-    }
-    if ($clientLog.Contains("BTGA_CLIENT DESYNC") -or
-        $clientLog.Contains("BTGA_CLIENT authority timeout")) {
-        throw "Translated client diverged or lost the authority."
     }
     $profile = "outgoing=$DropOutgoingEvery incoming=$DropIncomingEvery"
     if (-not $clientLog.Contains("BTGA_CLIENT test UDP loss $profile")) {
@@ -226,6 +282,20 @@ try {
         $authorityLog -notmatch
             "BTGA_AUTHORITY recovered checkpoint=[1-9][0-9]* journal_head=[1-9][0-9]*") {
         throw "Replacement authority did not restore persistent gameplay state."
+    }
+    if ($ClientReconnectCycles -ne 0) {
+        $recoveryCount = [regex]::Matches(
+            $authorityLog, "BTGA_AUTHORITY recovery complete head=[1-9][0-9]*").Count
+        if ($recoveryCount -lt $ClientReconnectCycles) {
+            throw "Authority did not complete every client reconnect barrier."
+        }
+    }
+    foreach ($path in $clientErrorPaths) {
+        $log = [string](Get-Content $path -Raw)
+        if ($log.Contains("BTGA_CLIENT DESYNC") -or
+            $log.Contains("BTGA_CLIENT authority timeout")) {
+            throw "Translated client diverged or lost the authority."
+        }
     }
 
     for ($seat = 1; $seat -lt $Players; ++$seat) {
@@ -252,6 +322,9 @@ try {
     Write-Host "Loss profile: $profile"
     if ($ColdJoinAfterAuthorityRestart) {
         Write-Host "Recovery: cold client bootstrapped after authority restart"
+    }
+    if ($ClientReconnectCycles -ne 0) {
+        Write-Host "Recovery: $ClientReconnectCycles authenticated client reconnect cycles"
     }
     Write-Host "Evidence: $evidence"
 } finally {

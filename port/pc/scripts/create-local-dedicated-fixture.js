@@ -50,7 +50,7 @@ async function main() {
         host.lobby.id, `Bearer ${host.host_secret}`, 1, "lobby"
     );
     const clients = [];
-    const replacementClients = [];
+    const reconnectClients = [];
     for (let seat = 0; seat < 4; ++seat) {
         const client = await service.join(host.lobby.id, {
             protocol: 1,
@@ -58,12 +58,19 @@ async function main() {
             platform: "pc"
         }, "127.0.0.1");
         clients.push(client);
-        replacementClients.push(await service.join(host.lobby.id, {
-            protocol: 1,
-            build,
-            platform: "pc",
-            resume_token: client.resume_token
-        }, "127.0.0.1"));
+        const rotations = [];
+        let resumeToken = client.resume_token;
+        for (let cycle = 0; cycle < 3; ++cycle) {
+            const replacement = await service.join(host.lobby.id, {
+                protocol: 1,
+                build,
+                platform: "pc",
+                resume_token: resumeToken
+            }, "127.0.0.1");
+            rotations.push(replacement);
+            resumeToken = replacement.resume_token;
+        }
+        reconnectClients.push(rotations);
     }
     const document = {
         session: BigInt(`0x${host.session_id}`).toString(10),
@@ -75,7 +82,10 @@ async function main() {
         authority_token: host.relay_token,
         authority_restart_token: replacementHost.relay_token,
         client_tokens: clients.map((client) => client.join_token),
-        client_restart_tokens: replacementClients.map((client) => client.join_token)
+        client_restart_tokens: reconnectClients.map((rotations) =>
+            rotations[0].join_token),
+        client_reconnect_tokens: reconnectClients.map((rotations) =>
+            rotations.map((client) => client.join_token))
     };
     fs.writeFileSync(output, `${JSON.stringify(document)}\n`, {
         encoding: "utf8", mode: 0o600
