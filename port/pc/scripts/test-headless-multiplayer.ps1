@@ -268,6 +268,18 @@ if ($Rom) {
     }
     }
     $report = Join-Path $evidenceRoot "summary.json"
-    $results | ConvertTo-Json -Depth 4 | Set-Content -Path $report -Encoding UTF8
+    $sourceRevision = (& git -C $root rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0) { $sourceRevision = "unknown" }
+    $summary = [pscustomobject]@{
+        generated_utc = [DateTime]::UtcNow.ToString("o")
+        source_revision = ($sourceRevision | Select-Object -First 1).Trim()
+        runtime_path = $runtime
+        runtime_sha256 = (Get-FileHash -Algorithm SHA256 $runtime).Hash.ToLowerInvariant()
+        relay_runs = $RelayRuns
+        game_runs = $GameRuns
+        peer_loss_run = $PeerLossRun
+        results = $results
+    }
+    $summary | ConvertTo-Json -Depth 5 | Set-Content -Path $report -Encoding UTF8
     Write-Host "Headless multiplayer report: $report"
 }

@@ -401,7 +401,10 @@ public:
         const bool open_inspector = environment_flag_enabled("BTGA_RT64_INSPECTOR");
         app_->userConfig.developerMode = developer_mode || open_inspector ||
                                          environment_flag_enabled("BTGA_RT64_DEVELOPER");
-        if (app_->setup(0) != RT64::Application::SetupResult::Success) {
+        const RT64::Application::SetupResult setup_result = app_->setup(0);
+        if (setup_result != RT64::Application::SetupResult::Success) {
+            std::cerr << "RT64 renderer setup failed before online-session handoff (result="
+                      << static_cast<int>(setup_result) << ").\n";
             app_.reset();
         } else if (open_inspector) {
             app_->processDeveloperShortcut(RT64::Application::DeveloperShortcut::Inspector);

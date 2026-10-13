@@ -325,6 +325,6 @@ paths; neither file is copied into the repository:
 This sequence runs a healthy session, terminates the client during the second
 session, then creates a new lobby and requires the third session to reach
 synchronized gameplay. A progress watchdog rejects frozen pairs, and
-`headless-online-evidence/summary.json` records the result. The evidence,
-temporary ROM copies, saves, and logs remain build artifacts and must not be
-committed.
+`headless-online-evidence/summary.json` records the result, tested executable
+SHA-256, and source Git revision. Temporary ROM copies, saves, and logs remain
+build artifacts and must not be committed.

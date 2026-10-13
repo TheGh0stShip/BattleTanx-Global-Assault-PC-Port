@@ -152,8 +152,10 @@ historical “both games froze after one peer disappeared” failure mode.
 after it must create fresh lobbies and synchronize normally, guarding against
 stale process/session state. Stable sessions also have a synchronization-log
 progress watchdog. Results are written to
-`headless-online-evidence/summary.json`; all logs, saves, and temporary ROM
-copies remain untracked build artifacts.
+`headless-online-evidence/summary.json`, including the tested executable's
+SHA-256 and source Git revision so results cannot be confused with a stale
+local build. All logs, saves, and temporary ROM copies remain untracked build
+artifacts.
 
 Do not place admission tokens, host secrets, ROMs, or packet captures containing
 private test data in bug reports or commits.
