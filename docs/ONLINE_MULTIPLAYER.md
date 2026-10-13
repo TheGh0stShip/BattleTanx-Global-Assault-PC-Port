@@ -49,6 +49,22 @@ versioned portable checkpoint captures that complete state, cold clients must
 use the retained tick-zero bootstrap and canonical journal replay. Do not prune
 journal records needed by that path.
 
+Repeatedly invoking the translated gameplay update is not a safe shortcut for
+accelerating that replay. A four-seat loopback experiment caught up a restarted
+client by roughly 1,050 ticks in 20.4 seconds, matched every digest during the
+burst, and then diverged 161 ticks after returning to the normal outer loop.
+The outer loop therefore owns additional delayed state not reproduced by the
+known mode counters. That implementation was rejected. Recovery must either
+execute the complete retail outer loop or restore a complete, versioned
+checkpoint; do not add a recursive update-only fast-forward path.
+
+After tick-zero bootstrap the authority no longer transmits periodic compact
+snapshots. Clients already verify every canonical frame digest, and the compact
+snapshot cannot be applied to a running process. Removing those packets avoids
+wasting relay bandwidth during journal recovery. Journal windows are paced by
+one millisecond per datagram, and the disk-replay diagnostic is emitted once per
+recovery epoch instead of once per acknowledgment.
+
 ### Authority-process recovery (development gate)
 
 On Windows, the supported operator entry point is the restart supervisor:
