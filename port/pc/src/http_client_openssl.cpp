@@ -15,8 +15,10 @@
 #include <array>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 
 namespace btga {
@@ -58,6 +60,30 @@ std::string lower(std::string value) {
         return static_cast<char>(std::tolower(character));
     });
     return value;
+}
+
+bool response_framing_complete(std::string_view raw) {
+    const std::size_t header_end = raw.find("\r\n\r\n");
+    if (header_end == std::string_view::npos) return false;
+    const std::string headers = lower(std::string{raw.substr(0, header_end)});
+    const std::size_t body = header_end + 4U;
+    if (headers.find("transfer-encoding: chunked") != std::string::npos) {
+        return raw.find("\r\n0\r\n\r\n", body) != std::string_view::npos ||
+               raw.substr(body).starts_with("0\r\n\r\n");
+    }
+    constexpr std::string_view key = "content-length:";
+    const std::size_t field = headers.find(key);
+    if (field == std::string::npos) return false;
+    std::size_t cursor = field + key.size();
+    while (cursor < headers.size() && headers[cursor] == ' ') ++cursor;
+    const std::size_t end = headers.find("\r\n", cursor);
+    const std::string text = headers.substr(cursor, end - cursor);
+    std::size_t consumed = 0;
+    unsigned long long length = 0;
+    try { length = std::stoull(text, &consumed, 10); }
+    catch (...) { return false; }
+    return consumed == text.size() && length <= max_response - body &&
+           raw.size() >= body + static_cast<std::size_t>(length);
 }
 
 std::string decode_chunked(std::string_view input) {
@@ -141,7 +167,7 @@ public:
                 }
             }
             if (!connected || fcntl(candidate.get(), F_SETFL, original_flags) < 0) continue;
-            timeval timeout{10, 0};
+            timeval timeout{30, 0};
             setsockopt(candidate.get(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
             setsockopt(candidate.get(), SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
             socket = std::move(candidate);
@@ -171,10 +197,20 @@ public:
         request_text += "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n";
         request_text.append(body);
         std::size_t sent = 0;
+        const auto io_deadline = std::chrono::steady_clock::now() +
+            std::chrono::seconds(30);
         while (sent < request_text.size()) {
             const int count = SSL_write(ssl.get(), request_text.data() + sent,
                                         static_cast<int>(request_text.size() - sent));
-            if (count <= 0) throw std::runtime_error("HTTPS request write failed");
+            if (count <= 0) {
+                const int error = SSL_get_error(ssl.get(), count);
+                const bool retry = error == SSL_ERROR_WANT_READ ||
+                                   error == SSL_ERROR_WANT_WRITE ||
+                                   (error == SSL_ERROR_SYSCALL &&
+                                    (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK));
+                if (retry && std::chrono::steady_clock::now() < io_deadline) continue;
+                throw std::runtime_error("HTTPS request write failed");
+            }
             sent += static_cast<std::size_t>(count);
         }
         std::string raw;
@@ -186,9 +222,15 @@ public:
                     throw std::runtime_error("master response exceeds limit");
                 }
                 raw.append(buffer.data(), static_cast<std::size_t>(count));
+                if (response_framing_complete(raw)) break;
                 continue;
             }
             const int error = SSL_get_error(ssl.get(), count);
+            const bool retry = error == SSL_ERROR_WANT_READ ||
+                               error == SSL_ERROR_WANT_WRITE ||
+                               (error == SSL_ERROR_SYSCALL &&
+                                (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK));
+            if (retry && std::chrono::steady_clock::now() < io_deadline) continue;
             if (error == SSL_ERROR_ZERO_RETURN) break;
             if (error == SSL_ERROR_SYSCALL && count == 0) break;
             // Some HTTP/1.1 servers close a Connection: close response without
@@ -199,7 +241,12 @@ public:
                 ERR_clear_error();
                 break;
             }
-            throw std::runtime_error("HTTPS response read failed");
+            std::ostringstream detail;
+            detail << "HTTPS response read failed (ssl_error=" << error
+                   << ", errno=" << errno
+                   << ", openssl_reason=" << ERR_GET_REASON(ERR_peek_last_error())
+                   << ", bytes=" << raw.size() << ')';
+            throw std::runtime_error(detail.str());
         }
         const std::size_t header_end = raw.find("\r\n\r\n");
         const std::size_t status_end = raw.find("\r\n");

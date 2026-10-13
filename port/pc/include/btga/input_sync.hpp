@@ -80,4 +80,11 @@ private:
     std::array<PlayerHistory, max_players> histories_{};
 };
 
+// Reconstructs the complete delayed-input window after an authoritative
+// timeline rebase. Without this, the first post-snapshot frame waits forever
+// for pre-rebase ticks that no peer will retransmit.
+void prime_frame_input_epoch(InputSynchronizer& synchronizer,
+                             std::uint32_t authoritative_generation,
+                             std::uint8_t player_count = 2);
+
 } // namespace btga

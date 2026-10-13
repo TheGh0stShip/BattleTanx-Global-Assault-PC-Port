@@ -1,10 +1,13 @@
 #include "btga/game.hpp"
+#include "btga/gameplay_digest.hpp"
+#include "btga/gameplay_snapshot.hpp"
 #include "btga/input_sync.hpp"
 #include "btga/controller_pak.hpp"
 #include "btga/pc_settings.hpp"
 #include "btga/online_multiplayer.hpp"
 #include "btga/master_client.hpp"
 #include "btga/sha256.hpp"
+#include "btga/snapshot_transfer.hpp"
 #include "btga/texture_packs.hpp"
 #include "btga/udp_online_io.hpp"
 
@@ -14,6 +17,7 @@ extern "C" {
 }
 
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -22,6 +26,7 @@ extern "C" {
 #include <stdexcept>
 #include <string_view>
 #include <vector>
+#include <algorithm>
 
 #define CHECK(expression) \
     do { \
@@ -32,6 +37,178 @@ extern "C" {
     } while (false)
 
 int main() {
+    {
+        constexpr std::size_t rdram_size = 8U * 1024U * 1024U;
+        constexpr std::size_t players = 0x00235F00U;
+        auto host = std::make_unique<std::vector<std::uint8_t>>(rdram_size);
+        auto client = std::make_unique<std::vector<std::uint8_t>>(rdram_size);
+        for (std::size_t i = 0; i < host->size(); ++i) {
+            (*host)[i] = static_cast<std::uint8_t>(i * 29U + 7U);
+        }
+        for (std::size_t player = 0; player < 4U; ++player) {
+            const std::uint32_t pointer = player == 3U
+                ? 0U : UINT32_C(0x80050000) + static_cast<std::uint32_t>(player * 0x20U);
+            std::memcpy(host->data() + players + player * 0x250U + 0x10U,
+                        &pointer, sizeof(pointer));
+        }
+        std::vector<std::uint8_t> snapshot(btga::gameplay_snapshot_size);
+        CHECK(btga::capture_gameplay_snapshot(*host, snapshot));
+        *client = *host;
+        std::fill(client->begin() + 0x00114C80U,
+                  client->begin() + 0x00114C84U, std::uint8_t{0xEE});
+        std::fill(client->begin() + 0x001AD128U,
+                  client->begin() + 0x001AD128U + 24U * 0x4CCU, std::uint8_t{0xAA});
+        std::fill(client->begin() + 0x00219458U,
+                  client->begin() + 0x00219458U + 0x178U, std::uint8_t{0xBB});
+        std::fill(client->begin() + players,
+                  client->begin() + players + 4U * 0x250U, std::uint8_t{0xCC});
+        for (std::size_t player = 0; player < 3U; ++player) {
+            std::fill(client->begin() + 0x50000U + player * 0x20U,
+                      client->begin() + 0x50000U + player * 0x20U + 0x18U,
+                      std::uint8_t{0xDD});
+        }
+        CHECK(btga::restore_gameplay_snapshot(*client, snapshot));
+        CHECK(btga::gameplay_state_digests(*host).combined ==
+              btga::gameplay_state_digests(*client).combined);
+        CHECK(std::equal(host->begin() + 0x50000U,
+                         host->begin() + 0x50000U + 0x58U,
+                         client->begin() + 0x50000U));
+        CHECK(!btga::capture_gameplay_snapshot(
+            std::span<const std::uint8_t>{host->data(), 1024U}, snapshot));
+    }
+    {
+        btga::InputSynchronizer sync;
+        constexpr std::uint32_t tag = UINT32_C(0x80000000);
+        btga::prime_frame_input_epoch(sync, 109U);
+        // The next publication at frame 110 advertises an eight-frame
+        // redundancy window beginning at 107; all preceding entries must be
+        // contiguous or batch encoding shifts the input timeline.
+        for (std::uint32_t frame = 107U; frame <= 113U; ++frame) {
+            CHECK(sync.input_for(0, tag | frame).has_value());
+            CHECK(sync.input_for(1, tag | frame).has_value());
+        }
+        CHECK(!sync.input_for(0, tag | 106U).has_value());
+        CHECK(!sync.input_for(0, tag | 114U).has_value());
+    }
+    {
+        CHECK(!btga::snapshot_generation_is_newer(77U, 77U));
+        CHECK(btga::snapshot_generation_is_newer(78U, 77U));
+        CHECK(!btga::snapshot_generation_is_newer(76U, 77U));
+        CHECK(btga::snapshot_generation_is_newer(1U, UINT32_MAX));
+        CHECK(!btga::snapshot_generation_is_newer(UINT32_MAX, 1U));
+
+        std::vector<std::uint8_t> state(32'316U);
+        for (std::size_t i = 0; i < state.size(); ++i) state[i] = static_cast<std::uint8_t>(i * 37U);
+        const std::uint32_t checksum = btga::snapshot_fnv1a(state);
+        const std::uint16_t count = static_cast<std::uint16_t>(
+            (state.size() + btga::snapshot_chunk_payload_size - 1U) /
+            btga::snapshot_chunk_payload_size);
+        std::vector<std::vector<std::uint8_t>> packets;
+        for (std::uint16_t index = 0; index < count; ++index) {
+            const std::size_t offset = index * btga::snapshot_chunk_payload_size;
+            const std::size_t size = std::min(
+                btga::snapshot_chunk_payload_size, state.size() - offset);
+            packets.emplace_back(btga::snapshot_chunk_header_size + size);
+            CHECK(btga::encode_snapshot_chunk(packets.back(), {
+                77U, index, count, static_cast<std::uint16_t>(size), checksum,
+                {state.data() + offset, size}}));
+        }
+        btga::SnapshotAssembler assembler(state.size());
+        for (auto it = packets.rbegin(); it != packets.rend(); ++it) {
+            btga::SnapshotChunk chunk{};
+            CHECK(btga::decode_snapshot_chunk(chunk, *it));
+            CHECK(assembler.accept(chunk));
+            CHECK(assembler.accept(chunk)); // duplicate datagrams are idempotent
+        }
+        CHECK(assembler.complete() && assembler.verified());
+        CHECK(std::equal(state.begin(), state.end(), assembler.bytes().begin()));
+
+        assembler.reset();
+        for (std::size_t i = 1; i < packets.size(); ++i) {
+            btga::SnapshotChunk chunk{};
+            CHECK(btga::decode_snapshot_chunk(chunk, packets[i]));
+            CHECK(assembler.accept(chunk));
+        }
+        CHECK(!assembler.complete() && !assembler.verified());
+        btga::SnapshotChunk stale{};
+        CHECK(btga::decode_snapshot_chunk(stale, packets[0]));
+        stale.generation = 76U;
+        CHECK(!assembler.accept(stale));
+        assembler.reset();
+        CHECK(btga::decode_snapshot_chunk(stale, packets[0]));
+        stale.checksum ^= 1U;
+        CHECK(assembler.accept(stale));
+        for (std::size_t i = 1; i < packets.size(); ++i) {
+            btga::SnapshotChunk chunk{};
+            CHECK(btga::decode_snapshot_chunk(chunk, packets[i]));
+            chunk.checksum = stale.checksum;
+            CHECK(assembler.accept(chunk));
+        }
+        CHECK(assembler.complete() && !assembler.verified());
+    }
+    {
+        constexpr std::size_t rdram_size = 8U * 1024U * 1024U;
+        constexpr std::array<std::size_t, 8> gameplay_offsets{
+            0x00114C80U, // RNG seed
+            0x001AD128U, // object pool
+            0x0021945CU, // game frame counter
+            0x002194A0U, // game mode
+            0x002194B0U, // match time
+            0x00235F00U, // player header
+            0x00235F00U + 0x1B0U, // player gameplay fields
+            0x00235F00U + 0x250U + 0x1B0U, // second player gameplay fields
+        };
+        auto baseline = std::make_unique<std::vector<std::uint8_t>>(rdram_size, 0U);
+        auto changed = std::make_unique<std::vector<std::uint8_t>>(*baseline);
+        CHECK(btga::gameplay_state_digest(
+                  std::span<const std::uint8_t>{baseline->data(), rdram_size - 1U}) == 0U);
+        const std::uint32_t baseline_digest = btga::gameplay_state_digest(*baseline);
+        CHECK(baseline_digest != 0U);
+        const auto baseline_parts = btga::gameplay_state_digests(*baseline);
+        CHECK(baseline_parts.combined == baseline_digest);
+        CHECK(baseline_parts.objects != 0U && baseline_parts.player_headers != 0U &&
+              baseline_parts.player_gameplay != 0U && baseline_parts.team_info != 0U);
+        CHECK(btga::gameplay_state_digest(*changed) == baseline_digest);
+        for (const std::size_t offset : gameplay_offsets) {
+            (*changed)[offset] ^= 0x5AU;
+            CHECK(btga::gameplay_state_digest(*changed) != baseline_digest);
+            (*changed)[offset] ^= 0x5AU;
+        }
+        // Presentation/runtime-only memory is intentionally outside the digest.
+        (*changed)[0x00001000U] = 0xA5U;
+        CHECK(btga::gameplay_state_digest(*changed) == baseline_digest);
+        // Per-window camera state is deliberately excluded.
+        (*changed)[0x00235F00U + 0x78U] = 0xA5U;
+        CHECK(btga::gameplay_state_digest(*changed) == baseline_digest);
+
+        // Team scores live behind a 32-bit guest pointer in each player.
+        constexpr std::size_t team_info_offset = 0x00300000U;
+        std::uint32_t team_info_pointer = 0x80000000U + team_info_offset;
+        std::memcpy(changed->data() + 0x00235F00U + 0x10U,
+                    &team_info_pointer, sizeof(team_info_pointer));
+        const std::uint32_t pointer_digest = btga::gameplay_state_digest(*changed);
+        (*changed)[team_info_offset + 0x0CU] ^= 0x5AU;
+        CHECK(btga::gameplay_state_digest(*changed) != pointer_digest);
+
+        auto gate = std::make_unique<std::vector<std::uint8_t>>(rdram_size, 0U);
+        CHECK(!btga::gameplay_frame_input_active(*gate));
+        const auto store_word = [&](std::size_t offset, std::uint32_t value) {
+            std::memcpy(gate->data() + offset, &value, sizeof(value));
+        };
+        store_word(0x00219498U, 0x80200000U);
+        store_word(0x002195CCU, 3U);
+        (*gate)[0x002194A4U ^ 3U] = 1U;
+        CHECK(!btga::gameplay_frame_input_active(*gate));
+        (*gate)[0x002194A4U ^ 3U] = 2U;
+        CHECK(btga::gameplay_frame_input_active(*gate));
+        store_word(0x002195CCU, 7U);
+        CHECK(!btga::gameplay_frame_input_active(*gate));
+        store_word(0x002195CCU, 3U);
+        store_word(0x00219498U, 0U);
+        CHECK(!btga::gameplay_frame_input_active(*gate));
+        CHECK(!btga::gameplay_frame_input_active(
+            std::span<const std::uint8_t>{gate->data(), rdram_size - 1U}));
+    }
     {
         btga::InputSynchronizer sender;
         btga::InputSynchronizer receiver;

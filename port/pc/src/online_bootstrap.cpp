@@ -40,6 +40,7 @@ std::mutex bootstrap_mutex;
 std::optional<BootstrapState> bootstrap;
 std::optional<std::uint32_t> negotiated_seed;
 std::atomic_bool boot_released{false};
+std::atomic_bool rendezvous_ready{false};
 
 void put_u32(std::uint8_t* output, std::uint32_t value) {
     output[0] = static_cast<std::uint8_t>(value >> 24);
@@ -124,6 +125,7 @@ bool begin_preboot_online(bool host, std::uint64_t session_id,
     }
     bootstrap.emplace(std::move(state));
     boot_released.store(false, std::memory_order_release);
+    rendezvous_ready.store(false, std::memory_order_release);
     negotiated_seed = bootstrap_seed;
     return true;
 }
@@ -162,10 +164,12 @@ void poll_preboot_online() {
                    state.peer_seen && seed == state.seed) {
             for (int copy = 0; copy < 16; ++copy) send(state, 1, BootstrapMessage::Go);
             state.ready = true;
+            rendezvous_ready.store(true, std::memory_order_release);
             state.status = "Synchronized cold boot starting.";
         } else if (!state.host && source == 0 && message == BootstrapMessage::Go &&
                    state.peer_seen && seed == state.seed) {
             state.ready = true;
+            rendezvous_ready.store(true, std::memory_order_release);
             state.status = "Synchronized cold boot starting.";
         }
     }
@@ -181,8 +185,10 @@ void poll_preboot_online() {
 }
 
 bool preboot_online_ready() {
-    std::lock_guard lock(bootstrap_mutex);
-    return bootstrap && bootstrap->ready;
+    // The renderer can take ownership of the ready session before the host
+    // loop observes it. Readiness must survive that handoff; otherwise the
+    // host loop sees an empty optional and waits forever on a black screen.
+    return rendezvous_ready.load(std::memory_order_acquire);
 }
 
 bool preboot_online_waiting() {

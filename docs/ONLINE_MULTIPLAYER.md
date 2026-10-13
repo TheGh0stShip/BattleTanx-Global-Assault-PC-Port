@@ -21,8 +21,23 @@ explicit opt-in actions.
   rendezvous agrees on the ROM/session seed before either machine enters N64
   code. Inputs use a four-poll jitter buffer, while the game update clock uses
   a strict common frame zero and a bounded four-update lead window.
+- An authoritative gameplay snapshot at each match epoch. Snapshot chunks
+  tolerate loss, duplication, reordering, and a lost acknowledgement; applying
+  the initial snapshot rebases both the simulation clock and the complete
+  delayed-input window.
+- Per-frame selected-state digests. Three consecutive mismatches stop the
+  online session instead of allowing silent divergent play. Automatic rollback
+  awaits a complete serialization of pointer-owned world state.
+- Ten-second fail-open watchdogs on every in-game synchronization wait. A
+  failed or departed peer cannot leave an already-running game in an infinite
+  network wait; the online session is dropped and local play resumes. The
+  pre-boot lobby intentionally waits for a peer until the user cancels it.
 
-The validated runtime path connects before cold boot:
+On Windows, the normal path is **F10 → Online → Host/Join**. After lobby
+selection, the application relaunches itself into the synchronized pre-boot
+rendezvous. This is automatic; neither player has to close the game, pass
+launch arguments, or reproduce menu navigation. These commands remain useful
+as developer fallbacks:
 
 ```text
 BattleTanxGA.exe --online-host BattleTanxGA.z64
@@ -52,7 +67,28 @@ headers on Linux. Windows uses WinHTTP and the operating-system certificate
 store.
 
 ```sh
+# Linux: core tests, randomized synchronization soak, and one public lifecycle.
 ./port/pc/scripts/test-live-multiplayer.sh
+
+# Repeat the complete public lifecycle 20 times without launching the game.
+./port/pc/scripts/test-live-multiplayer.sh port/pc/build-live-test 20
+
+# Native Windows PowerShell; without -Rom this does not launch the game.
+.\port\pc\scripts\test-headless-multiplayer.ps1 -RelayRuns 20
+
+# Add a real paired, windowless game cold boot using your local verified ROM.
+.\port\pc\scripts\test-headless-multiplayer.ps1 `
+    -RelayRuns 20 -Rom 'C:\path\to\BattleTanxGA.z64' `
+    -ControllerPak 'C:\path\to\BattleTanxGA_pak1.mpk' `
+    -GameRuns 5 -BootSeconds 60
+
+# Fault injection: terminate the joining peer after gameplay synchronization
+# and prove that the host watchdog leaves its wait instead of freezing.
+.\port\pc\scripts\test-headless-multiplayer.ps1 `
+    -Rom 'C:\path\to\BattleTanxGA.z64' `
+    -ControllerPak 'C:\path\to\BattleTanxGA_pak1.mpk' `
+    -GameRuns 1 -KillClientAfterEpoch
+
 ```
 
 The script builds and runs `btga_pc_native_online_e2e`. That executable uses
@@ -62,6 +98,46 @@ and client tokens, binds two native clients, exchanges encoded controller
 frames in both directions through the public relay, changes the dashboard state
 to `playing`, and removes the
 temporary lobby through an authenticated cleanup guard.
+
+The synchronization soak is local and does not contact the service. It runs
+500 randomized snapshot epochs with packet loss, reordering, duplicates,
+corruption, retransmission and simulated acknowledgement loss, followed by
+12,000 delayed-input frames across 50 authoritative timeline rebases. The
+public lifecycle count is explicit because it creates real short-lived Azure
+lobbies; the default is one.
+
+When `-Rom` is supplied, the Windows harness additionally launches pairs of real
+recompiled runtimes with isolated data directories. The first creates a lobby,
+the second reads its generated lobby ID and joins, both complete the signed
+pre-boot relay rendezvous, run with a hidden native renderer and discarded
+audio for the bounded interval, navigate the retail two-player front end with
+deterministic scripted controller input, and enter a real two-human gameplay epoch,
+require both peers to report an acknowledged snapshot and continued post-rebase
+frames, require every sampled gameplay checksum to match, reject any digest
+mismatch or synchronization timeout, and exit. A local controller-pak file may
+be copied into each isolated profile with `-ControllerPak`; it is never uploaded.
+The input script includes bounded periodic confirmation pulses so it can advance
+from valid retail front-end states without forcing player count or game state.
+Logs are retained under
+`build-pc-windows/headless-online-evidence/`; no window or controller input is
+required. Five paired boots run by default; `-GameRuns` changes that count. The
+ROM stays local and is never copied or uploaded.
+
+The current automated Windows evidence is five consecutive three-minute cold
+boots. Every pair entered gameplay at simulation frame 381, advanced through
+the end-of-match/intermission states, established a second identical gameplay
+epoch at frame 3714, and remained synchronized through frame 4740. Every
+sampled gameplay checksum matched, no peer emitted a digest mismatch, abort or
+timeout, and every public lobby was removed afterward. The harness compares
+the complete epoch and sampled-checksum sequences, so legitimate match
+transitions are covered without mistaking them for duplicate snapshot
+application.
+
+The optional `-KillClientAfterEpoch` fault mode terminates the joining runtime
+immediately after both peers establish a real gameplay epoch. It requires the
+host to trip its bounded frame/input watchdog, leave the relay wait, finish its
+headless interval, and remove the lobby. This continuously guards against the
+historical “both games froze after one peer disappeared” failure mode.
 
 Do not place admission tokens, host secrets, ROMs, or packet captures containing
 private test data in bug reports or commits.

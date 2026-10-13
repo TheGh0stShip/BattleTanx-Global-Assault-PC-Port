@@ -244,8 +244,9 @@ and client, then exchange and decode controller frames in both directions.
 The translated runtime now assigns the host to original controller port 1 and
 the joining player to port 2. Its validated cold-boot path completes the relay
 handshake before N64 execution, shares the initial seed and input epoch, buffers
-four controller polls, and bounds either simulation to four game updates ahead
-of its peer. Networking starts
+four gameplay frames, and bounds either simulation to four game updates ahead
+of its peer. Front-end input remains poll-synchronized until a live match
+exists. Networking starts
 offline and opens no socket or DNS request during normal startup. Only a user
 action in **F10 → Online** opts in and initializes the master/relay path;
 leaving that flow returns the client fully offline.
@@ -269,22 +270,23 @@ a public lobby, join a listed lobby, authenticate with the relay, maintain the
 host lease, disconnect, and open the dashboard. Merely opening the tab performs
 no network access.
 
-The currently validated experimental play flow is:
+The normal Windows experimental play flow is:
 
-1. The host runs `BattleTanxGA.exe --online-host BattleTanxGA.z64` and shares
-   the ID written to `online-lobby.txt`.
-2. The other player runs
-   `BattleTanxGA.exe --online-join LOBBY_ID BattleTanxGA.z64`.
-3. Both windows remain outside N64 code until the synchronized cold-boot
-   handshake completes. Host input on controller port 1 then drives the same
-   retail multiplayer menu flow on both processes; the joining player's input
-   is controller port 2.
+1. Both players launch normally with their own verified local ROM.
+2. The host opens **F10 → Online** and selects **Host**. The other player uses
+   **Refresh** and **Join** on that lobby.
+3. Each application automatically restarts into a synchronized pre-boot relay
+   rendezvous. No command-line arguments or manual cold boot are required.
+4. Both processes remain outside N64 code until the handshake completes. Host
+   input occupies original controller port 1 and the joining player's input
+   occupies port 2.
 
-The in-overlay Host/Join controls remain useful for transport development, but
-joining an already-running emulation session does not yet provide the same
-state guarantee as cold boot. Rollback/resimulation, disconnect recovery,
-longer multi-mission campaign validation, and the full-screen local-camera
-conversion are still under development. A native two-process test has now
+The automatic restart is the state guarantee: an online session never attempts
+to attach one live emulation instance to another. Developer fallback commands
+remain available as `--online-host ROM` and `--online-join LOBBY_ID ROM`.
+Rollback/resimulation, disconnect recovery, longer multi-mission campaign
+validation, and the full-screen local-camera conversion are still under
+development. A native two-process test has now
 completed one two-player campaign mission, shown victory on both peers, and
 advanced both into the next mission with matching RNG and game-frame
 checkpoints. Until the remaining work lands, this is an experimental test

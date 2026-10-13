@@ -250,11 +250,16 @@ The portable GPLv3 protocol and relay client are pinned into this build but
 remain dormant: constructing or launching the game performs no network access.
 The native PC transport has been tested end to end through the public master
 and relay. **F10 → Online** browses, hosts, and joins real public relay lobbies.
-The currently validated gameplay path instead performs that rendezvous before
-cold boot with `--online-host ROM` and `--online-join LOBBY_ID ROM`, ensuring
-both peers enter N64 code with the same session seed and frame epoch. It remains
-experimental: rollback recovery, long campaign/victory validation, and
-full-screen local cameras are not finished. Live
+On Windows, choosing **Host** or **Join** now performs a controlled automatic
+restart into that pre-boot rendezvous; players do not need command-line launch
+arguments or a manual cold boot. The `--online-host` and `--online-join`
+commands remain developer fallbacks. Both peers enter N64 code with the same
+session seed and frame epoch. A five-run headless Windows gate now exercises
+the real retail two-player front end and synchronized gameplay without forcing
+player count or requiring a human-operated window. It remains experimental:
+rollback/resimulation,
+long campaign/victory validation, and full-screen local cameras are not
+finished. Live
 service status is available at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/).
 Opening the Online tab itself remains network-inert; Refresh, Host, and Join are

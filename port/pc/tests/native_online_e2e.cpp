@@ -31,9 +31,12 @@ bool bind(btga::OnlineMultiplayer& online, bool host, std::uint64_t session,
 } // namespace
 
 int main() {
+    std::string_view stage = "startup";
     try {
+        stage = "create HTTP client";
         auto http = btga::make_platform_http_client("https://btga.thegh0stship.com/api/v1");
         btga::MasterClient master{*http, "pc-native-e2e-v1"};
+        stage = "host lobby";
         btga::HostRegistration hosted = master.host("Native PC end-to-end test", 4);
         struct Cleanup {
             btga::MasterClient& master;
@@ -41,10 +44,12 @@ int main() {
             ~Cleanup() { master.remove(hosted.lobby.id, hosted.host_secret); }
         } cleanup{master, hosted};
 
+        stage = "list lobbies";
         const auto listed = master.list_lobbies();
         bool found = false;
         for (const auto& lobby : listed) found |= lobby.id == hosted.lobby.id;
         if (!found) throw std::runtime_error("hosted lobby was not discoverable");
+        stage = "join lobby";
         const btga::JoinRegistration joined = master.join(hosted.lobby.id);
         if (joined.session_id != hosted.session_id || joined.relay.address != hosted.relay.address ||
             joined.relay.port != hosted.relay.port) {
@@ -55,6 +60,7 @@ int main() {
         btga::UdpOnlineIo client_io{joined.relay.address, joined.relay.port};
         btga::OnlineMultiplayer host{host_io};
         btga::OnlineMultiplayer client{client_io};
+        stage = "bind relay";
         if (!bind(host, true, hosted.session_id, hosted.relay_token) ||
             !bind(client, false, joined.session_id, joined.join_token)) {
             throw std::runtime_error("native relay binding failed");
@@ -107,11 +113,12 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         if (!received) throw std::runtime_error("native gameplay reply timed out");
+        stage = "heartbeat";
         master.heartbeat(hosted.lobby.id, hosted.host_secret, 2, "playing");
         std::cout << "native HTTPS + public relay multiplayer test passed\n";
         return 0;
     } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
+        std::cerr << stage << ": " << error.what() << '\n';
         return 1;
     }
 }

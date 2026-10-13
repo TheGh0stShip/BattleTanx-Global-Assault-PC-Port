@@ -27,6 +27,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(btga_pc_core
     src/controller_pak.cpp
+    src/gameplay_digest.cpp
+    src/gameplay_snapshot.cpp
     src/game.cpp
     src/input_sync.cpp
     src/lzari.cpp
@@ -36,6 +38,7 @@ add_library(btga_pc_core
     src/pc_settings.cpp
     src/rom.cpp
     src/sha256.cpp
+    src/snapshot_transfer.cpp
     src/texture_packs.cpp
     src/udp_online_io.cpp
     src/world.cpp
@@ -72,6 +75,10 @@ enable_testing()
 add_executable(btga_pc_tests tests/core_tests.cpp)
 target_link_libraries(btga_pc_tests PRIVATE btga_pc_core)
 add_test(NAME btga_pc_core COMMAND btga_pc_tests)
+
+add_executable(btga_pc_synchronization_soak tests/synchronization_soak.cpp)
+target_link_libraries(btga_pc_synchronization_soak PRIVATE btga_pc_core)
+add_test(NAME btga_pc_synchronization_soak COMMAND btga_pc_synchronization_soak)
 
 add_executable(btga_pc_live_multiplayer_test tests/live_multiplayer_test.cpp)
 target_link_libraries(btga_pc_live_multiplayer_test PRIVATE btga_pc_core)

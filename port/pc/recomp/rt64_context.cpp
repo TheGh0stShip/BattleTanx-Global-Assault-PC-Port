@@ -28,10 +28,13 @@
 
 #include "btga/texture_packs.hpp"
 #include "btga/btga_gameplay.h"
+#include "btga/gameplay_digest.hpp"
+#include "btga/gameplay_snapshot.hpp"
 #include "btga/master_client.hpp"
 #include "btga/input_sync.hpp"
 #include "btga/online_multiplayer.hpp"
 #include "btga/online_bootstrap.hpp"
+#include "btga/snapshot_transfer.hpp"
 #include "btga/udp_online_io.hpp"
 #include "hle/rt64_application.h"
 #include "imgui/imgui.h"
@@ -45,6 +48,20 @@ constexpr std::size_t online_state_packet_size = 17;
 constexpr std::size_t random_seed_offset = 0x00114C80U;
 constexpr std::size_t frame_counter_offset = 0x0021945CU;
 constexpr std::uint32_t online_state_checksum_salt = UINT32_C(0x42544741);
+constexpr std::size_t online_digest_history_size = 128U;
+constexpr std::uint8_t gameplay_snapshot_version = 0x10;
+constexpr std::uint8_t gameplay_snapshot_ack_version = 0x11;
+constexpr std::size_t gameplay_snapshot_header_size =
+    1U + btga::snapshot_chunk_header_size;
+constexpr std::size_t gameplay_snapshot_chunk_size =
+    btga::snapshot_chunk_payload_size;
+constexpr std::size_t gameplay_snapshot_size = btga::gameplay_snapshot_size;
+constexpr std::size_t gameplay_snapshot_chunk_count =
+    (gameplay_snapshot_size + gameplay_snapshot_chunk_size - 1U) /
+    gameplay_snapshot_chunk_size;
+static_assert(gameplay_snapshot_header_size + gameplay_snapshot_chunk_size <=
+              BTGA_NET_MAX_DATAGRAM_SIZE);
+static_assert(gameplay_snapshot_chunk_count <= 64U);
 
 void put_u32_be(std::uint8_t* output, std::uint32_t value) {
     output[0] = static_cast<std::uint8_t>(value >> 24);
@@ -63,6 +80,12 @@ std::uint32_t load_rdram_word(const std::uint8_t* rdram, std::size_t offset) {
     std::uint32_t value = 0;
     std::memcpy(&value, rdram + offset, sizeof(value));
     return value;
+}
+
+std::uint8_t load_rdram_byte(const std::uint8_t* rdram, std::size_t offset) {
+    // N64Recomp keeps 32-bit guest words in native order; byte addresses use
+    // the same XOR-3 lane mapping as MEM_BU.
+    return rdram[offset ^ 3U];
 }
 
 void store_rdram_word(std::uint8_t* rdram, std::size_t offset, std::uint32_t value) {
@@ -395,7 +418,8 @@ public:
 
     ~Context() override {
         if (online_task_.valid()) online_task_.wait();
-        if (online_master_ && !online_lobby_id_.empty() && !online_host_secret_.empty()) {
+        if (!online_restart_handoff_ && online_master_ &&
+            !online_lobby_id_.empty() && !online_host_secret_.empty()) {
             online_master_->remove(online_lobby_id_, online_host_secret_);
         }
         if (online_connection_) online_connection_->leave_online();
@@ -481,6 +505,14 @@ public:
         if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby ||
             player < 0 || player > 1) return false;
         pump_online_inputs_locked();
+        if (online_frame_inputs_active_) {
+            if (!online_frame_applied_inputs_valid_) return false;
+            const auto& input = online_frame_applied_inputs_[static_cast<std::size_t>(player)];
+            buttons = input.buttons;
+            x = static_cast<float>(input.stick_x) / 127.0F;
+            y = static_cast<float>(input.stick_y) / 127.0F;
+            return true;
+        }
         (void)prepare_applied_inputs_locked();
         if (!online_applied_inputs_valid_) return false;
         const auto& input = online_applied_inputs_[static_cast<std::size_t>(player)];
@@ -495,6 +527,16 @@ public:
         if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby) return;
         const std::uint16_t local = online_connection_->relay_slot();
         if (local > 1) return; // Two-player synchronization milestone.
+        const btga::OnlineControllerInput input{
+            buttons,
+            static_cast<std::int8_t>(std::clamp(x, -1.0F, 1.0F) * 127.0F),
+            static_cast<std::int8_t>(std::clamp(y, -1.0F, 1.0F) * 127.0F),
+        };
+        online_latest_local_input_ = input;
+        // Once the game clock is active, the simulation barrier publishes
+        // this sample for a specific future frame. Controller polling can run
+        // on a different native thread and must no longer define game timing.
+        if (online_frame_inputs_active_) return;
         // Receive before assigning this poll's tick. Slot zero is the epoch
         // authority and binds its next tick to the latest client tick it has
         // actually observed; that exact pair is repeated in every host packet.
@@ -509,11 +551,6 @@ public:
             }
         }
         std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
-        const btga::OnlineControllerInput input{
-            buttons,
-            static_cast<std::int8_t>(std::clamp(x, -1.0F, 1.0F) * 127.0F),
-            static_cast<std::int8_t>(std::clamp(y, -1.0F, 1.0F) * 127.0F),
-        };
         const std::uint32_t tick = online_tick_++;
         const std::uint32_t sequence = online_sequence_++;
         online_inputs_.record_local(static_cast<std::uint8_t>(local), tick, sequence, input);
@@ -567,6 +604,17 @@ public:
                     ? "Synchronizing authoritative game state..."
                     : "Waiting for authoritative game state...";
             }
+            if (std::chrono::steady_clock::now() - state_wait_started >=
+                std::chrono::seconds(10)) {
+                online_status_ =
+                    "Initial game-state synchronization timed out; continuing offline.";
+                if (online_trace_) {
+                    online_trace_ << "INITIAL_STATE_TIMEOUT tick=" << tick << '\n';
+                    online_trace_.flush();
+                }
+                online_connection_->leave_online();
+                return;
+            }
         }
         if (local == 0 && !online_tick_origins_valid_) {
             const auto remote_tick = online_inputs_.latest_tick_for(1);
@@ -605,6 +653,16 @@ public:
                     online_wait_traced_ = true;
                 }
             }
+            if (std::chrono::steady_clock::now() - wait_started >=
+                std::chrono::seconds(10)) {
+                online_status_ = "Online input synchronization timed out; continuing offline.";
+                if (online_trace_) {
+                    online_trace_ << "POLL_INPUT_TIMEOUT tick=" << tick << '\n';
+                    online_trace_.flush();
+                }
+                online_connection_->leave_online();
+                return;
+            }
         }
         online_wait_traced_ = false;
     }
@@ -621,6 +679,18 @@ public:
         if (local > 1) return false;
         const std::uint16_t destination = local == 0 ? 1 : 0;
         const std::uint32_t frame = online_simulation_frame_++;
+        // Front-end presentation remains poll-synchronized so menus retain
+        // button edges. Native-frame timing there may legitimately differ;
+        // enforce deterministic digests only in frame-synchronized gameplay.
+        const bool frame_inputs_active = btga::gameplay_frame_input_active(
+            {rdram_, 8U * 1024U * 1024U});
+        std::uint32_t checksum = 0;
+        if (frame_inputs_active) {
+            const btga::GameplayStateDigests digests = online_gameplay_digests();
+            checksum = digests.combined;
+            record_online_digest(online_local_digests_, frame, digests);
+            compare_online_digest(frame);
+        }
 
         std::array<std::uint8_t, BTGA_NET_HEADER_SIZE + BTGA_NET_FRAME_SYNC_SIZE> packet{};
         BtgaNetHeader header{};
@@ -634,7 +704,7 @@ public:
         header.peer_id = local;
         if (btga_net_encode_header(packet.data(), packet.size(), &header) !=
             BTGA_NET_HEADER_SIZE) return false;
-        const BtgaNetFrameSync sync{frame, 0U};
+        const BtgaNetFrameSync sync{frame, checksum};
         if (btga_net_encode_frame_sync(packet.data() + BTGA_NET_HEADER_SIZE,
                                        BTGA_NET_FRAME_SYNC_SIZE, &sync) !=
             BTGA_NET_FRAME_SYNC_SIZE) return false;
@@ -654,6 +724,7 @@ public:
             if (frame == 0) return *online_remote_simulation_frame_ >= frame;
             return frame <= *online_remote_simulation_frame_ + simulation_lead;
         };
+        const auto frame_wait_started = std::chrono::steady_clock::now();
         while (!peer_ready()) {
             if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby) {
                 return false;
@@ -663,12 +734,177 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             lock.lock();
             pump_online_inputs_locked();
+            if (std::chrono::steady_clock::now() - frame_wait_started >=
+                std::chrono::seconds(10)) {
+                online_status_ = "Peer frame synchronization timed out; continuing offline.";
+                if (online_trace_) {
+                    online_trace_ << "FRAME_BARRIER_TIMEOUT frame=" << frame << '\n';
+                    online_trace_.flush();
+                }
+                online_connection_->leave_online();
+                return false;
+            }
         }
+        // Advertise frame progress before waiting for delayed controller data.
+        // If an earlier frame event was lost, blocking on input first can form
+        // a circular wait: the leading peer waits for input while the lagging
+        // peer waits for the leading peer's next frame event.
+        if (!prepare_frame_inputs_locked(lock, frame, local, destination)) return false;
+        // The global clock also runs during logos and the front end. Those
+        // screens intentionally poll controllers independently of gameplay;
+        // feeding them a once-per-frame latch makes presses disappear (the
+        // intro can be skipped, then the main menu appears unresponsive).
+        // Keep poll-indexed lockstep until a world with human players exists,
+        // and use the frame-tagged latch only for that active match. This also
+        // returns intermission/front-end screens to responsive polling after
+        // the world has been torn down.
+        constexpr std::size_t world_offset = 0x00219498U;
+        constexpr std::size_t human_player_count_offset = 0x002194A4U;
+        constexpr std::size_t game_update_state_offset = 0x002195CCU;
+        const std::uint32_t world = load_rdram_word(rdram_, world_offset);
+        const std::uint8_t human_players =
+            load_rdram_byte(rdram_, human_player_count_offset);
+        const std::uint32_t game_update_state =
+            load_rdram_word(rdram_, game_update_state_offset);
+        if (frame_inputs_active &&
+            (!online_frame_inputs_active_ || online_gameplay_resync_requested_)) {
+            // A match is a new deterministic epoch. The host's complete
+            // simulation snapshot is applied and acknowledged before either
+            // peer may execute the first frame-tagged gameplay update.
+            if (!synchronize_gameplay_epoch_locked(lock, frame, local, destination)) {
+                return false;
+            }
+            // The host generation is the authoritative runtime tick as well
+            // as the guest-state epoch. Discard every predicted/queued frame
+            // from the old timeline and restart both peers at generation+1.
+            // The first recovered update is neutral on both machines; normal
+            // delayed frame input resumes from the freshly rebased history.
+            online_simulation_frame_ = online_gameplay_snapshot_generation_ + 1U;
+            online_remote_simulation_frame_.reset();
+            online_frame_inputs_ = {};
+            btga::prime_frame_input_epoch(
+                online_frame_inputs_, online_gameplay_snapshot_generation_);
+            online_frame_applied_inputs_.fill({});
+            online_frame_applied_inputs_valid_ = true;
+            online_local_digests_.fill({});
+            online_remote_digests_.fill({});
+            online_first_desync_frame_.reset();
+            online_last_digest_frame_.reset();
+            online_digest_mismatch_run_ = 0;
+            online_gameplay_resync_requested_ = false;
+        } else if (!frame_inputs_active && online_frame_inputs_active_) {
+            online_gameplay_snapshot_acknowledged_ = false;
+            online_gameplay_snapshot_received_mask_ = 0;
+        }
+        if ((frame_inputs_active != online_frame_inputs_active_ || frame % 60U == 0U) &&
+            online_trace_) {
+            online_trace_ << "INPUT_MODE frame=" << frame
+                          << " mode=" << (frame_inputs_active ? "frame" : "poll")
+                          << " world=" << world
+                          << " humans=" << static_cast<unsigned>(human_players)
+                          << " state=" << game_update_state
+                          << '\n';
+            online_trace_.flush();
+        }
+        online_frame_inputs_active_ = frame_inputs_active;
         if (online_trace_ && (frame % 60U) == 0U) {
-            online_trace_ << "SIM_FRAME frame=" << frame << '\n';
+            online_trace_ << "SIM_FRAME frame=" << frame
+                          << " gameplay_checksum=" << checksum << '\n';
             online_trace_.flush();
         }
         return true;
+    }
+
+    bool prepare_frame_inputs_locked(std::unique_lock<std::recursive_mutex>& lock,
+                                     std::uint32_t frame, std::uint16_t local,
+                                     std::uint16_t destination) {
+        constexpr std::uint32_t frame_input_tag = UINT32_C(0x80000000);
+        constexpr std::uint32_t input_delay = 4U;
+        constexpr std::uint32_t redundancy = 8U;
+        const std::uint32_t publish_frame = frame + input_delay;
+        const std::uint32_t publish_tick = frame_input_tag | publish_frame;
+        const std::uint32_t sequence = online_sequence_++;
+        online_frame_inputs_.record_local(
+            static_cast<std::uint8_t>(local), publish_tick, sequence,
+            online_latest_local_input_);
+
+        const std::uint32_t first_frame =
+            publish_frame >= redundancy - 1U
+                ? std::max(input_delay, publish_frame - (redundancy - 1U))
+                : input_delay;
+        std::array<btga::OnlineControllerInput, redundancy> frames{};
+        std::size_t frame_count = 0;
+        for (std::uint32_t input_frame = first_frame;
+             input_frame <= publish_frame; ++input_frame) {
+            const auto input = online_frame_inputs_.input_for(
+                static_cast<std::uint8_t>(local), frame_input_tag | input_frame);
+            if (input) frames[frame_count++] = *input;
+        }
+        std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
+        const std::size_t packet_size = online_frame_inputs_.encode_batch(
+            packet, online_session_id_, local, sequence,
+            frame_input_tag | first_frame, static_cast<std::uint8_t>(local),
+            {frames.data(), frame_count});
+        if (packet_size == 0) return false;
+        const auto send = [&]() {
+            return online_connection_->send_gameplay(
+                destination, {packet.data(), packet_size});
+        };
+        (void)send();
+        pump_online_inputs_locked();
+
+        if (frame < input_delay) {
+            online_frame_applied_inputs_.fill({});
+            online_frame_applied_inputs_valid_ = true;
+            return true;
+        }
+        const std::uint32_t apply_tick = frame_input_tag | frame;
+        const auto wait_started = std::chrono::steady_clock::now();
+        for (;;) {
+            const auto local_input = online_frame_inputs_.input_for(
+                static_cast<std::uint8_t>(local), apply_tick);
+            const auto remote_input = online_frame_inputs_.input_for(
+                static_cast<std::uint8_t>(destination), apply_tick);
+            if (local_input && remote_input) {
+                online_frame_applied_inputs_[local] = *local_input;
+                online_frame_applied_inputs_[destination] = *remote_input;
+                online_frame_applied_inputs_valid_ = true;
+                if (online_trace_ && (frame % 60U) == 0U) {
+                    online_trace_ << "FRAME_INPUT frame=" << frame
+                                  << " p0=" << online_frame_applied_inputs_[0].buttons
+                                  << ',' << static_cast<int>(online_frame_applied_inputs_[0].stick_x)
+                                  << ',' << static_cast<int>(online_frame_applied_inputs_[0].stick_y)
+                                  << " p1=" << online_frame_applied_inputs_[1].buttons
+                                  << ',' << static_cast<int>(online_frame_applied_inputs_[1].stick_x)
+                                  << ',' << static_cast<int>(online_frame_applied_inputs_[1].stick_y)
+                                  << '\n';
+                    online_trace_.flush();
+                }
+                return true;
+            }
+            if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby) {
+                return false;
+            }
+            if (std::chrono::steady_clock::now() - wait_started >=
+                std::chrono::milliseconds(250)) {
+                online_status_ = "Waiting for frame-tagged multiplayer input...";
+            }
+            if (std::chrono::steady_clock::now() - wait_started >=
+                std::chrono::seconds(10)) {
+                online_status_ = "Frame input synchronization timed out; continuing offline.";
+                if (online_trace_) {
+                    online_trace_ << "FRAME_INPUT_TIMEOUT frame=" << frame << '\n';
+                    online_trace_.flush();
+                }
+                online_connection_->leave_online();
+                return false;
+            }
+            (void)send();
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            lock.lock();
+            pump_online_inputs_locked();
+        }
     }
 
 private:
@@ -741,6 +977,79 @@ private:
             });
     }
 
+    bool restart_for_online_preboot(bool host, std::uint64_t session,
+                                    const btga::RelayEndpoint& relay,
+                                    std::string_view token,
+                                    std::string_view lobby_id,
+                                    std::string_view host_secret) {
+#if defined(_WIN32)
+        if (pc_settings.last_rom_path.empty()) {
+            online_status_ = "Select and validate a local ROM before starting online play.";
+            return false;
+        }
+        wchar_t executable[MAX_PATH]{};
+        const DWORD length = GetModuleFileNameW(nullptr, executable, MAX_PATH);
+        if (length == 0 || length >= MAX_PATH) {
+            online_status_ = "Could not locate the running executable for synchronized restart.";
+            return false;
+        }
+        const std::string session_text = std::to_string(session);
+        const std::string port_text = std::to_string(relay.port);
+        const auto set = [](const char* name, const std::string& value) {
+            return SetEnvironmentVariableA(name, value.c_str()) != FALSE;
+        };
+        const auto clear = [](const char* name) { SetEnvironmentVariableA(name, nullptr); };
+        const std::array<const char*, 7> names{
+            "BTGA_ONLINE_ROLE", "BTGA_ONLINE_SESSION", "BTGA_ONLINE_RELAY_HOST",
+            "BTGA_ONLINE_RELAY_PORT", "BTGA_ONLINE_TOKEN", "BTGA_ONLINE_LOBBY",
+            "BTGA_ONLINE_HOST_SECRET"};
+        const bool environment_ready =
+            set(names[0], host ? "host" : "client") &&
+            set(names[1], session_text) && set(names[2], relay.address) &&
+            set(names[3], port_text) && set(names[4], std::string{token}) &&
+            set(names[5], std::string{lobby_id}) &&
+            set(names[6], std::string{host_secret});
+        if (!environment_ready) {
+            for (const char* name : names) clear(name);
+            online_status_ = "Could not prepare the synchronized restart environment.";
+            return false;
+        }
+        const std::filesystem::path rom =
+            std::filesystem::u8path(pc_settings.last_rom_path);
+        std::wstring command = L"\"";
+        command += executable;
+        command += L"\" --online-resume \"";
+        command += rom.wstring();
+        command += L"\"";
+        std::vector<wchar_t> mutable_command(command.begin(), command.end());
+        mutable_command.push_back(L'\0');
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        const BOOL created = CreateProcessW(
+            executable, mutable_command.data(), nullptr, nullptr, FALSE, 0,
+            nullptr, nullptr, &startup, &process);
+        for (const char* name : names) clear(name);
+        if (!created) {
+            online_status_ = "Could not start the synchronized online process.";
+            return false;
+        }
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        // Ownership of lobby cleanup has moved to the replacement process.
+        // The old Context destructor must not remove the lobby during exit.
+        online_restart_handoff_ = true;
+        online_status_ = "Restarting into a synchronized online session...";
+        ultramodern::quit();
+        return true;
+#else
+        (void)host; (void)session; (void)relay; (void)token;
+        (void)lobby_id; (void)host_secret;
+        online_status_ = "In-app synchronized restart is not implemented on this platform yet.";
+        return false;
+#endif
+    }
+
     bool begin_online_relay(bool host, std::uint64_t session,
                             const btga::RelayEndpoint& relay,
                             std::string_view token) {
@@ -760,6 +1069,11 @@ private:
         online_sequence_ = 1;
         online_tick_ = 0;
         online_inputs_ = {};
+        online_frame_inputs_ = {};
+        online_latest_local_input_ = {};
+        online_frame_applied_inputs_.fill({});
+        online_frame_inputs_active_ = false;
+        online_frame_applied_inputs_valid_ = false;
         online_peer_seen_.fill(false);
         online_tick_origins_valid_ = false;
         online_state_synchronized_ = false;
@@ -772,8 +1086,23 @@ private:
         online_remote_tick_origin_ = 0;
         online_last_traced_tick_.reset();
         online_wait_traced_ = false;
+        online_boot_bridge_traced_ = false;
         online_simulation_frame_ = 0;
         online_remote_simulation_frame_.reset();
+        online_local_digests_.fill({});
+        online_remote_digests_.fill({});
+        online_first_desync_frame_.reset();
+        online_last_digest_frame_.reset();
+        online_digest_mismatch_run_ = 0;
+        online_gameplay_snapshot_.fill(0);
+        online_gameplay_snapshot_generation_ = 0;
+        online_gameplay_snapshot_checksum_ = 0;
+        online_gameplay_snapshot_received_mask_ = 0;
+        online_gameplay_snapshot_acknowledged_ = false;
+        online_gameplay_applied_generation_ = 0;
+        online_gameplay_snapshot_applied_ = false;
+        online_gameplay_resync_requested_ = false;
+        online_snapshot_assembler_.reset();
         online_trace_.close();
         online_trace_.open(pc_data_path / "btga-net-sync.log",
                            std::ios::out | std::ios::trunc);
@@ -800,12 +1129,81 @@ private:
                 size == BTGA_NET_HEADER_SIZE + BTGA_NET_FRAME_SYNC_SIZE) {
                 const std::uint8_t* payload = packet.data() + BTGA_NET_HEADER_SIZE;
                 BtgaNetFrameSync sync{};
-                if (btga_net_decode_frame_sync(&sync, payload, header.payload_size) &&
-                    (!online_remote_simulation_frame_ ||
-                     sync.frame > *online_remote_simulation_frame_)) {
-                    online_remote_simulation_frame_ = sync.frame;
+                if (btga_net_decode_frame_sync(&sync, payload, header.payload_size)) {
+                    if (sync.state_checksum != 0U) {
+                        btga::GameplayStateDigests remote_digests{};
+                        remote_digests.combined = sync.state_checksum;
+                        record_online_digest(online_remote_digests_, sync.frame,
+                                             remote_digests);
+                        compare_online_digest(sync.frame);
+                    }
+                    if (!online_remote_simulation_frame_ ||
+                        sync.frame > *online_remote_simulation_frame_) {
+                        online_remote_simulation_frame_ = sync.frame;
+                    }
                 }
                 continue;
+            }
+            if (btga_net_decode_header(&header, packet.data(), size) &&
+                header.protocol_version == BTGA_NET_PROTOCOL_VERSION &&
+                header.message_type == BTGA_NET_MSG_SNAPSHOT &&
+                header.session_id == online_session_id_ && header.peer_id == source &&
+                header.payload_size >= 1U &&
+                size == BTGA_NET_HEADER_SIZE + header.payload_size) {
+                const std::uint8_t* payload = packet.data() + BTGA_NET_HEADER_SIZE;
+                const std::uint16_t local = online_connection_->relay_slot();
+                if (payload[0] == gameplay_snapshot_version && local == 1 && source == 0 &&
+                    header.payload_size >= gameplay_snapshot_header_size) {
+                    btga::SnapshotChunk chunk{};
+                    const std::span<const std::uint8_t> encoded{
+                        payload + 1, header.payload_size - 1U};
+                    const bool decoded = btga::decode_snapshot_chunk(chunk, encoded);
+                    if (decoded) {
+                        // A completed snapshot is retransmitted until its ACK
+                        // reaches the host. Those duplicate chunks belong to
+                        // the epoch we already applied and must not open a new
+                        // synchronization barrier. Only a strictly newer host
+                        // generation requests a corrective rebase.
+                        if (online_gameplay_snapshot_applied_ &&
+                            btga::snapshot_generation_is_newer(
+                                chunk.generation,
+                                online_gameplay_applied_generation_)) {
+                            online_gameplay_resync_requested_ = true;
+                        }
+                        if (online_gameplay_snapshot_acknowledged_ &&
+                            chunk.generation != online_gameplay_snapshot_generation_) {
+                            online_snapshot_assembler_.reset();
+                            online_gameplay_snapshot_received_mask_ = 0;
+                            online_gameplay_snapshot_acknowledged_ = false;
+                        }
+                    }
+                    if (decoded && online_snapshot_assembler_.accept(chunk)) {
+                        online_gameplay_snapshot_generation_ =
+                            online_snapshot_assembler_.generation();
+                        online_gameplay_snapshot_checksum_ =
+                            online_snapshot_assembler_.checksum();
+                        online_gameplay_snapshot_received_mask_ |= UINT64_C(1) << chunk.index;
+                        if (online_snapshot_assembler_.verified()) {
+                            std::memcpy(online_gameplay_snapshot_.data(),
+                                        online_snapshot_assembler_.bytes().data(),
+                                        gameplay_snapshot_size);
+                            if (online_gameplay_snapshot_acknowledged_) {
+                                // ACKs are datagrams too. Re-ACK a retransmitted
+                                // completed snapshot so an isolated lost ACK can
+                                // never strand the host at the epoch barrier.
+                                send_gameplay_snapshot_ack_locked(0);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if (payload[0] == gameplay_snapshot_ack_version && local == 0 && source == 1 &&
+                    header.payload_size == 9U &&
+                    get_u32_be(payload + 1) == online_gameplay_snapshot_generation_ &&
+                    get_u32_be(payload + 5) == online_gameplay_snapshot_checksum_) {
+                    online_gameplay_snapshot_acknowledged_ = true;
+                    continue;
+                }
             }
             if (btga_net_decode_header(&header, packet.data(), size) &&
                 header.protocol_version == BTGA_NET_PROTOCOL_VERSION &&
@@ -852,12 +1250,25 @@ private:
                 }
                 continue;
             }
-            const bool accepted = online_inputs_.accept(
+            bool frame_input = false;
+            if (btga_net_decode_header(&header, packet.data(), size) &&
+                header.message_type == BTGA_NET_MSG_INPUT &&
+                header.payload_size == size - BTGA_NET_HEADER_SIZE) {
+                BtgaNetInputBatch batch{};
+                if (btga_net_decode_input_batch(
+                        &batch, packet.data() + BTGA_NET_HEADER_SIZE,
+                        header.payload_size)) {
+                    frame_input = (batch.first_tick & UINT32_C(0x80000000)) != 0U;
+                }
+            }
+            btga::InputSynchronizer& synchronizer =
+                frame_input ? online_frame_inputs_ : online_inputs_;
+            const bool accepted = synchronizer.accept(
                 {packet.data(), size}, online_session_id_, source);
             if (accepted && source < online_peer_seen_.size()) {
                 online_peer_seen_[source] = true;
                 const std::uint16_t local = online_connection_->relay_slot();
-                if (local == 1 && source == 0 && online_state_synchronized_ &&
+                if (!frame_input && local == 1 && source == 0 && online_state_synchronized_ &&
                     !online_tick_origins_valid_) {
                     const auto origin = online_inputs_.sync_origin_for(0);
                     if (origin) {
@@ -871,6 +1282,137 @@ private:
                 }
             }
         }
+    }
+
+    void capture_gameplay_snapshot() {
+        (void)btga::capture_gameplay_snapshot(
+            {rdram_, 8U * 1024U * 1024U}, online_gameplay_snapshot_);
+        online_gameplay_snapshot_checksum_ =
+            btga::snapshot_fnv1a(online_gameplay_snapshot_);
+    }
+
+    bool apply_gameplay_snapshot() {
+        if (btga::snapshot_fnv1a(online_gameplay_snapshot_) !=
+            online_gameplay_snapshot_checksum_) return false;
+        return btga::restore_gameplay_snapshot(
+            {rdram_, 8U * 1024U * 1024U}, online_gameplay_snapshot_);
+    }
+
+    void send_gameplay_snapshot_chunks_locked(std::uint16_t destination) {
+        if (!online_connection_) return;
+        for (std::size_t chunk = 0; chunk < gameplay_snapshot_chunk_count; ++chunk) {
+            const std::size_t offset = chunk * gameplay_snapshot_chunk_size;
+            const std::size_t data_size = std::min(
+                gameplay_snapshot_chunk_size, gameplay_snapshot_size - offset);
+            const std::size_t payload_size = gameplay_snapshot_header_size + data_size;
+            std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
+            BtgaNetHeader header{};
+            header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
+            header.message_type = BTGA_NET_MSG_SNAPSHOT;
+            header.flags = static_cast<std::uint8_t>(BTGA_NET_FLAG_RELIABLE |
+                                                     BTGA_NET_FLAG_RELAYED);
+            header.session_id = online_session_id_;
+            header.sequence = online_sequence_++;
+            header.payload_size = static_cast<std::uint16_t>(payload_size);
+            header.peer_id = online_connection_->relay_slot();
+            if (btga_net_encode_header(packet.data(), packet.size(), &header) !=
+                BTGA_NET_HEADER_SIZE) return;
+            std::uint8_t* payload = packet.data() + BTGA_NET_HEADER_SIZE;
+            payload[0] = gameplay_snapshot_version;
+            const btga::SnapshotChunk descriptor{
+                online_gameplay_snapshot_generation_,
+                static_cast<std::uint16_t>(chunk),
+                static_cast<std::uint16_t>(gameplay_snapshot_chunk_count),
+                static_cast<std::uint16_t>(data_size),
+                online_gameplay_snapshot_checksum_,
+                {online_gameplay_snapshot_.data() + offset, data_size}};
+            if (!btga::encode_snapshot_chunk(
+                    {payload + 1, payload_size - 1U}, descriptor)) return;
+            (void)online_connection_->send_gameplay(
+                destination, {packet.data(), BTGA_NET_HEADER_SIZE + payload_size});
+        }
+    }
+
+    void send_gameplay_snapshot_ack_locked(std::uint16_t destination) {
+        if (!online_connection_) return;
+        std::array<std::uint8_t, BTGA_NET_HEADER_SIZE + 9U> packet{};
+        BtgaNetHeader header{};
+        header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
+        header.message_type = BTGA_NET_MSG_SNAPSHOT;
+        header.flags = static_cast<std::uint8_t>(BTGA_NET_FLAG_RELIABLE |
+                                                 BTGA_NET_FLAG_RELAYED);
+        header.session_id = online_session_id_;
+        header.sequence = online_sequence_++;
+        header.payload_size = 9;
+        header.peer_id = online_connection_->relay_slot();
+        if (btga_net_encode_header(packet.data(), packet.size(), &header) !=
+            BTGA_NET_HEADER_SIZE) return;
+        std::uint8_t* payload = packet.data() + BTGA_NET_HEADER_SIZE;
+        payload[0] = gameplay_snapshot_ack_version;
+        put_u32_be(payload + 1, online_gameplay_snapshot_generation_);
+        put_u32_be(payload + 5, online_gameplay_snapshot_checksum_);
+        (void)online_connection_->send_gameplay(destination, packet);
+    }
+
+    bool synchronize_gameplay_epoch_locked(std::unique_lock<std::recursive_mutex>& lock,
+                                           std::uint32_t frame,
+                                           std::uint16_t local,
+                                           std::uint16_t destination) {
+        online_gameplay_snapshot_acknowledged_ = false;
+        if (local == 0) {
+            online_gameplay_snapshot_generation_ = frame;
+            capture_gameplay_snapshot();
+            send_gameplay_snapshot_chunks_locked(destination);
+        } else if (online_gameplay_snapshot_received_mask_ == 0) {
+            online_gameplay_snapshot_generation_ = 0;
+            online_gameplay_snapshot_checksum_ = 0;
+            online_snapshot_assembler_.reset();
+        }
+        const auto started = std::chrono::steady_clock::now();
+        for (;;) {
+            pump_online_inputs_locked();
+            if (local == 0 && online_gameplay_snapshot_acknowledged_) break;
+            if (local == 1 && online_snapshot_assembler_.verified() &&
+                (!online_gameplay_snapshot_applied_ ||
+                 btga::snapshot_generation_is_newer(
+                     online_snapshot_assembler_.generation(),
+                     online_gameplay_applied_generation_))) {
+                if (!apply_gameplay_snapshot()) return false;
+                send_gameplay_snapshot_ack_locked(destination);
+                online_gameplay_snapshot_acknowledged_ = true;
+                online_gameplay_applied_generation_ =
+                    online_gameplay_snapshot_generation_;
+                online_gameplay_snapshot_applied_ = true;
+                break;
+            }
+            if (!online_connection_ || online_connection_->state() != btga::OnlineState::Lobby)
+                return false;
+            if (local == 0) send_gameplay_snapshot_chunks_locked(destination);
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            lock.lock();
+            if (std::chrono::steady_clock::now() - started > std::chrono::seconds(10)) {
+                online_status_ = "Gameplay state synchronization timed out; continuing offline.";
+                if (online_trace_) {
+                    online_trace_ << "GAMEPLAY_EPOCH_TIMEOUT frame=" << frame << '\n';
+                    online_trace_.flush();
+                }
+                online_connection_->leave_online();
+                return false;
+            }
+        }
+        if (online_trace_) {
+            online_trace_ << "GAMEPLAY_EPOCH_SYNC frame=" << frame
+                          << " role=" << (local == 0 ? "host" : "client")
+                          << " checksum=" << online_gameplay_snapshot_checksum_ << '\n';
+            online_trace_.flush();
+        }
+        if (local == 0) {
+            online_gameplay_applied_generation_ =
+                online_gameplay_snapshot_generation_;
+            online_gameplay_snapshot_applied_ = true;
+        }
+        return true;
     }
 
     void send_online_state_locked(std::uint16_t destination, std::uint8_t version) {
@@ -919,8 +1461,26 @@ private:
         const std::uint32_t delayed = relative_tick - input_delay;
         const auto local_input = online_inputs_.input_for(
             static_cast<std::uint8_t>(local), online_local_tick_origin_ + delayed);
-        const auto remote_input = online_inputs_.input_for(
+        auto remote_input = online_inputs_.input_for(
             static_cast<std::uint8_t>(remote), online_remote_tick_origin_ + delayed);
+        // The simulation clock and controller manager are separate emulated
+        // threads. One peer can reach the first simulation barrier while the
+        // other still needs a final boot/logo controller poll. Once frame 0
+        // from that peer is confirmed, it cannot produce another poll-indexed
+        // sample; repeat only its last confirmed sample to bridge the lagging
+        // peer to the same barrier. Gameplay uses frame-tagged inputs after it.
+        if (!remote_input && online_remote_simulation_frame_ &&
+            *online_remote_simulation_frame_ == 0U) {
+            remote_input = online_inputs_.latest_input_for(
+                static_cast<std::uint8_t>(remote));
+            if (remote_input && !online_boot_bridge_traced_ && online_trace_) {
+                online_trace_ << "BOOT_INPUT_BRIDGE relative=" << relative_tick
+                              << " remote_tick="
+                              << online_remote_tick_origin_ + delayed << '\n';
+                online_trace_.flush();
+                online_boot_bridge_traced_ = true;
+            }
+        }
         if (!local_input || !remote_input) return false;
         online_applied_inputs_[local] = *local_input;
         online_applied_inputs_[remote] = *remote_input;
@@ -928,6 +1488,84 @@ private:
         trace_online_apply_locked(relative_tick, online_local_tick_origin_ + delayed,
                                   online_remote_tick_origin_ + delayed);
         return true;
+    }
+
+    struct OnlineFrameDigest {
+        std::uint32_t frame = 0;
+        btga::GameplayStateDigests digests{};
+        bool valid = false;
+    };
+
+    btga::GameplayStateDigests online_gameplay_digests() const {
+        // Hash simulation-owned guest state only. Do not include RDRAM wholesale:
+        // libultra queues, thread stacks, display lists, camera/render state and
+        // audio buffers legitimately differ between hosts and future per-device
+        // camera modes. These ranges cover the 24 object slots, deterministic
+        // player fields and team scores, RNG/time, game mode and match time.
+        return btga::gameplay_state_digests({rdram_, 8U * 1024U * 1024U});
+    }
+
+    static void record_online_digest(
+        std::array<OnlineFrameDigest, online_digest_history_size>& history,
+        std::uint32_t frame, btga::GameplayStateDigests digests) {
+        history[frame % history.size()] = {frame, digests, true};
+    }
+
+    void compare_online_digest(std::uint32_t frame) {
+        const OnlineFrameDigest& local =
+            online_local_digests_[frame % online_local_digests_.size()];
+        const OnlineFrameDigest& remote =
+            online_remote_digests_[frame % online_remote_digests_.size()];
+        if (!local.valid || !remote.valid || local.frame != frame || remote.frame != frame) return;
+        if (online_last_digest_frame_ && frame <= *online_last_digest_frame_) return;
+        const bool consecutive = online_last_digest_frame_ &&
+                                 frame == *online_last_digest_frame_ + 1U;
+        online_last_digest_frame_ = frame;
+        if (local.digests.combined == remote.digests.combined) {
+            online_digest_mismatch_run_ = 0;
+            return;
+        }
+        online_digest_mismatch_run_ = consecutive ? online_digest_mismatch_run_ + 1U : 1U;
+        if (online_trace_) {
+            const auto& d = local.digests;
+            online_trace_ << "DIGEST_MISMATCH frame=" << frame
+                          << " run=" << online_digest_mismatch_run_
+                          << " local=" << d.combined
+                          << " remote=" << remote.digests.combined
+                          << " objects=" << d.objects
+                          << " object_core=" << d.object_core
+                          << " object_tail=" << d.object_tail
+                          << " player_headers=" << d.player_headers
+                          << " player_gameplay=" << d.player_gameplay
+                          << " team_info=" << d.team_info
+                          << " seed=" << d.random_seed
+                          << " game_frame=" << d.frame_counter
+                          << " mode=" << d.game_mode
+                          << " match_time=" << d.match_time << '\n';
+            if (online_digest_mismatch_run_ == 1U) {
+                online_trace_ << "OBJECT_SLOTS frame=" << frame;
+                for (std::size_t index = 0; index < d.object_slots.size(); ++index) {
+                    online_trace_ << (index == 0 ? " " : ",")
+                                  << d.object_slots[index];
+                }
+                online_trace_ << '\n';
+            }
+            online_trace_.flush();
+        }
+        if (online_digest_mismatch_run_ < 3U || online_first_desync_frame_) return;
+        online_first_desync_frame_ = frame - 2U;
+        online_status_ = "Persistent state divergence detected from simulation frame " +
+                         std::to_string(*online_first_desync_frame_) +
+                         "; online play stopped.";
+        if (online_trace_) {
+            online_trace_ << "DESYNC_ABORT frame=" << *online_first_desync_frame_ << '\n';
+            online_trace_.flush();
+        }
+        // The selected-state snapshot is sufficient to establish a common
+        // match epoch, but not a complete rollback save state: pointer-owned
+        // world allocations and other simulation-driving state are outside it.
+        // Stop cleanly instead of pretending a partial repair succeeded.
+        if (online_connection_) online_connection_->leave_online();
     }
 
     void trace_online_origin_locked(std::uint16_t local) {
@@ -1006,17 +1644,16 @@ private:
                 online_lobby_id_ = result.host->lobby.id;
                 online_host_secret_ = result.host->host_secret;
                 online_is_host_ = true;
-                if (!begin_online_relay(true, result.host->session_id, result.host->relay,
-                                        result.host->relay_token)) {
-                    disconnect_online();
-                }
+                (void)restart_for_online_preboot(
+                    true, result.host->session_id, result.host->relay,
+                    result.host->relay_token, result.host->lobby.id,
+                    result.host->host_secret);
             } else if (result.join) {
                 online_lobby_id_ = online_pending_lobby_;
                 online_is_host_ = false;
-                if (!begin_online_relay(false, result.join->session_id, result.join->relay,
-                                        result.join->join_token)) {
-                    online_lobby_id_.clear();
-                }
+                (void)restart_for_online_preboot(
+                    false, result.join->session_id, result.join->relay,
+                    result.join->join_token, online_pending_lobby_, {});
             } else {
                 online_next_heartbeat_ = std::chrono::steady_clock::now() +
                     std::chrono::seconds(30);
@@ -1069,6 +1706,17 @@ private:
         online_tick_origins_valid_ = true;
         online_simulation_frame_ = 0;
         online_remote_simulation_frame_.reset();
+        online_frame_inputs_ = {};
+        online_latest_local_input_ = {};
+        online_frame_applied_inputs_.fill({});
+        online_frame_inputs_active_ = false;
+        online_frame_applied_inputs_valid_ = false;
+        online_local_digests_.fill({});
+        online_remote_digests_.fill({});
+        online_first_desync_frame_.reset();
+        online_last_digest_frame_.reset();
+        online_digest_mismatch_run_ = 0;
+        online_boot_bridge_traced_ = false;
         online_peer_seen_[preboot->host ? 1U : 0U] = true;
         online_status_ = "Cold-boot multiplayer synchronized.";
         online_trace_.open(pc_data_path / "btga-net-sync.log",
@@ -1508,9 +2156,11 @@ private:
     std::string online_pending_lobby_;
     std::string online_host_secret_;
     bool online_is_host_ = false;
+    bool online_restart_handoff_ = false;
     std::chrono::steady_clock::time_point online_next_heartbeat_{};
     std::recursive_mutex online_mutex_;
     btga::InputSynchronizer online_inputs_;
+    btga::InputSynchronizer online_frame_inputs_;
     std::uint64_t online_session_id_ = 0;
     std::uint32_t online_sequence_ = 1;
     std::uint32_t online_tick_ = 0;
@@ -1524,11 +2174,30 @@ private:
     std::uint32_t online_state_generation_ = 0;
     bool online_applied_inputs_valid_ = false;
     std::array<btga::OnlineControllerInput, 2> online_applied_inputs_{};
+    btga::OnlineControllerInput online_latest_local_input_{};
+    std::array<btga::OnlineControllerInput, 2> online_frame_applied_inputs_{};
+    bool online_frame_inputs_active_ = false;
+    bool online_frame_applied_inputs_valid_ = false;
     std::ofstream online_trace_;
     std::optional<std::uint32_t> online_last_traced_tick_;
     bool online_wait_traced_ = false;
+    bool online_boot_bridge_traced_ = false;
     std::uint32_t online_simulation_frame_ = 0;
     std::optional<std::uint32_t> online_remote_simulation_frame_;
+    std::array<OnlineFrameDigest, online_digest_history_size> online_local_digests_{};
+    std::array<OnlineFrameDigest, online_digest_history_size> online_remote_digests_{};
+    std::optional<std::uint32_t> online_first_desync_frame_;
+    std::optional<std::uint32_t> online_last_digest_frame_;
+    std::uint32_t online_digest_mismatch_run_ = 0;
+    std::array<std::uint8_t, gameplay_snapshot_size> online_gameplay_snapshot_{};
+    btga::SnapshotAssembler online_snapshot_assembler_{gameplay_snapshot_size};
+    std::uint32_t online_gameplay_snapshot_generation_ = 0;
+    std::uint32_t online_gameplay_snapshot_checksum_ = 0;
+    std::uint64_t online_gameplay_snapshot_received_mask_ = 0;
+    bool online_gameplay_snapshot_acknowledged_ = false;
+    std::uint32_t online_gameplay_applied_generation_ = 0;
+    bool online_gameplay_snapshot_applied_ = false;
+    bool online_gameplay_resync_requested_ = false;
     std::array<bool, btga::InputSynchronizer::max_players> online_peer_seen_{};
 };
 }

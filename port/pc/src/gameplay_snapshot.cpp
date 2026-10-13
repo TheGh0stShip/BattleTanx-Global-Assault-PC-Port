@@ -1,0 +1,84 @@
+#include "btga/gameplay_snapshot.hpp"
+
+#include <cstring>
+
+namespace btga {
+namespace {
+constexpr std::size_t rdram_size = 8U * 1024U * 1024U;
+constexpr std::size_t random_seed_offset = 0x00114C80U;
+constexpr std::size_t object_pool_offset = 0x001AD128U;
+constexpr std::size_t object_pool_size = 24U * 0x4CCU;
+constexpr std::size_t gameplay_globals_offset = 0x00219458U;
+constexpr std::size_t gameplay_globals_size = 0x178U;
+constexpr std::size_t player_pool_offset = 0x00235F00U;
+constexpr std::size_t player_pool_size = 4U * 0x250U;
+constexpr std::size_t player_size = 0x250U;
+constexpr std::size_t team_pointer_offset = 0x10U;
+constexpr std::size_t team_info_size = 0x18U;
+
+std::uint32_t load_word(std::span<const std::uint8_t> rdram, std::size_t offset) {
+    std::uint32_t value = 0;
+    std::memcpy(&value, rdram.data() + offset, sizeof(value));
+    return value;
+}
+
+bool guest_offset(std::uint32_t address, std::size_t size, std::size_t& offset) {
+    constexpr std::uint32_t kseg0 = UINT32_C(0x80000000);
+    if (address < kseg0) return false;
+    offset = static_cast<std::size_t>(address - kseg0);
+    return offset <= rdram_size && size <= rdram_size - offset;
+}
+} // namespace
+
+bool capture_gameplay_snapshot(std::span<const std::uint8_t> rdram,
+                               std::span<std::uint8_t> snapshot) {
+    if (rdram.size() < rdram_size || snapshot.size() != gameplay_snapshot_size) return false;
+    std::size_t cursor = 0;
+    auto append = [&](std::size_t offset, std::size_t size) {
+        std::memcpy(snapshot.data() + cursor, rdram.data() + offset, size);
+        cursor += size;
+    };
+    append(random_seed_offset, sizeof(std::uint32_t));
+    append(object_pool_offset, object_pool_size);
+    append(gameplay_globals_offset, gameplay_globals_size);
+    append(player_pool_offset, player_pool_size);
+    for (std::size_t player = 0; player < 4U; ++player) {
+        const std::uint32_t address = load_word(
+            rdram, player_pool_offset + player * player_size + team_pointer_offset);
+        std::size_t offset = 0;
+        if (guest_offset(address, team_info_size, offset)) {
+            append(offset, team_info_size);
+        } else {
+            std::memset(snapshot.data() + cursor, 0, team_info_size);
+            cursor += team_info_size;
+        }
+    }
+    return cursor == snapshot.size();
+}
+
+bool restore_gameplay_snapshot(std::span<std::uint8_t> rdram,
+                               std::span<const std::uint8_t> snapshot) {
+    if (rdram.size() < rdram_size || snapshot.size() != gameplay_snapshot_size) return false;
+    std::size_t cursor = 0;
+    auto restore = [&](std::size_t offset, std::size_t size) {
+        std::memcpy(rdram.data() + offset, snapshot.data() + cursor, size);
+        cursor += size;
+    };
+    restore(random_seed_offset, sizeof(std::uint32_t));
+    restore(object_pool_offset, object_pool_size);
+    restore(gameplay_globals_offset, gameplay_globals_size);
+    restore(player_pool_offset, player_pool_size);
+    for (std::size_t player = 0; player < 4U; ++player) {
+        const std::uint32_t address = load_word(
+            rdram, player_pool_offset + player * player_size + team_pointer_offset);
+        std::size_t offset = 0;
+        if (guest_offset(address, team_info_size, offset)) {
+            restore(offset, team_info_size);
+        } else {
+            cursor += team_info_size;
+        }
+    }
+    return cursor == snapshot.size();
+}
+
+} // namespace btga

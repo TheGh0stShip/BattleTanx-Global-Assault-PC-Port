@@ -30,7 +30,12 @@ jobs:
         shell: pwsh
         run: |
           $failed = $false
-          foreach ($path in @('port/pc/setup-windows.ps1', 'port/pc/build-windows.ps1', 'port/pc/package-windows.ps1')) {
+          foreach ($path in @(
+            'port/pc/setup-windows.ps1',
+            'port/pc/build-windows.ps1',
+            'port/pc/package-windows.ps1',
+            'port/pc/scripts/test-headless-multiplayer.ps1'
+          )) {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$errors) | Out-Null

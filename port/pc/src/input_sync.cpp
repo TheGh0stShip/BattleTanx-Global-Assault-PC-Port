@@ -5,6 +5,7 @@ extern "C" {
 #include <btga/btga_net.h>
 }
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 
@@ -144,6 +145,25 @@ std::optional<OnlineSyncOrigin> InputSynchronizer::sync_origin_for(
         return std::nullopt;
     }
     return histories_[player_id].sync_origin;
+}
+
+void prime_frame_input_epoch(InputSynchronizer& synchronizer,
+                             std::uint32_t authoritative_generation,
+                             std::uint8_t player_count) {
+    constexpr std::uint32_t frame_tag = UINT32_C(0x80000000);
+    constexpr std::uint32_t input_delay = 4U;
+    constexpr std::uint32_t redundancy = 8U;
+    const std::uint32_t next_frame = authoritative_generation + 1U;
+    const std::uint32_t next_publish = next_frame + input_delay;
+    const std::uint32_t first = next_publish >= redundancy - 1U
+        ? std::max(input_delay, next_publish - (redundancy - 1U))
+        : input_delay;
+    for (std::uint8_t player = 0;
+         player < player_count && player < InputSynchronizer::max_players; ++player) {
+        for (std::uint32_t frame = first; frame < next_publish; ++frame) {
+            synchronizer.record_local(player, frame_tag | frame, 0, {});
+        }
+    }
 }
 
 } // namespace btga

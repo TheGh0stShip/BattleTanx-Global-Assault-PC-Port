@@ -21,6 +21,7 @@
 #include "btga/rom.hpp"
 #include "btga/pc_settings.hpp"
 #include "btga/master_client.hpp"
+#include "btga/input_sync.hpp"
 #include "btga/online_bootstrap.hpp"
 #include "btga/texture_packs.hpp"
 #include "ultramodern/renderer_context.hpp"
@@ -68,6 +69,11 @@ std::uint32_t audio_frequency = 44100;
 std::array<SDL_GameController*, max_controllers> gamepads{};
 bool interactive = false;
 bool preboot_online_requested = false;
+bool automated_online = false;
+bool automated_online_host = false;
+bool boot_requested = false;
+std::atomic_uint32_t automated_poll_counter{0};
+std::atomic_uint32_t automated_input_tick{0};
 
 struct KeyboardScancodes {
     SDL_Scancode stick_up = SDL_SCANCODE_W;
@@ -279,9 +285,45 @@ bool controller_input_pressed(SDL_GameController* gamepad, const std::string& bi
 
 bool get_input(int controller, std::uint16_t* buttons, float* x, float* y);
 
+btga::OnlineControllerInput automated_campaign_input(std::uint32_t tick) {
+    struct Pulse {
+        std::uint32_t first;
+        std::uint32_t last;
+        std::uint16_t buttons;
+        std::int8_t stick_x = 0;
+        std::int8_t stick_y = 0;
+    };
+    // Captured from a successful two-player campaign setup. Holding each
+    // action for several polls makes it insensitive to presentation timing
+    // while the synchronized input stream keeps both peers deterministic.
+    static constexpr Pulse pulses[] = {
+        {142, 146, 0x8000}, {291, 294, 0x8000}, {384, 386, 0x0400},
+        {401, 404, 0x0100}, {413, 416, 0x0800}, {432, 434, 0x8000},
+        {484, 487, 0x8000}, {499, 501, 0x8000}, {557, 560, 0x8000},
+        {564, 578, 0, 0, 127},
+    };
+    for (const Pulse& pulse : pulses) {
+        if (tick >= pulse.first && tick <= pulse.last) {
+            return {pulse.buttons, pulse.stick_x, pulse.stick_y};
+        }
+    }
+    // Once the captured startup path is exhausted, periodically confirm the
+    // current front-end screen. This avoids depending on profile/Pak-specific
+    // transition timing and also exits the attract-mode results flow.
+    if (tick >= 600U && (tick - 600U) % 120U < 5U) {
+        return {0x8000, 0, 0};
+    }
+    return {};
+}
+
 void poll_input() {
 #ifdef BTGA_HAS_RT64
     if (!interactive) return;
+    if (automated_online && boot_requested) {
+        automated_input_tick.store(
+            automated_poll_counter.fetch_add(1, std::memory_order_relaxed),
+            std::memory_order_relaxed);
+    }
     {
         const std::lock_guard lock(input_settings_mutex);
         if (btga::renderer::consume_settings_update(pc_settings)) configure_keyboard();
@@ -435,6 +477,18 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
                     std::memory_order_relaxed);
             }
         }
+        if (automated_online) {
+            *buttons = 0;
+            *x = 0.0F;
+            *y = 0.0F;
+            if (automated_online_host && online_slot == 0 && controller == 0) {
+                const btga::OnlineControllerInput scripted = automated_campaign_input(
+                    automated_input_tick.load(std::memory_order_relaxed));
+                *buttons = scripted.buttons;
+                *x = static_cast<float>(scripted.stick_x) / 127.0F;
+                *y = static_cast<float>(scripted.stick_y) / 127.0F;
+            }
+        }
         if (online_slot >= 0) {
             if (!online_input_presampled.exchange(false, std::memory_order_acq_rel)) {
                 btga::renderer::online_submit_local_input(*buttons, *x, *y);
@@ -502,6 +556,14 @@ void set_rumble(int controller, bool enabled) {
 #endif
 }
 ultramodern::input::connected_device_info_t connected_device(int controller) {
+    // Controller discovery occurs before the renderer context necessarily
+    // adopts the pre-boot relay session. Advertise both synchronized ports
+    // from the negotiated launch intent so the retail front end exposes its
+    // two-player campaign path even in a fully automated cold boot.
+    if (preboot_online_requested && (controller == 0 || controller == 1)) {
+        return {ultramodern::input::Device::Controller,
+                ultramodern::input::Pak::RumblePak};
+    }
     const int online_slot = btga::renderer::online_local_player_slot();
     if (online_slot >= 0 && (controller == 0 || controller == 1)) {
         return {ultramodern::input::Device::Controller, ultramodern::input::Pak::RumblePak};
@@ -570,9 +632,10 @@ void show_startup_error(const char* message) {
 void show_startup_error(const char*) {}
 #endif
 
-bool boot_requested = false;
 std::chrono::steady_clock::time_point boot_started;
 std::chrono::seconds headless_boot_duration{5};
+std::string headless_host_lobby_id;
+std::string headless_host_secret;
 
 void drive_headless_runtime(void*) {
 #ifdef BTGA_HAS_RT64
@@ -589,28 +652,43 @@ void drive_headless_runtime(void*) {
                 btga::renderer::toggle_settings_overlay();
             }
         }
-        if (preboot_online_requested && !btga::preboot_online_ready()) {
-            btga::poll_preboot_online();
-            return;
-        }
-        if (!boot_requested) {
-            boot_requested = true;
-            if (preboot_online_requested) btga::release_preboot_online_boot();
-            recomp::start_game(std::u8string{game_id}, {});
-        }
-        return;
     }
 #endif
+    // Pre-boot online synchronization is renderer-independent. Keeping it
+    // outside the interactive branch allows two bounded headless runtimes to
+    // exercise the real cold-boot handshake without windows or human input.
+    if (preboot_online_requested && !btga::preboot_online_ready()) {
+        btga::poll_preboot_online();
+        return;
+    }
     if (!boot_requested) {
         boot_requested = true;
         boot_started = std::chrono::steady_clock::now();
+        if (preboot_online_requested) btga::release_preboot_online_boot();
         recomp::start_game(std::u8string{game_id}, {});
+#ifdef BTGA_HAS_RT64
+        if (interactive) return;
+#endif
+#ifdef BTGA_HAS_RT64
+    } else if (interactive && !automated_online) {
+        return;
+#endif
     } else if (std::chrono::steady_clock::now() - boot_started > headless_boot_duration) {
         std::cerr << "Headless boot window elapsed: threads=" << created_threads.load()
                   << " vi=" << vi_events.load()
                   << " display_lists=" << display_lists.load()
                   << " screens=" << screen_updates.load()
                   << " rsp_requests=" << rsp_requests.load() << '\n';
+        if (!headless_host_lobby_id.empty() && !headless_host_secret.empty()) {
+            try {
+                auto http = btga::make_platform_http_client(
+                    "https://btga.thegh0stship.com/api/v1");
+                btga::MasterClient master{*http};
+                master.remove(headless_host_lobby_id, headless_host_secret);
+            } catch (const std::exception& error) {
+                std::cerr << "Headless lobby cleanup failed: " << error.what() << '\n';
+            }
+        }
         // This is a bounded boot probe, not the application's eventual main loop.
         // N64 worker threads deliberately remain active at this point, so bypass
         // runtime teardown rather than unmapping RDRAM underneath them.
@@ -717,28 +795,42 @@ int runtime_main(int argc, char** argv) {
 #else
     const bool choose_requested = false;
 #endif
-    const bool online_host = argc == 3 && std::string_view{argv[1]} == "--online-host";
-    const bool online_join = argc == 4 && std::string_view{argv[1]} == "--online-join";
+    const bool headless_online_host =
+        argc == 4 && std::string_view{argv[1]} == "--online-headless-host";
+    const bool headless_online_join =
+        argc == 5 && std::string_view{argv[1]} == "--online-headless-join";
+    const bool headless_online = headless_online_host || headless_online_join;
+    automated_online = headless_online;
+    automated_online_host = headless_online_host;
+    const bool online_host = headless_online_host ||
+        (argc == 3 && std::string_view{argv[1]} == "--online-host");
+    const bool online_join = headless_online_join ||
+        (argc == 4 && std::string_view{argv[1]} == "--online-join");
+    const bool online_resume = argc == 3 && std::string_view{argv[1]} == "--online-resume";
     bool boot = argc == 3 && std::string_view{argv[1]} == "--boot";
     bool timed_boot = argc == 4 && std::string_view{argv[1]} == "--boot-seconds";
-    bool play = online_host || online_join || picked_rom.has_value() ||
+    bool play = (!headless_online && (online_host || online_join)) ||
+                online_resume || picked_rom.has_value() ||
                 (argc == 3 && std::string_view{argv[1]} == "--play") ||
                 (argc == 2 && std::string_view{argv[1]}.starts_with("-") == false);
-    if (argc != 1 && !choose_requested && !boot && !timed_boot && !play) {
+    if (argc != 1 && !choose_requested && !boot && !timed_boot && !play &&
+        !headless_online) {
         std::cerr << "Usage: " << argv[0]
                   << " [ROM | --choose-rom | --boot ROM | --boot-seconds SECONDS ROM | --play ROM"
-                     " | --online-host ROM | --online-join LOBBY_ID ROM]\n";
+                     " | --online-host ROM | --online-join LOBBY_ID ROM"
+                     " | --online-headless-host SECONDS ROM"
+                     " | --online-headless-join SECONDS LOBBY_ID ROM]\n";
         return 2;
     }
 
-    if (timed_boot) {
+    if (timed_boot || headless_online) {
         unsigned int seconds = 0;
         const std::string_view text{argv[2]};
         const auto [end, error] =
             std::from_chars(text.data(), text.data() + text.size(), seconds);
         if (error != std::errc{} || end != text.data() + text.size() ||
             seconds == 0 || seconds > 3600) {
-            std::cerr << "--boot-seconds must be an integer from 1 through 3600\n";
+            std::cerr << "headless duration must be an integer from 1 through 3600\n";
             return 2;
         }
         headless_boot_duration = std::chrono::seconds{seconds};
@@ -746,10 +838,13 @@ int runtime_main(int argc, char** argv) {
 
     std::uint64_t rom_hash = 0;
     std::filesystem::path rom_path;
-    if (boot || timed_boot || play) {
+    if (boot || timed_boot || play || headless_online) {
         if (picked_rom) rom_path = *picked_rom;
+        else if (headless_online_host) rom_path = argv[3];
+        else if (headless_online_join) rom_path = argv[4];
         else if (online_host) rom_path = argv[2];
         else if (online_join) rom_path = argv[3];
+        else if (online_resume) rom_path = argv[2];
         else if (timed_boot) rom_path = argv[3];
         else if (argc == 2) rom_path = argv[1];
         else rom_path = argv[2];
@@ -774,7 +869,7 @@ int runtime_main(int argc, char** argv) {
     std::cout << "Registered all translated game code at entrypoint 0x"
               << std::hex << static_cast<std::uint32_t>(game.entrypoint_address) << '\n';
 
-    if (!boot && !timed_boot && !play) {
+    if (!boot && !timed_boot && !play && !headless_online) {
         return 0;
     }
 
@@ -784,12 +879,56 @@ int runtime_main(int argc, char** argv) {
         return 1;
     }
 
-    if (online_host || online_join) {
+    if (online_resume) {
+        const auto environment = [](const char* name) -> std::string {
+            const char* value = std::getenv(name);
+            return value == nullptr ? std::string{} : std::string{value};
+        };
+        const std::string role = environment("BTGA_ONLINE_ROLE");
+        const std::string session_text = environment("BTGA_ONLINE_SESSION");
+        const std::string relay_host = environment("BTGA_ONLINE_RELAY_HOST");
+        const std::string relay_port_text = environment("BTGA_ONLINE_RELAY_PORT");
+        const std::string token = environment("BTGA_ONLINE_TOKEN");
+        const std::string lobby = environment("BTGA_ONLINE_LOBBY");
+        const std::string host_secret = environment("BTGA_ONLINE_HOST_SECRET");
+        for (const char* name : {
+                 "BTGA_ONLINE_ROLE", "BTGA_ONLINE_SESSION", "BTGA_ONLINE_RELAY_HOST",
+                 "BTGA_ONLINE_RELAY_PORT", "BTGA_ONLINE_TOKEN", "BTGA_ONLINE_LOBBY",
+                 "BTGA_ONLINE_HOST_SECRET"}) {
+#if defined(_WIN32)
+            SetEnvironmentVariableA(name, nullptr);
+#else
+            unsetenv(name);
+#endif
+        }
+        std::uint64_t session = 0;
+        unsigned int relay_port = 0;
+        const auto [session_end, session_error] = std::from_chars(
+            session_text.data(), session_text.data() + session_text.size(), session);
+        const auto [port_end, port_error] = std::from_chars(
+            relay_port_text.data(), relay_port_text.data() + relay_port_text.size(), relay_port);
+        const bool host = role == "host";
+        if ((!host && role != "client") || token.empty() || relay_host.empty() ||
+            session_error != std::errc{} || session_end != session_text.data() + session_text.size() ||
+            port_error != std::errc{} || port_end != relay_port_text.data() + relay_port_text.size() ||
+            relay_port == 0 || relay_port > 65535U) {
+            throw std::runtime_error{"Invalid or incomplete synchronized restart credentials"};
+        }
+        const btga::RelayEndpoint relay{relay_host, static_cast<std::uint16_t>(relay_port)};
+        if (!btga::begin_preboot_online(host, session, relay, token, lobby, host_secret)) {
+            throw std::runtime_error{"Could not bind the synchronized restart relay"};
+        }
+        preboot_online_requested = true;
+    } else if (online_host || online_join) {
         auto http = btga::make_platform_http_client(
             "https://btga.thegh0stship.com/api/v1");
         btga::MasterClient master{*http};
         if (online_host) {
             const btga::HostRegistration registration = master.host("Cold Boot Test", 2);
+            if (headless_online_host) {
+                headless_host_lobby_id = registration.lobby.id;
+                headless_host_secret = registration.host_secret;
+            }
             if (!btga::begin_preboot_online(true, registration.session_id,
                                             registration.relay, registration.relay_token,
                                             registration.lobby.id, registration.host_secret)) {
@@ -799,10 +938,11 @@ int runtime_main(int argc, char** argv) {
                 << registration.lobby.id << '\n';
             std::cout << "ONLINE_LOBBY_ID=" << registration.lobby.id << '\n';
         } else {
-            const btga::JoinRegistration registration = master.join(argv[2]);
+            const char* lobby_id = headless_online_join ? argv[3] : argv[2];
+            const btga::JoinRegistration registration = master.join(lobby_id);
             if (!btga::begin_preboot_online(false, registration.session_id,
                                             registration.relay, registration.join_token,
-                                            argv[2])) {
+                                            lobby_id)) {
                 throw std::runtime_error{"Could not bind the pre-boot client relay"};
             }
         }
@@ -810,7 +950,7 @@ int runtime_main(int argc, char** argv) {
     }
 
 #ifdef BTGA_HAS_RT64
-    if (play) {
+    if (play || headless_online) {
         interactive = true;
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
             std::cerr << "SDL initialization failed: " << SDL_GetError() << '\n';
@@ -818,6 +958,7 @@ int runtime_main(int argc, char** argv) {
         }
         configure_keyboard();
         std::uint32_t window_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
+        if (headless_online) window_flags |= SDL_WINDOW_HIDDEN;
         if (pc_settings.window_mode == btga::WindowMode::Borderless) {
             window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
         } else if (pc_settings.window_mode == btga::WindowMode::Fullscreen) {
@@ -842,12 +983,14 @@ int runtime_main(int argc, char** argv) {
     auto* selected_frames_remaining = audio_frames_remaining;
     auto* selected_set_frequency = set_audio_frequency;
 #ifdef BTGA_HAS_RT64
-    if (play) {
+    if (play || headless_online) {
         btga::renderer::configure_rt64(pc_settings, config_path);
         selected_window = interactive_window_handle();
-        selected_queue_samples = queue_audio;
-        selected_frames_remaining = queued_audio_frames;
-        selected_set_frequency = configure_audio;
+        if (!headless_online) {
+            selected_queue_samples = queue_audio;
+            selected_frames_remaining = queued_audio_frames;
+            selected_set_frequency = configure_audio;
+        }
     }
 #endif
 
@@ -859,7 +1002,7 @@ int runtime_main(int argc, char** argv) {
         .rsp_callbacks = {.get_rsp_microcode = select_rsp_microcode},
         .renderer_callbacks = {.create_render_context =
 #ifdef BTGA_HAS_RT64
-            play ? btga::renderer::create_rt64_context :
+            (play || headless_online) ? btga::renderer::create_rt64_context :
 #endif
             create_headless_renderer},
         .audio_callbacks = {
@@ -894,7 +1037,7 @@ int runtime_main(int argc, char** argv) {
         SDL_DestroyWindow(window);
         window = nullptr;
     }
-    if (play) {
+    if (play || headless_online) {
         SDL_Quit();
     }
 #endif
