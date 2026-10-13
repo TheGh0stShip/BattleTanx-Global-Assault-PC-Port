@@ -159,7 +159,7 @@ extern "C" void btga_dedicated_client_tick_begin(
             pending_snapshot.reset();
         }
         if (pending_snapshot &&
-            (!bootstrap_complete || pending_snapshot->tick == expected_tick) &&
+            (!bootstrap_complete || pending_snapshot->tick >= expected_tick) &&
             pending_snapshot->state.size() == btga::gameplay_snapshot_size) {
             std::array<std::uint8_t, btga::gameplay_snapshot_size> current{};
             const bool captured =
@@ -168,12 +168,14 @@ extern "C" void btga_dedicated_client_tick_begin(
             const bool already_current =
                 captured && current_digest == pending_snapshot->state_digest;
             const bool was_bootstrapped = bootstrap_complete;
-            const bool may_restore = !bootstrap_complete;
+            const bool fast_forward =
+                bootstrap_complete && pending_snapshot->tick > expected_tick;
+            const bool may_restore = !bootstrap_complete || fast_forward;
             if (already_current || (may_restore && btga::restore_gameplay_snapshot(
                     {rdram, rdram_size}, pending_snapshot->state))) {
                 expected_tick = pending_snapshot->tick;
                 bootstrap_complete = true;
-                if (!was_bootstrapped) frames.fill(std::nullopt);
+                if (!was_bootstrapped || fast_forward) frames.fill(std::nullopt);
                 std::fprintf(stderr, "BTGA_CLIENT %s snapshot tick=%u\n",
                              already_current ? "confirmed" : "applied",
                              expected_tick);

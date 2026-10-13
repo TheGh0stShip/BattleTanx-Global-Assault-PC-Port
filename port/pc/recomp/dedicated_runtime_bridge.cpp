@@ -361,9 +361,12 @@ extern "C" void btga_dedicated_tick_begin(
     // During retail initialization this hook may be the only callback that is
     // running regularly. Keep relay admission and readiness moving here too.
     btga_dedicated_network_poll();
-    const std::lock_guard lock{authority_mutex};
-    if (!enabled || gameplay_tick_active) return;
+    {
+        const std::lock_guard lock{authority_mutex};
+        if (!enabled || gameplay_tick_active) return;
+    }
     if (!btga::gameplay_frame_input_active({rdram, rdram_size})) {
+        const std::lock_guard lock{authority_mutex};
         if (inactive_tick_probes++ < 5U) {
             constexpr gpr world = static_cast<gpr>(static_cast<std::int32_t>(0x80219498U));
             constexpr gpr humans = static_cast<gpr>(static_cast<std::int32_t>(0x802194A4U));
@@ -376,10 +379,20 @@ extern "C" void btga_dedicated_tick_begin(
         }
         return;
     }
-    if (!authority.begin_tick(server_clock_tick())) return;
-    active_tick = authority.next_tick();
-    std::ranges::copy(authority.inputs(), active_inputs.begin());
-    gameplay_tick_active = true;
+    for (;;) {
+        btga_dedicated_network_poll();
+        {
+            const std::lock_guard lock{authority_mutex};
+            if (!enabled) return;
+            if (authority.begin_tick(server_clock_tick())) {
+                active_tick = authority.next_tick();
+                std::ranges::copy(authority.inputs(), active_inputs.begin());
+                gameplay_tick_active = true;
+                return;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
 }
 
 extern "C" void btga_dedicated_match_bootstrap(

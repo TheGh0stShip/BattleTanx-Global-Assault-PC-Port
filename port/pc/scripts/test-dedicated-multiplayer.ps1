@@ -111,6 +111,9 @@ try {
     if ($clientLog.Contains("BTGA_CLIENT DESYNC")) {
         throw "Translated client diverged from the dedicated authority. See $clientErr."
     }
+    if ($clientLog.Contains("BTGA_CLIENT authority timeout")) {
+        throw "Translated client stopped receiving canonical authority frames. See $clientErr."
+    }
     Write-Host "Dedicated 4-player test passed. Lobby: $lobby"
     Write-Host "Evidence: $evidence"
 } finally {

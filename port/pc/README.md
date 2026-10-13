@@ -310,6 +310,15 @@ Build and run the current dedicated gate on Windows with:
 
 For a visible client, leave the authority running, copy the printed lobby ID,
 and launch `BattleTanxGA.exe --dedicated-join LOBBY_ID BattleTanxGA.z64`.
+For a single-command Windows session with a rendered client, dedicated
+authority, and three automated seats, run:
+
+```powershell
+.\port\pc\scripts\play-dedicated-multiplayer.ps1 `
+    -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows
+```
+
+Closing the rendered game stops the authority and automated seats.
 
 Developers can reproduce the fully native PC transport test with CMake and a
 C++20 compiler:

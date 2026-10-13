@@ -276,6 +276,10 @@ BattleTanxGA.exe --dedicated-server-public BattleTanxGA.z64
 # Normal rendered client
 BattleTanxGA.exe --dedicated-join LOBBY_ID BattleTanxGA.z64
 
+# One-command local play session: rendered client + authority + three test seats
+.\port\pc\scripts\play-dedicated-multiplayer.ps1 `
+  -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows
+
 # Unattended authority + translated client + three peers
 ./port/pc/scripts/test-dedicated-multiplayer.ps1 `
   -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows

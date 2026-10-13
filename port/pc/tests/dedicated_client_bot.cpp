@@ -111,22 +111,30 @@ int main(int argc, char** argv) {
         std::uint32_t next_input_tick = 0;
         std::uint32_t accepted_frames = 0;
         std::uint32_t echoed_frames = 0;
-        {
+        const auto send_inputs = [&](std::uint32_t first_tick) {
             std::array<btga::OnlineControllerInput, 8> initial{};
             initial.fill(distinctive);
             const std::size_t encoded = encoder.encode_batch(
-                packet, session, online.relay_slot(), ++sequence, 0U,
+                packet, session, online.relay_slot(), ++sequence, first_tick,
                 static_cast<std::uint8_t>(seat), initial);
             if (encoded == 0U || !online.send_gameplay(0U, {packet.data(), encoded})) {
-                throw std::runtime_error("initial readiness transmission failed");
+                throw std::runtime_error("input transmission failed");
             }
-        }
+        };
+        send_inputs(0U);
+        auto next_readiness = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds{250};
         const auto startup_deadline = std::chrono::steady_clock::now() +
             std::chrono::seconds{15};
         auto run_deadline = startup_deadline;
         bool session_started = false;
 
         while (std::chrono::steady_clock::now() < run_deadline) {
+            const auto now = std::chrono::steady_clock::now();
+            if (!session_started && now >= next_readiness) {
+                send_inputs(0U);
+                next_readiness = now + std::chrono::milliseconds{250};
+            }
             bool received_new_frame = false;
             std::uint16_t source = 0;
             const std::size_t size = online.receive_gameplay(packet, source);
@@ -160,16 +168,7 @@ int main(int argc, char** argv) {
             }
 
             if (received_new_frame && next_input_tick != 0U) {
-                constexpr std::uint8_t batch_count = 8;
-                std::array<btga::OnlineControllerInput, batch_count> inputs{};
-                inputs.fill(distinctive);
-                const std::size_t encoded = encoder.encode_batch(
-                    packet, session, online.relay_slot(), ++sequence,
-                    next_input_tick, static_cast<std::uint8_t>(seat), inputs);
-                if (encoded == 0U || !online.send_gameplay(
-                        0U, {packet.data(), encoded})) {
-                    throw std::runtime_error("input transmission failed");
-                }
+                send_inputs(next_input_tick);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds{2});
         }
