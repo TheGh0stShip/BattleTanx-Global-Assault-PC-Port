@@ -9,7 +9,8 @@
 union SDL_Event;
 
 namespace btga::renderer {
-void configure_rt64(const PcSettings& settings, const std::filesystem::path& data_path);
+void configure_rt64(const PcSettings& settings, const std::filesystem::path& data_path,
+                    bool rendererless_online = false);
 void toggle_settings_overlay();
 bool settings_overlay_visible();
 bool process_settings_event(SDL_Event* event);

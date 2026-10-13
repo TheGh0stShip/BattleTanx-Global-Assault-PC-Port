@@ -307,6 +307,7 @@ SDL_Scancode imgui_key_to_sdl_scancode(ImGuiKey key) {
 std::array<std::uint8_t, 0x40> dummy_header{};
 std::array<std::uint8_t, 0x1000> dmem{};
 std::array<std::uint8_t, 0x1000> imem{};
+bool rendererless_online_context = false;
 
 unsigned int mi_intr = 0;
 unsigned int dpc_start = 0;
@@ -363,6 +364,20 @@ public:
         core.VI_V_BURST_REG = &vi->VI_V_BURST_REG;
         core.VI_X_SCALE_REG = &vi->VI_X_SCALE_REG;
         core.VI_Y_SCALE_REG = &vi->VI_Y_SCALE_REG;
+
+        // Unattended multiplayer validation exercises the real recompiled
+        // game and transport without presenting pixels. Keeping a live
+        // RendererContext still owns the synchronized session, while avoiding
+        // two unnecessary D3D/Vulkan devices and their intermittent setup
+        // failures during rapid process-churn tests.
+        if (rendererless_online_context) {
+            rendererless_ = true;
+            setup_result = ultramodern::renderer::SetupResult::Success;
+            chosen_api = ultramodern::renderer::GraphicsApi::Auto;
+            active_context.store(this, std::memory_order_release);
+            adopt_preboot_session();
+            return;
+        }
 
         RT64::ApplicationConfiguration configuration{};
         configuration.appId = "BattleTanxGA";
@@ -431,17 +446,19 @@ public:
         if (app_) app_->customOverlayCallback = {};
     }
 
-    bool valid() override { return static_cast<bool>(app_); }
+    bool valid() override { return static_cast<bool>(app_) || rendererless_; }
     bool update_config(const ultramodern::renderer::GraphicsConfig&,
                        const ultramodern::renderer::GraphicsConfig&) override { return false; }
     void enable_instant_present() override {}
     void send_dl(const OSTask* task) override {
+        if (!app_) return;
         app_->state->rsp->reset();
         app_->interpreter->loadUCodeGBI(task->t.ucode & 0x3FFFFFFU,
                                        task->t.ucode_data & 0x3FFFFFFU, true);
         app_->processDisplayLists(app_->core.RDRAM, task->t.data_ptr & 0x3FFFFFFU, 0, true);
     }
     void send_dummy_workload(std::uint32_t address) override {
+        if (!app_) return;
         // The renderer thread normally submits a harmless dummy display list while
         // the N64 thread starts.  During an online pre-boot rendezvous RDRAM has not
         // been initialized yet, so interpreting that address would dereference
@@ -451,13 +468,16 @@ public:
     }
     void update_screen() override {
         update_online();
+        if (!app_) return;
         app_->updateScreen();
         if (apply_render_requested_.exchange(false, std::memory_order_acq_rel)) {
             apply_render_settings();
         }
     }
     void shutdown() override { if (app_) app_->end(); }
-    std::uint32_t get_display_framerate() const override { return app_->presentQueue->ext.sharedResources->swapChainRate; }
+    std::uint32_t get_display_framerate() const override {
+        return app_ ? app_->presentQueue->ext.sharedResources->swapChainRate : 60U;
+    }
     float get_resolution_scale() const override { return 1.0F; }
 
     void toggle_settings() {
@@ -2202,14 +2222,17 @@ private:
     std::uint32_t online_gameplay_applied_generation_ = 0;
     bool online_gameplay_snapshot_applied_ = false;
     bool online_gameplay_resync_requested_ = false;
+    bool rendererless_ = false;
     std::array<bool, btga::InputSynchronizer::max_players> online_peer_seen_{};
 };
 }
 
 void btga::renderer::configure_rt64(const PcSettings& settings,
-                                    const std::filesystem::path& data_path) {
+                                    const std::filesystem::path& data_path,
+                                    bool rendererless_online) {
     pc_settings = settings;
     pc_data_path = data_path;
+    rendererless_online_context = rendererless_online;
 }
 
 std::unique_ptr<ultramodern::renderer::RendererContext> btga::renderer::create_rt64_context(

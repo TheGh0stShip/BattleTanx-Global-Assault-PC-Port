@@ -998,7 +998,9 @@ int runtime_main(int argc, char** argv) {
     auto* selected_set_frequency = set_audio_frequency;
 #ifdef BTGA_HAS_RT64
     if (play || headless_online) {
-        btga::renderer::configure_rt64(pc_settings, config_path);
+        const bool rendererless_online =
+            headless_online && std::getenv("BTGA_HEADLESS_VISIBLE") == nullptr;
+        btga::renderer::configure_rt64(pc_settings, config_path, rendererless_online);
         selected_window = interactive_window_handle();
         if (!headless_online) {
             selected_queue_samples = queue_audio;
