@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Validate shell entry points
+        run: sh -n port/pc/scripts/run-dedicated-server.sh port/pc/scripts/test-live-multiplayer.sh
       - name: Install portable harness dependencies
         run: sudo apt-get update && sudo apt-get install -y libssl-dev libx11-dev ninja-build
       - name: Configure
@@ -36,6 +38,8 @@ jobs:
             'port/pc/package-windows.ps1',
             'port/pc/scripts/test-headless-multiplayer.ps1',
             'port/pc/scripts/test-dedicated-multiplayer.ps1',
+            'port/pc/scripts/test-local-dedicated-multiplayer.ps1',
+            'port/pc/scripts/test-dedicated-recovery-matrix.ps1',
             'port/pc/scripts/play-dedicated-multiplayer.ps1',
             'port/pc/scripts/run-dedicated-server.ps1'
           )) {

@@ -13,7 +13,9 @@ esac
 
 cmake -S "$pc_root" -B "$build_dir" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$build_dir" --target \
-    btga_pc_tests btga_pc_synchronization_soak btga_pc_native_online_e2e
+    btga_pc_tests btga_bootstrap_recovery_tests \
+    btga_pc_synchronization_soak btga_authoritative_server_soak \
+    btga_canonical_journal_soak btga_pc_native_online_e2e
 ctest --test-dir "$build_dir" --output-on-failure
 
 run=1

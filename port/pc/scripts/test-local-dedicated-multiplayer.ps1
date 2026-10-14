@@ -11,12 +11,15 @@ param(
     [int] $Seconds = 30,
     [ValidateRange(1, 4)]
     [int] $Players = 4,
+    [switch] $InterruptInitialBootstrap,
     [switch] $ColdJoinAfterAuthorityRestart,
     [ValidateRange(0, 3)]
     [int] $ClientReconnectCycles = 0,
     [switch] $ReconnectEverySeat,
     [ValidateRange(0, 3)]
     [int] $AllSeatReconnectCycles = 0,
+    [ValidateRange(0, 1000000)]
+    [int] $InjectClientDesyncTick = 0,
     [ValidateRange(2, 1000)]
     [int] $DropOutgoingEvery = 10,
     [ValidateRange(2, 1000)]
@@ -34,6 +37,16 @@ $allSeatCycles = if ($ReconnectEverySeat) { 1 } else {
 }
 if ($ClientReconnectCycles -ne 0 -and $allSeatCycles -ne 0) {
     throw "Translated-client reconnect and all-seat reconnect are separate gates."
+}
+if ($InjectClientDesyncTick -ne 0 -and
+    ($InterruptInitialBootstrap -or $ColdJoinAfterAuthorityRestart -or
+     $ClientReconnectCycles -ne 0 -or $allSeatCycles -ne 0)) {
+    throw "Injected divergence is an independent recovery gate."
+}
+if ($InterruptInitialBootstrap -and
+    ($ColdJoinAfterAuthorityRestart -or $ClientReconnectCycles -ne 0 -or
+     $allSeatCycles -ne 0)) {
+    throw "Initial-bootstrap interruption is a separate recovery gate."
 }
 if ($ColdJoinAfterAuthorityRestart -and $ClientReconnectCycles -ne 0) {
     throw "Use the all-seat mode to combine authority and client recovery."
@@ -91,9 +104,12 @@ $environmentNames = @(
     "BTGA_RELAY_PUBLIC_KEY", "BTGA_RELAY_PORT",
     "BTGA_DEDICATED_SESSION", "BTGA_DEDICATED_RELAY_HOST",
     "BTGA_DEDICATED_RELAY_PORT", "BTGA_DEDICATED_TOKEN",
+    "BTGA_DEDICATED_LOBBY",
     "BTGA_DEDICATED_PLAYERS", "BTGA_DEDICATED_STATE_DIR",
     "BTGA_NET_TEST_FAULTS",
-    "BTGA_NET_TEST_DROP_OUTGOING_EVERY", "BTGA_NET_TEST_DROP_INCOMING_EVERY"
+    "BTGA_NET_TEST_DROP_OUTGOING_EVERY", "BTGA_NET_TEST_DROP_INCOMING_EVERY",
+    "BTGA_NET_TEST_DELAY_MS", "BTGA_NET_TEST_SCRIPTED_INPUT",
+    "BTGA_NET_TEST_DESYNC_TICK"
 )
 $previous = @{}
 foreach ($name in $environmentNames) {
@@ -101,6 +117,19 @@ foreach ($name in $environmentNames) {
 }
 $processes = [System.Collections.Generic.List[Diagnostics.Process]]::new()
 $peers = [System.Collections.Generic.List[Diagnostics.Process]]::new()
+function Read-AuthorityHealth([string] $Path) {
+    for ($attempt = 0; $attempt -lt 40; ++$attempt) {
+        try {
+            if (Test-Path $Path -PathType Leaf) {
+                return Get-Content $Path -Raw | ConvertFrom-Json
+            }
+        } catch {
+            # The producer replaces the small record between these operations.
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    throw "Authority process health could not be read: $Path"
+}
 try {
     if (-not $ExternalRelay) {
         if ($FixturePath) {
@@ -121,16 +150,17 @@ try {
     $env:BTGA_DEDICATED_RELAY_HOST = [string]$fixture.relay_host
     $env:BTGA_DEDICATED_RELAY_PORT = [string]$fixture.relay_port
     $env:BTGA_DEDICATED_PLAYERS = [string]$Players
-    if ($ColdJoinAfterAuthorityRestart) {
-        $stateDirectory = Join-Path $evidence "authority-state"
-        New-Item $stateDirectory -ItemType Directory | Out-Null
-        $env:BTGA_DEDICATED_STATE_DIR = $stateDirectory
-    } else {
-        $env:BTGA_DEDICATED_STATE_DIR = $null
-    }
+    $stateDirectory = Join-Path $evidence "authority-state"
+    New-Item $stateDirectory -ItemType Directory | Out-Null
+    $env:BTGA_DEDICATED_STATE_DIR = $stateDirectory
     $env:BTGA_NET_TEST_FAULTS = "1"
     $env:BTGA_NET_TEST_DROP_OUTGOING_EVERY = [string]$DropOutgoingEvery
     $env:BTGA_NET_TEST_DROP_INCOMING_EVERY = [string]$DropIncomingEvery
+    $env:BTGA_NET_TEST_DELAY_MS = $null
+    $env:BTGA_NET_TEST_SCRIPTED_INPUT = $null
+    $env:BTGA_NET_TEST_DESYNC_TICK = if ($InjectClientDesyncTick -ne 0) {
+        [string]$InjectClientDesyncTick
+    } else { $null }
 
     $env:BTGA_DEDICATED_TOKEN = [string]$fixture.authority_token
     $authority = Start-Process $game -PassThru -WindowStyle Minimized `
@@ -140,7 +170,9 @@ try {
     $processes.Add($authority)
     Start-Sleep -Milliseconds 750
 
-    $translatedSeconds = if ($allSeatCycles -ne 0) {
+    $translatedSeconds = if ($InterruptInitialBootstrap) {
+        $Seconds + 30
+    } elseif ($allSeatCycles -ne 0) {
         $Seconds + 15 + 5 * $Players * $allSeatCycles
     } else { $Seconds }
     $env:BTGA_DEDICATED_TOKEN = [string]$fixture.client_tokens[0]
@@ -154,7 +186,9 @@ try {
     # targets the translated authority/client recovery path rather than token
     # admission. Each witness sends a distinct input and verifies its echo.
     Start-Sleep -Milliseconds 250
-    $peerSeconds = if ($allSeatCycles -ne 0) {
+    $peerSeconds = if ($InterruptInitialBootstrap) {
+        $Seconds + 30
+    } elseif ($allSeatCycles -ne 0) {
         $Seconds + 20 + 5 * $Players * $allSeatCycles +
             $(if ($ColdJoinAfterAuthorityRestart) { 15 } else { 0 })
     } elseif ($ColdJoinAfterAuthorityRestart) {
@@ -201,6 +235,76 @@ try {
             [DateTime]::UtcNow -ge $tickDeadline)
         if (-not $durableTickReached) {
             throw "Authority did not reach a positive recovery checkpoint."
+        }
+    }
+
+    if ($InterruptInitialBootstrap) {
+        # Kill the translated endpoint while the authority is still pacing the
+        # initial checkpoint. This deterministically covers process death with
+        # an unfinished tick-zero generation, the transition that previously
+        # survived only as implicit array state.
+        $initialDeadline = [DateTime]::UtcNow.AddSeconds(60)
+        do {
+            Start-Sleep -Milliseconds 20
+            $initialAuthorityLog =
+                [string](Get-Content $authorityErrorPaths[0] -Raw)
+            $initialTransferStarted = $initialAuthorityLog -match
+                "BTGA_AUTHORITY all $Players seats ready"
+        } until ($initialTransferStarted -or $client.HasExited -or
+            [DateTime]::UtcNow -ge $initialDeadline)
+        if (-not $initialTransferStarted) {
+            throw "Authority did not start the initial bootstrap."
+        }
+        if (-not $client.HasExited) {
+            Stop-Process -Id $client.Id -Force
+            $client.WaitForExit(5000) | Out-Null
+        }
+
+        $positiveDeadline = [DateTime]::UtcNow.AddSeconds(60)
+        do {
+            Start-Sleep -Milliseconds 50
+            $initialAuthorityLog =
+                [string](Get-Content $authorityErrorPaths[0] -Raw)
+            $positiveCheckpoint = $initialAuthorityLog -match
+                "BTGA_AUTHORITY tick=[3-9][0-9]"
+        } until ($positiveCheckpoint -or $authority.HasExited -or
+            [DateTime]::UtcNow -ge $positiveDeadline)
+        if (-not $positiveCheckpoint) {
+            throw "Authority did not create a positive checkpoint after client loss."
+        }
+
+        $clientErrorPath = Join-Path $evidence "client-bootstrap-resumed.stderr.log"
+        $clientErrorPaths.Add($clientErrorPath)
+        $env:BTGA_DEDICATED_TOKEN =
+            [string]$fixture.client_reconnect_tokens[0][0]
+        $client = Start-Process $game -PassThru -WindowStyle Minimized `
+            -ArgumentList @("--dedicated-headless-direct", [string]$Seconds,
+                $quotedRom) `
+            -RedirectStandardOutput (Join-Path $evidence `
+                "client-bootstrap-resumed.stdout.log") `
+            -RedirectStandardError $clientErrorPath
+        $processes.Add($client)
+
+        $resumeDeadline = [DateTime]::UtcNow.AddSeconds(60)
+        do {
+            Start-Sleep -Milliseconds 100
+            $resumeLog = if (Test-Path $clientErrorPath) {
+                [string](Get-Content $clientErrorPath -Raw)
+            } else { "" }
+            $resumeAuthorityLog =
+                [string](Get-Content $authorityErrorPaths[0] -Raw)
+            $positiveApplied = $resumeLog -match
+                "BTGA_CLIENT applied snapshot tick=[1-9][0-9]*"
+            $replayComplete = $resumeLog -match
+                "BTGA_CLIENT journal replay complete"
+            $barrierReleased = $resumeAuthorityLog -match
+                "BTGA_AUTHORITY recovery complete head=[1-9][0-9]*"
+        } until (($positiveApplied -and $replayComplete -and $barrierReleased) -or
+            $client.HasExited -or $authority.HasExited -or
+            [DateTime]::UtcNow -ge $resumeDeadline)
+        if (-not $positiveApplied -or -not $replayComplete -or
+            -not $barrierReleased) {
+            throw "Interrupted bootstrap did not supersede, replay, and converge."
         }
     }
 
@@ -456,7 +560,8 @@ try {
     }
     $client.WaitForExit()
     $clientLog = [string](Get-Content $clientErrorPath -Raw)
-    $requiredSnapshot = if ($ColdJoinAfterAuthorityRestart -or
+    $requiredSnapshot = if ($InterruptInitialBootstrap -or
+        $ColdJoinAfterAuthorityRestart -or
         $ClientReconnectCycles -ne 0 -or $allSeatCycles -ne 0) {
         "BTGA_CLIENT (applied|confirmed) snapshot tick=[1-9][0-9]*"
     } else {
@@ -484,10 +589,13 @@ try {
             "BTGA_AUTHORITY recovered checkpoint=[1-9][0-9]* journal_head=[1-9][0-9]*") {
         throw "Replacement authority did not restore persistent gameplay state."
     }
-    if ($ClientReconnectCycles -ne 0 -or $allSeatCycles -ne 0) {
+    if ($ClientReconnectCycles -ne 0 -or $allSeatCycles -ne 0 -or
+        $InjectClientDesyncTick -ne 0) {
         $recoveryCount = [regex]::Matches(
             $authorityLog, "BTGA_AUTHORITY recovery complete head=[1-9][0-9]*").Count
-        $expectedRecoveries = if ($allSeatCycles -ne 0) {
+        $expectedRecoveries = if ($InjectClientDesyncTick -ne 0) {
+            1
+        } elseif ($allSeatCycles -ne 0) {
             $Players * $allSeatCycles +
                 $(if ($ColdJoinAfterAuthorityRestart) { 1 } else { 0 })
         } else {
@@ -499,10 +607,36 @@ try {
     }
     foreach ($path in $clientErrorPaths) {
         $log = [string](Get-Content $path -Raw)
-        if ($log.Contains("BTGA_CLIENT DESYNC") -or
+        $desyncCount = [regex]::Matches($log, "BTGA_CLIENT DESYNC").Count
+        $expectedInjectedRecovery = $InjectClientDesyncTick -ne 0 -and
+            $path -eq $clientErrorPath -and
+            $desyncCount -eq 1 -and
+            $log.Contains("BTGA_CLIENT injected test desync tick=$InjectClientDesyncTick") -and
+            $log.Contains("BTGA_CLIENT requested canonical resynchronization") -and
+            -not $log.Contains("BTGA_CLIENT recovery quarantined")
+        if (($desyncCount -ne 0 -and -not $expectedInjectedRecovery) -or
             $log.Contains("BTGA_CLIENT authority timeout")) {
             throw "Translated client diverged or lost the authority."
         }
+    }
+
+    # The restart supervisor relies on this record to distinguish an advancing
+    # translated loop from a merely alive relay thread. Require two valid,
+    # increasing samples while the authority is still running.
+    $healthPath = Join-Path $stateDirectory "authority-health.json"
+    if (-not (Test-Path $healthPath -PathType Leaf)) {
+        throw "Authority did not publish process health."
+    }
+    $healthFirst = Read-AuthorityHealth $healthPath
+    Start-Sleep -Milliseconds 1200
+    $healthSecond = Read-AuthorityHealth $healthPath
+    if ([uint32]$healthFirst.version -ne 1 -or
+        [uint64]$healthFirst.loop_sequence -eq 0 -or
+        [uint64]$healthSecond.loop_sequence -le
+            [uint64]$healthFirst.loop_sequence -or
+        [uint64]$healthSecond.connected_mask -gt 15 -or
+        [uint64]$healthSecond.recovery_mask -gt 15) {
+        throw "Authority process health was invalid or stopped advancing."
     }
 
     for ($seat = 1; $seat -lt $Players; ++$seat) {
@@ -540,11 +674,17 @@ try {
     if ($ColdJoinAfterAuthorityRestart) {
         Write-Host "Recovery: cold client bootstrapped after authority restart"
     }
+    if ($InterruptInitialBootstrap) {
+        Write-Host "Recovery: interrupted tick-zero bootstrap superseded by a positive checkpoint"
+    }
     if ($ClientReconnectCycles -ne 0) {
         Write-Host "Recovery: $ClientReconnectCycles authenticated client reconnect cycles"
     }
     if ($allSeatCycles -ne 0) {
         Write-Host "Recovery: all $Players authenticated seats rejoined $allSeatCycles time(s)"
+    }
+    if ($InjectClientDesyncTick -ne 0) {
+        Write-Host "Recovery: injected client divergence repaired from authority state"
     }
     Write-Host "Evidence: $evidence"
 } finally {

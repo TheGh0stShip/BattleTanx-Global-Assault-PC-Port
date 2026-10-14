@@ -14,18 +14,40 @@ explicit opt-in actions.
   canonical input set and broadcasts it with a canonical state digest.
 - The server waits for all configured seats before tick zero, but does not
   freeze the match when a connected seat later times out.
-- Snapshot delivery is opt-in and destination-specific. The authority services
-  one subscribed seat every eight ticks in round-robin order rather than
-  broadcasting state to every relay client.
+- Snapshot delivery is opt-in and destination-specific. The authority selects
+  subscribed seats in round-robin order and incrementally paces each transfer
+  through bounded nonblocking network pumps instead of broadcasting state or
+  sleeping through an entire checkpoint transfer.
 - A returning connection presents a rotating resume credential and atomically
   reclaims the same seat. A freshly restarted process cold-boots the same match,
   installs the newest versioned portable checkpoint, and replays only the tail
   since that 30-tick checkpoint while the authority is paused at a stable head.
+- Interactive clients keep one owner-only rotating credential per lobby under
+  the port's user-data directory. A rejected stale credential is retired and
+  followed by one ordinary join; it is never retried in a loop or reused for a
+  different server.
 - Authority heartbeats report the exact connected-seat mask. The master uses
   that mask to confirm and renew only genuinely connected reservations; an
   abandoned anonymous join remains provisional and becomes reusable.
 - The public master, Azure UDP relay, four protocol clients, and a real
   translated headless client are covered by an unattended PowerShell gate.
+- A headless authority consumes no player seat. Empty dedicated lobbies report
+  `0 / 4`; the dashboard and lobby browser count only authenticated gameplay
+  seats confirmed by the authority's seat mask.
+- Dedicated lobbies advertise a protocol capability distinct from peer-hosted
+  sessions. **F10 → Online** lists only those authorities and relaunches the
+  selected game directly into its authenticated checkpoint/replay client.
+- Every dedicated seat (1–4) selects its own full-screen camera. The port
+  patches both verified two-player and four-player viewport/scissor templates
+  in the runtime-private ROM copy, expanding the local seat and clipping the
+  other cameras; local/offline multiplayer and the user's ROM remain unchanged.
+- The authority consumes every refreshed relay token returned by its 15-second
+  master heartbeat and renews slot zero without reopening the match. A client
+  that receives no authority traffic for ten seconds uses its owner-only,
+  rotating resume credential to reclaim the same lobby seat and rebind its UDP
+  socket. The returned session, seat and relay endpoint must all match before
+  gameplay traffic resumes. This lets a restarted relay or changed NAT mapping
+  recover without transferring authority to a player or cold-booting the game.
 
 The translated headless Windows client and three protocol peers pass an
 unattended four-seat public-relay gate with every simulated tick checked against
@@ -66,23 +88,56 @@ known mode counters. That implementation was rejected. Recovery must either
 execute the complete retail outer loop or restore a complete, versioned
 checkpoint; do not add a recursive update-only fast-forward path.
 
+The persistent input journal is an endian-stable `BTGAJNL3` stream. Every
+40-byte frame carries an FNV-1a checksum over its tick, four controller inputs,
+canonical digest, receipt mask and RNG seed. A replacement authority truncates
+only an incomplete final record and rejects any full-length corrupted record
+before restoring gameplay.
+
 After bootstrap the authority transmits a checkpoint only to a seat that asks
 to recover; it does not broadcast periodic snapshots. Clients verify every
 canonical frame digest. Extended checkpoint chunks are paced to avoid overflowing
-UDP receive buffers, while journal windows remain paced at one millisecond per
-datagram.
+UDP receive buffers. Journal replay offers one bounded window for each client
+acknowledgment and performs no deliberate sleeps in the simulation path.
 
-A cold or restarted client now enters an authority-owned recovery barrier. The
-authority keeps relay traffic and heartbeat processing active but freezes the
-30 Hz simulation at a stable journal head. All other clients consequently wait
-at the same canonical tick while the recovering process installs the newest
-portable checkpoint and replays its short journal tail through the normal retail
-outer loop. The checkpoint-generation identifier prevents a delayed packet from
-an older process satisfying the barrier. When
-the recovering seat acknowledges that stable head, the authority releases the
-barrier and all four seats continue together. A disconnected recovery seat is
-removed from the barrier after the normal timeout, so a failed restart cannot
-freeze the match indefinitely.
+A cold or restarted client first receives the newest portable checkpoint while
+the authority continues running. A snapshot request by itself cannot freeze
+healthy players. Once that endpoint acknowledges the matching checkpoint
+generation, the authority acquires a recovery barrier and freezes the 30 Hz
+simulation at a stable journal head. All clients then wait at the same canonical
+tick while the recovering process replays its short journal tail through the
+normal retail outer loop. The checkpoint-generation identifier prevents a
+delayed packet from an older process satisfying the barrier. When the recovering
+seat acknowledges that stable head, the authority releases the barrier and all
+four seats continue together. A disconnected recovery seat is
+removed from the barrier after a 10-second recovery grace period, so a failed
+restart cannot freeze the match indefinitely. Its last controls are neutralized
+after two seconds, independently of that grace period. This separation keeps a
+lost snapshot eligible for the normal three-second retransmission without
+letting a disconnected tank continue driving or firing.
+
+Once a client has proved snapshot installation, replay progress is watched
+separately from packet liveness. If its acknowledged replay cursor does not
+advance for 15 seconds, the authority releases that seat's barrier so one
+reachable-but-broken endpoint cannot freeze the other players indefinitely.
+Its replay cursor remains active and may continue catching up in the background;
+its controls remain neutral until accepted traffic reconnects the seat.
+
+Transport liveness and gameplay-input progress are distinct. Snapshot pings,
+duplicate UDP input packets, and repeated stale batches keep a recovery channel
+reachable but do not keep a tank's controls active. Only a strictly advancing
+input horizon reconnects the seat and refreshes its two-second control lease.
+
+If a rendered client nevertheless detects that its end-of-tick digest differs
+from the authority, it stops before the next translated tick, clears frames
+from that rejected state lineage, advertises a cold acknowledgment, and
+installs the authority's newest persisted checkpoint before replaying the
+canonical journal. Three failed automatic resynchronizations within five
+minutes quarantine that client: it sends no more traffic, allowing the
+authority to neutralize and release its seat instead of repeatedly pausing the
+other players at the shared recovery barrier. A quarantined or permanently
+incompatible client requests a clean runtime shutdown rather than blocking the
+translated tick hook and leaving an unresponsive game window.
 
 While the barrier is closed, the authority broadcasts a 250 ms recovery-status
 heartbeat containing the stable journal head and recovering-seat mask. Healthy
@@ -108,6 +163,41 @@ On Windows, the supported operator entry point is the restart supervisor:
     -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows
 ```
 
+Linux authorities use the equivalent supervisor (the ROM remains local and is
+never copied into the repository):
+
+```sh
+./port/pc/scripts/run-dedicated-server.sh \
+    "$HOME/Games/BattleTanxGA.z64" \
+    ./build-pc/BattleTanxGA \
+    ./build-pc/dedicated-state
+```
+
+`BTGA_SERVER_MAX_FAILURES` and `BTGA_SERVER_STABLE_SECONDS` configure its bounded
+restart policy. Both supervisors preserve the same durable authority state and
+write separate stdout/stderr logs for every process generation. They also hold
+an exclusive lock for the state directory; a second supervisor fails before it
+can reuse lobby credentials, packet-sequence reservations, or journal files.
+At startup they pin the SHA-256 identities of the executable and local ROM;
+Windows also pins every sibling runtime DLL. They verify those identities again
+before every replacement generation. If a build or file copy changes one, the
+supervisor stops instead of silently restoring an older session with different
+code or cartridge data; deliberately upgrading a server therefore requires
+stopping and restarting the supervisor.
+The same identities are persisted in the authority state directory. Reusing a
+live journal with a different executable, Windows DLL set, or ROM is refused
+even across supervisor invocations; an intentional upgrade uses a new state
+directory and creates a new lobby rather than attempting an unsafe migration.
+The Linux supervisor creates all state under an owner-only umask. The authority
+updates a secret-free `authority-health.json` only when its translated
+main loop advances. A live process whose health stops advancing for 60 seconds,
+or whose previously observed health record disappears for that long, or which
+never publishes health within 120 seconds, is terminated and recovered
+through the same bounded restart path. Relay-thread activity alone cannot mask a
+stalled simulation. These thresholds are configurable with the supervisor
+parameters on Windows or `BTGA_SERVER_HANG_SECONDS` and
+`BTGA_SERVER_STARTUP_HEALTH_SECONDS` on Linux.
+
 It owns the child process, durable state directory, generation logs, bounded
 restart backoff, and clean Ctrl+C shutdown. When the saved master-service lobby
 still exists, a replacement process reclaims it. When that lobby has genuinely
@@ -122,7 +212,7 @@ before starting `--dedicated-server-public`. The authority then persists:
 
 - the lobby ID, host credential, gameplay session ID and relay endpoint in an
   owner-only control record (never a short-lived admission token);
-- the canonical 32-byte-per-tick input journal; and
+- the canonical 40-byte-per-tick checksummed input journal; and
 - two alternating, checksummed portable gameplay checkpoints.
 
 After a process crash, the replacement process authenticates to the existing
@@ -159,8 +249,8 @@ recovery barrier, bounded journal replay, and an explicit replay-complete
 acknowledgment before the authority resumes after every restart.
 Use `-JournalMemoryFrames 64 -RequireDiskReplay` with that gate to force replay
 to cross from the disk spool into the bounded in-memory tail. Production keeps
-4,096 frames resident. Each older canonical frame occupies a fixed 32-byte,
-big-endian record (about 3.5 MiB per hour at 30 Hz), eliminating the previous
+4,096 frames resident. Each older canonical frame occupies a fixed 40-byte,
+big-endian checksummed record (about 4.1 MiB per hour at 30 Hz), eliminating the previous
 nine-hour rejection cliff without memory growth. Without
 `BTGA_DEDICATED_STATE_DIR` the journal remains ephemeral and is removed on
 clean shutdown; setting it enables the durable recovery mode above.
@@ -250,6 +340,45 @@ timeline. The local fixture has three rotations per seat; the authority restart
 uses seat 0's first one, so the combined gate is intentionally capped at two
 subsequent sweeps.
 
+`-InterruptInitialBootstrap` covers the bootstrap boundary itself. It kills the
+translated client while the tick-zero checkpoint is still being transferred,
+allows the authority to publish its first positive-tick checkpoint, and then
+resumes the same authenticated seat. The replacement must supersede the stale
+generation, install the newer checkpoint, replay through a frozen authority
+head, and release the barrier. It cannot be combined with other recovery modes.
+
+Run the complete four-player recovery acceptance matrix with one command:
+
+```powershell
+.\port\pc\scripts\test-dedicated-recovery-matrix.ps1 `
+    -Rom 'C:\Games\BattleTanx - Global Assault (USA).z64' `
+    -NetworkingRoot 'C:\src\BattleTanx-Global-Assault-Networking'
+```
+
+It runs the interrupted-initial-bootstrap gate, a persistent authority restart
+followed by two all-seat credential rotations, three further all-seat
+rotations, and a real client-state corruption followed by automatic checkpoint
+repair. The corruption changes canonical RNG state at tick 120; the gate
+requires exactly one digest mismatch, a checkpoint request, journal catch-up,
+barrier release, and continued observation by all four seats. Each case uses a
+distinct relay port and evidence directory. The wrapper fails on the first
+broken invariant and writes a machine-readable JSON summary only after all four
+gates pass. Every case also reads two consecutive
+authority-health records and requires the translated main-loop sequence to
+advance, covering the same signal used by the production supervisors.
+
+Bootstrap and replay phase ownership lives in `BootstrapRecovery`, rather than
+being inferred from independent runtime masks. For each seat it owns the
+pending phase, expected snapshot generation and encoded replay target; it also
+owns the shared recovery barrier. Transport retry timing remains outside this
+state machine. `RecoveryProgressWatchdog` separately owns the acknowledged
+cursor and stall deadline, so duplicate or backwards acknowledgments cannot
+extend a broken recovery forever. A snapshot request alone cannot acquire the
+barrier, and snapshot receipt alone cannot release it: the client first proves
+the matching generation was installed, then must acknowledge the stable
+authority head. A claim beyond the current canonical head is rejected; it
+cannot be used to skip replay or release the barrier.
+
 The older peer-hosted flow documented below remains available for comparison,
 but it is not the architecture being taken to production.
 
@@ -260,8 +389,8 @@ but it is not the architecture being taken to production.
   and peer validation, and replay/old-tick rejection.
 - Public aggregate status at <https://btga.thegh0stship.com/>.
 - No UPnP, NAT-PMP, inbound forwarding, or peer address disclosure.
-- Native asynchronous lobby discovery, hosting, joining, relay binding,
-  heartbeat, and disconnect controls in **F10 → Online**.
+- Native asynchronous peer-lobby discovery, hosting, joining, relay binding,
+  heartbeat, and disconnect controls retained in the legacy implementation.
 - Experimental two-player deterministic runtime synchronization: host is
   original N64 controller port 1 and joining player is port 2. A pre-boot
   rendezvous agrees on the ROM/session seed before either machine enters N64
@@ -279,11 +408,8 @@ but it is not the architecture being taken to production.
   network wait; the online session is dropped and local play resumes. The
   pre-boot lobby intentionally waits for a peer until the user cancels it.
 
-On Windows, the normal path is **F10 → Online → Host/Join**. After lobby
-selection, the application relaunches itself into the synchronized pre-boot
-rendezvous. This is automatic; neither player has to close the game, pass
-launch arguments, or reproduce menu navigation. These commands remain useful
-as developer fallbacks:
+This peer-hosted mode is no longer exposed by F10. These commands remain useful
+only as developer comparison paths:
 
 ```text
 BattleTanxGA.exe --online-host BattleTanxGA.z64
@@ -307,6 +433,45 @@ remain a known presentation issue. General rollback/resimulation and full
 campaign validation remain open.
 Accordingly, this is an experimental synchronization path rather than a claim
 that Internet multiplayer is release-ready.
+
+## Targeted gameplay hardening
+
+The dedicated path keeps the original 30 Hz translated simulation and existing
+relay/checkpoint protocol, with four narrowly scoped latency and availability
+rules:
+
+- A client assigns one controller sample to one tick. Later packets resend up
+  to eight contiguous samples with their original ticks; they never copy the
+  current input or a keepalive's neutral input into unobserved future ticks.
+- Input commitment deadlines use monotonic nanoseconds and an exact rational
+  30 Hz conversion. They do not use the former `elapsed_ms / 33` approximation.
+- Checkpoint chunks are paced incrementally through bounded, nonblocking
+  network pumps. Journal replay likewise offers one bounded window without
+  sleeping in the authority's gameplay-critical path.
+- A relay-authenticated cold-bootstrap generation opens a fresh packet replay
+  window for that seat immediately. Recovery progress is bounded by the
+  existing watchdog; a stalled seat is disconnected and cannot hold the other
+  seats behind the recovery barrier indefinitely.
+
+The release-quality impairment gate is
+`port/pc/scripts/test-four-runtime-multiplayer.ps1`. Unlike the protocol-witness
+tests, it launches four translated game clients. Its default 30-minute run uses
+deterministic changing drive/turn/fire inputs, 50 ms one-way delay (about
+100 ms RTT), and one dropped outgoing datagram in 50 (2%). It requires equal
+canonical digests at a shared late tick, sustained progress from every client,
+no timeout or quarantine, proof of recovery after any transient digest
+mismatch, and a complete match-state transition. Test-only
+delay and scripted input require `BTGA_NET_TEST_FAULTS=1` and are never enabled
+by a normal game launch.
+
+```powershell
+pwsh -NoProfile -File port/pc/scripts/test-four-runtime-multiplayer.ps1 `
+  -Rom "C:\path\to\BattleTanx - Global Assault (USA).z64" `
+  -NetworkingRoot "C:\src\BattleTanx-Global-Assault-Networking"
+```
+
+This gate is deliberately limited to four players and does not authorize
+rollback, a replacement transport, 60 Hz gameplay, or a new replication model.
 
 ## Reproduce the public PC transport test
 
