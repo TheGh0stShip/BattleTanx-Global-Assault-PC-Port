@@ -88,7 +88,8 @@ public:
 
     std::vector<OnlineLobby> list_lobbies();
     HostRegistration host(std::string_view name, std::uint16_t max_players,
-                          std::string_view region = "eastus");
+                          std::string_view region = "eastus",
+                          std::uint32_t capabilities = 0U);
     JoinRegistration join(std::string_view lobby_id,
                           std::string_view resume_token = {});
     // Returns a freshly signed authority relay token. A restarted dedicated

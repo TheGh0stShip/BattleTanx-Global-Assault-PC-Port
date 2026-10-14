@@ -7,6 +7,7 @@
 namespace btga {
 
 struct GameplayStateDigests {
+    std::uint32_t tasks = 0;
     std::uint32_t objects = 0;
     std::uint32_t object_core = 0;
     std::uint32_t object_tail = 0;

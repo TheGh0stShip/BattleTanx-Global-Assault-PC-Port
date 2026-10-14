@@ -40,6 +40,11 @@ public:
     void leave_online() noexcept;
     [[nodiscard]] bool begin_relay(bool host, std::uint64_t session_id,
                                    std::span<const std::uint8_t> admission_token);
+    // Reuses the open UDP socket with a freshly signed admission token. This
+    // refreshes NAT mappings and recreates relay state after a data-plane
+    // restart without reopening the game session.
+    [[nodiscard]] bool rebind_relay(bool host, std::uint64_t session_id,
+                                    std::span<const std::uint8_t> admission_token);
     [[nodiscard]] bool accept_relay_datagram(
         std::span<const std::uint8_t> datagram);
     [[nodiscard]] bool poll_relay_binding();
@@ -55,6 +60,7 @@ private:
     OnlineState state_ = OnlineState::Offline;
     bool io_open_ = false;
     BtgaRelayClient relay_{};
+    bool gameplay_send_failure_reported_ = false;
 };
 
 } // namespace btga

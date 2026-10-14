@@ -40,8 +40,13 @@ bool save_authority_lease(const std::filesystem::path& path,
         std::filesystem::remove(temporary, error);
         return false;
     }
+#if defined(_WIN32)
+    // Windows rename does not replace an existing file. POSIX rename does and
+    // is atomic, so preserve the old control record until the replacement is
+    // ready everywhere that supports it.
     std::filesystem::remove(path, error);
     error.clear();
+#endif
     std::filesystem::rename(temporary, path, error);
     if (error) {
         std::filesystem::remove(temporary, error);

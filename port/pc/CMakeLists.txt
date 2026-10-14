@@ -6,7 +6,7 @@ include(FetchContent)
 set(BTGA_NET_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(btga_networking
     GIT_REPOSITORY https://github.com/TheGh0stShip/BattleTanx-Global-Assault-Networking.git
-    GIT_TAG d5e644301160df1fb558f1d924a375043404be73)
+    GIT_TAG 24ba082051cae4076869ae087fb7371073b605ef)
 FetchContent_MakeAvailable(btga_networking)
 
 FetchContent_Declare(nlohmann_json
@@ -26,12 +26,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(btga_pc_core
+    src/bootstrap_recovery.cpp
+    src/client_resync.cpp
+    src/authority_health.cpp
     src/authority_lease.cpp
     src/authoritative_session.cpp
     src/authoritative_server.cpp
     src/authoritative_replica.cpp
     src/translated_authority.cpp
     src/controller_pak.cpp
+    src/dedicated_resume.cpp
     src/gameplay_digest.cpp
     src/gameplay_snapshot.cpp
     src/game.cpp
@@ -83,6 +87,10 @@ add_executable(btga_pc_tests tests/core_tests.cpp)
 target_link_libraries(btga_pc_tests PRIVATE btga_pc_core)
 add_test(NAME btga_pc_core COMMAND btga_pc_tests)
 
+add_executable(btga_bootstrap_recovery_tests tests/bootstrap_recovery_tests.cpp)
+target_link_libraries(btga_bootstrap_recovery_tests PRIVATE btga_pc_core)
+add_test(NAME btga_bootstrap_recovery COMMAND btga_bootstrap_recovery_tests)
+
 add_executable(btga_pc_synchronization_soak tests/synchronization_soak.cpp)
 target_link_libraries(btga_pc_synchronization_soak PRIVATE btga_pc_core)
 add_test(NAME btga_pc_synchronization_soak COMMAND btga_pc_synchronization_soak)
@@ -94,6 +102,12 @@ add_test(NAME btga_authoritative_server_soak COMMAND btga_authoritative_server_s
 add_executable(btga_canonical_journal_soak tests/canonical_journal_soak.cpp)
 target_link_libraries(btga_canonical_journal_soak PRIVATE btga_pc_core)
 add_test(NAME btga_canonical_journal_soak COMMAND btga_canonical_journal_soak)
+
+if(UNIX)
+    add_test(
+        NAME btga_linux_dedicated_supervisor
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dedicated_supervisor.sh)
+endif()
 
 add_executable(btga_pc_live_multiplayer_test tests/live_multiplayer_test.cpp)
 target_link_libraries(btga_pc_live_multiplayer_test PRIVATE btga_pc_core)

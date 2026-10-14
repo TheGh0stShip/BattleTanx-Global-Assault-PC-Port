@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 #include <string>
+#include <utility>
 
 extern "C" {
 #include <btga/btga_gameplay.h>
@@ -14,12 +15,18 @@ extern "C" {
 namespace btga {
 namespace {
 constexpr std::array<std::uint8_t, 8> journal_magic{
-    'B', 'T', 'G', 'A', 'J', 'N', 'L', '2'};
+    'B', 'T', 'G', 'A', 'J', 'N', 'L', '3'};
 constexpr std::array<std::uint8_t, 8> snapshot_magic{
     'B', 'T', 'G', 'A', 'S', 'N', 'P', '3'};
 constexpr std::size_t journal_header_size = 16U;
-constexpr std::size_t journal_record_size = 36U;
+constexpr std::size_t journal_record_payload_size = 36U;
+constexpr std::size_t journal_record_size = 40U;
 constexpr std::size_t snapshot_header_size = 32U;
+static_assert(journal_record_payload_size ==
+    sizeof(std::uint32_t) + online_player_limit * 4U +
+    sizeof(std::uint64_t) + 4U + sizeof(std::uint32_t));
+static_assert(journal_record_size ==
+    journal_record_payload_size + sizeof(std::uint32_t));
 
 void put_u32_be(std::uint8_t* output, std::uint32_t value) {
     output[0] = static_cast<std::uint8_t>(value >> 24U);
@@ -45,6 +52,15 @@ std::uint64_t get_u64_be(const std::uint8_t* input) {
            get_u32_be(input + 4U);
 }
 
+std::uint32_t record_checksum(std::span<const std::uint8_t> bytes) noexcept {
+    std::uint32_t value = UINT32_C(2166136261);
+    for (const auto byte : bytes) {
+        value ^= byte;
+        value *= UINT32_C(16777619);
+    }
+    return value;
+}
+
 std::array<std::uint8_t, journal_record_size> encode_record(
     const AuthoritativeFrame& frame) {
     std::array<std::uint8_t, journal_record_size> record{};
@@ -61,7 +77,18 @@ std::array<std::uint8_t, journal_record_size> encode_record(
     record[cursor++] = frame.received_mask;
     cursor += 3U; // reserved
     put_u32_be(record.data() + cursor, frame.random_seed);
+    put_u32_be(record.data() + journal_record_payload_size,
+               record_checksum(std::span{record}.first(
+                   journal_record_payload_size)));
     return record;
+}
+
+bool valid_record(
+    const std::array<std::uint8_t, journal_record_size>& record) noexcept {
+    return record[29] == 0U && record[30] == 0U && record[31] == 0U &&
+        get_u32_be(record.data() + journal_record_payload_size) ==
+            record_checksum(std::span{record}.first(
+                journal_record_payload_size));
 }
 
 AuthoritativeFrame decode_record(
@@ -84,6 +111,7 @@ AuthoritativeFrame decode_record(
     frame.random_seed = get_u32_be(record.data() + cursor);
     return frame;
 }
+
 } // namespace
 
 TranslatedAuthority::TranslatedAuthority(
@@ -106,6 +134,19 @@ TranslatedAuthority::~TranslatedAuthority()
         std::filesystem::remove(journal_path_.string() + ".snapshot.0", error);
         std::filesystem::remove(journal_path_.string() + ".snapshot.1", error);
     }
+}
+
+bool TranslatedAuthority::checkpoint_now(
+    std::span<const std::uint8_t> checkpoint_state) {
+    if (tick_active_ || checkpoint_state.empty()) return false;
+    snapshot_ = AuthoritativeSnapshot{
+        next_tick_, digest(checkpoint_state),
+        std::vector<std::uint8_t>{checkpoint_state.begin(), checkpoint_state.end()}};
+    if (persistent_journal_ && !persist_snapshot(*snapshot_)) {
+        persistent_storage_healthy_ = false;
+        return false;
+    }
+    return true;
 }
 
 bool TranslatedAuthority::submit(
@@ -176,6 +217,16 @@ bool TranslatedAuthority::set_connected(std::uint8_t seat, bool connected)
     return true;
 }
 
+bool TranslatedAuthority::begin_connection_epoch(std::uint8_t seat) noexcept
+{
+    if (seat >= online_player_limit || (occupied_mask_ & (1U << seat)) == 0U) {
+        return false;
+    }
+    have_sequence_[seat] = false;
+    latest_sequences_[seat] = 0U;
+    return true;
+}
+
 bool TranslatedAuthority::ready(std::uint32_t server_tick) const noexcept
 {
     if (tick_active_) return false;
@@ -192,7 +243,13 @@ bool TranslatedAuthority::begin_tick(std::uint32_t server_tick)
     active_tick_ = next_tick_;
     TickInputs& entry = history_[active_tick_ % history_size];
     if (entry.tick != active_tick_) entry = {.tick = active_tick_};
-    received_mask_ = entry.present_mask;
+    // Inputs queued before a seat timed out remain useful only if that seat is
+    // still connected when this tick is committed. Advertising those stale
+    // presence bits would violate the wire invariant that received_mask is a
+    // subset of connected_mask and would make the canonical frame impossible
+    // to encode.
+    received_mask_ = static_cast<std::uint8_t>(
+        entry.present_mask & occupied_mask_ & connected_mask_);
     for (std::size_t seat = 0; seat < online_player_limit; ++seat) {
         const auto bit = static_cast<std::uint8_t>(1U << seat);
         if ((occupied_mask_ & bit) == 0U || (connected_mask_ & bit) == 0U) {
@@ -302,7 +359,7 @@ bool TranslatedAuthority::create_disk_journal(
     if (!journal_file_) return false;
     std::array<std::uint8_t, journal_header_size> header{};
     std::copy(journal_magic.begin(), journal_magic.end(), header.begin());
-    put_u32_be(header.data() + 8U, 1U);
+    put_u32_be(header.data() + 8U, 2U);
     put_u32_be(header.data() + 12U, static_cast<std::uint32_t>(journal_record_size));
     journal_file_.write(reinterpret_cast<const char*>(header.data()), header.size());
     journal_file_.flush();
@@ -328,7 +385,7 @@ bool TranslatedAuthority::open_persistent_journal(
     std::array<std::uint8_t, journal_header_size> header{};
     journal_file_.read(reinterpret_cast<char*>(header.data()), header.size());
     if (!journal_file_ || !std::equal(journal_magic.begin(), journal_magic.end(), header.begin()) ||
-        get_u32_be(header.data() + 8U) != 1U ||
+        get_u32_be(header.data() + 8U) != 2U ||
         get_u32_be(header.data() + 12U) != journal_record_size) {
         journal_file_.close();
         return false;
@@ -353,7 +410,7 @@ bool TranslatedAuthority::open_persistent_journal(
         journal_file_.open(path, std::ios::binary | std::ios::in | std::ios::out);
         if (!journal_file_) return false;
     }
-    canonical_journal_.clear();
+    std::deque<AuthoritativeFrame> loaded_journal;
     journal_file_.clear();
     journal_file_.seekg(journal_header_size, std::ios::beg);
     for (std::uint32_t tick = 0; tick < complete; ++tick) {
@@ -364,13 +421,14 @@ bool TranslatedAuthority::open_persistent_journal(
             return false;
         }
         const auto frame = decode_record(record);
-        if (frame.tick != tick || record[29] != 0U || record[30] != 0U || record[31] != 0U) {
+        if (!valid_record(record) || frame.tick != tick) {
             journal_file_.close();
             return false;
         }
-        canonical_journal_.push_back(frame);
-        if (canonical_journal_.size() > memory_frames) canonical_journal_.pop_front();
+        loaded_journal.push_back(frame);
+        if (loaded_journal.size() > memory_frames) loaded_journal.pop_front();
     }
+    canonical_journal_ = std::move(loaded_journal);
     next_tick_ = static_cast<std::uint32_t>(complete);
     journal_base_tick_ = next_tick_ - static_cast<std::uint32_t>(canonical_journal_.size());
     if (!canonical_journal_.empty()) last_inputs_ = canonical_journal_.back().inputs;
@@ -436,8 +494,13 @@ bool TranslatedAuthority::persist_snapshot(const AuthoritativeSnapshot& snapshot
         if (!output) return false;
     }
     std::error_code error;
+#if defined(_WIN32)
+    // Keep POSIX checkpoint replacement atomic. Windows requires the existing
+    // destination to be removed before rename; the alternating slot retains a
+    // separately validated prior checkpoint across that short window.
     std::filesystem::remove(destination, error);
     error.clear();
+#endif
     std::filesystem::rename(temporary, destination, error);
     if (error) {
         std::filesystem::remove(temporary, error);
@@ -491,7 +554,7 @@ bool TranslatedAuthority::read_disk_journal(
     for (; copied < wanted; ++copied) {
         std::array<std::uint8_t, journal_record_size> record{};
         journal_file_.read(reinterpret_cast<char*>(record.data()), record.size());
-        if (!journal_file_) return false;
+        if (!journal_file_ || !valid_record(record)) return false;
         destination[copied] = decode_record(record);
         if (destination[copied].tick != first_tick + copied) return false;
     }

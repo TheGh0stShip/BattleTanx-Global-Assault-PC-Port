@@ -20,4 +20,8 @@ extern "C" void btga_dedicated_match_bootstrap(
     std::uint8_t* rdram, recomp_context* context);
 extern "C" void btga_dedicated_run_loop(
     std::uint8_t* rdram, recomp_context* context);
+extern "C" void btga_dedicated_test_force_match_end(
+    std::uint8_t* rdram, std::uint32_t next_tick);
+extern "C" void btga_dedicated_advance_results(
+    std::uint8_t* rdram, recomp_context* context);
 extern "C" void btga_advance_retail_mode_counters(std::uint8_t* rdram);

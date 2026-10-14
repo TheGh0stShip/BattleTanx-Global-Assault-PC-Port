@@ -365,6 +365,9 @@ extern "C" void btga_audio_volume_step(std::uint8_t* rdram, recomp_context*) {
 
 extern "C" void func_80098B40(std::uint8_t* rdram, recomp_context*) {
     constexpr gpr controller_read_pending = static_cast<gpr>(static_cast<std::int32_t>(0x80219230U));
+    // The authority has no local controller DMA. Its canonical controller
+    // state was frozen from authenticated network samples before this update.
+    if (btga_dedicated_enabled() || btga_dedicated_client_enabled()) return;
     while (MEM_W(0, controller_read_pending) != 0) {
         // The R4300 is preempted by VI interrupts in this loop. Cooperatively
         // yield on the host so the scheduler and controller worker can run.

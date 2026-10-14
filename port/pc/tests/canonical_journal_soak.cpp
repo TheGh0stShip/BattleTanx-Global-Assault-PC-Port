@@ -58,7 +58,7 @@ int main() {
             }
         }
         CHECK(std::filesystem::file_size(path) == 16U +
-            static_cast<std::uintmax_t>(total_frames) * 36U);
+            static_cast<std::uintmax_t>(total_frames) * 40U);
     }
     CHECK(!std::filesystem::exists(path));
     std::cout << total_frames

@@ -1,6 +1,9 @@
 #include "btga/game.hpp"
 #include "btga/authority_lease.hpp"
+#include "btga/authority_health.hpp"
 #include "btga/gameplay_digest.hpp"
+#include "btga/fixed_tick_clock.hpp"
+#include "btga/snapshot_send_cursor.hpp"
 #include "btga/authoritative_session.hpp"
 #include "btga/authoritative_server.hpp"
 #include "btga/authoritative_replica.hpp"
@@ -8,8 +11,11 @@
 #include "btga/gameplay_snapshot.hpp"
 #include "btga/input_sync.hpp"
 #include "btga/controller_pak.hpp"
+#include "btga/dedicated_resume.hpp"
+#include "btga/delayed_datagram_queue.hpp"
 #include "btga/pc_settings.hpp"
 #include "btga/recovery_barrier.hpp"
+#include "btga/bootstrap_recovery.hpp"
 #include "btga/online_multiplayer.hpp"
 #include "btga/online_local_view.hpp"
 #include "btga/master_client.hpp"
@@ -24,6 +30,7 @@ extern "C" {
 }
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -44,6 +51,233 @@ extern "C" {
     } while (false)
 
 int main() {
+    {
+        using namespace std::chrono_literals;
+        using Queue = btga::DelayedDatagramQueue;
+        Queue queue{2U};
+        const auto start = Queue::Clock::time_point{10s};
+        const std::array<std::uint8_t, 2> first{1U, 2U};
+        const std::array<std::uint8_t, 1> second{3U};
+        CHECK(queue.enqueue(first, start + 50ms));
+        CHECK(queue.enqueue(second, start + 60ms));
+        CHECK(!queue.enqueue(second, start + 70ms));
+        CHECK(queue.front_due(start + 49ms).empty());
+        CHECK(std::ranges::equal(queue.front_due(start + 50ms), first));
+        queue.pop_front();
+        CHECK(queue.front_due(start + 59ms).empty());
+        CHECK(std::ranges::equal(queue.front_due(start + 60ms), second));
+        queue.clear();
+        CHECK(queue.size() == 0U && queue.front_due(start + 1h).empty());
+        CHECK(!queue.enqueue({}, start));
+    }
+
+    {
+#if defined(_WIN32)
+        const auto set_environment = [](const char* name, const char* value) {
+            return _putenv_s(name, value) == 0;
+        };
+#else
+        const auto set_environment = [](const char* name, const char* value) {
+            return setenv(name, value, 1) == 0;
+        };
+#endif
+        CHECK(set_environment("BTGA_NET_TEST_FAULTS", "1"));
+        CHECK(set_environment("BTGA_NET_TEST_DROP_OUTGOING_EVERY", "50"));
+        CHECK(set_environment("BTGA_NET_TEST_DROP_INCOMING_EVERY", "0"));
+        CHECK(set_environment("BTGA_NET_TEST_DELAY_MS", "50"));
+        const auto profile = btga::udp_test_fault_profile_from_environment();
+        CHECK(profile.drop_outgoing_every == 50U);
+        CHECK(profile.drop_incoming_every == 0U);
+        CHECK(profile.delay_milliseconds == 50U);
+        CHECK(set_environment("BTGA_NET_TEST_DELAY_MS", "5001"));
+        CHECK(btga::udp_test_fault_profile_from_environment().delay_milliseconds == 0U);
+        CHECK(set_environment("BTGA_NET_TEST_FAULTS", "0"));
+        CHECK(btga::udp_test_fault_profile_from_environment().delay_milliseconds == 0U);
+    }
+
+    {
+        using namespace std::chrono_literals;
+        using Cursor = btga::SnapshotSendCursor;
+        Cursor cursor;
+        const auto start = Cursor::Clock::time_point{100ms};
+        cursor.start(3U, 2U, start);
+        std::array<std::uint32_t, 3> sent{};
+        for (std::size_t index = 0; index < sent.size(); ++index) {
+            const auto due = start + Cursor::packet_period *
+                static_cast<std::int64_t>(index);
+            CHECK(!cursor.next(due - 1ms));
+            const auto chunk = cursor.next(due);
+            CHECK(chunk.has_value());
+            sent[index] = *chunk;
+            cursor.mark_sent();
+        }
+        const std::array<std::uint32_t, 3> expected{2U, 0U, 1U};
+        CHECK(sent == expected);
+        CHECK(!cursor.active() && !cursor.next(start + 1h));
+        cursor.start(0U, 0U, start);
+        CHECK(!cursor.active());
+    }
+
+    {
+        using btga::fixed_rate_tick;
+        CHECK(fixed_rate_tick(0U, 30U) == 0U);
+        CHECK(fixed_rate_tick(UINT64_C(33333333), 30U) == 0U);
+        CHECK(fixed_rate_tick(UINT64_C(33333334), 30U) == 1U);
+        CHECK(fixed_rate_tick(UINT64_C(1000000000), 30U) == 30U);
+        CHECK(fixed_rate_tick(UINT64_C(600000000000), 30U) == 18000U);
+        CHECK(fixed_rate_tick(UINT64_C(600000000000), 0U) == 0U);
+    }
+
+    {
+        // A delayed replica samples against the live authority timeline, not
+        // against its presentation backlog. A replica already at the head
+        // retains the smaller normal lead. Serial comparison remains correct
+        // across the 32-bit tick wrap.
+        CHECK(btga::choose_authority_input_tick(100U, 118U) == 122U);
+        CHECK(btga::choose_authority_input_tick(118U, 118U) == 122U);
+        CHECK(btga::choose_authority_input_tick(120U, 118U) == 122U);
+        CHECK(btga::choose_authority_input_tick(UINT32_MAX - 1U, 0U) == 4U);
+    }
+
+    {
+        btga::TickInputHistory history;
+        const btga::OnlineControllerInput straight{1U, 0, 90};
+        const btga::OnlineControllerInput left{2U, -80, 40};
+        const btga::OnlineControllerInput fire{4U, 0, 0};
+
+        // One observed input produces one tick, never eight fabricated future
+        // commands. A second observation redundantly includes the real prior
+        // sample with its original tick.
+        CHECK(history.record(102U, straight));
+        auto batch = history.batch_ending_at(102U);
+        CHECK(batch.first_tick == 102U && batch.count == 1U);
+        CHECK(batch.inputs[0] == straight);
+        CHECK(history.record(103U, left));
+        batch = history.batch_ending_at(103U);
+        CHECK(batch.first_tick == 102U && batch.count == 2U);
+        CHECK(batch.inputs[0] == straight && batch.inputs[1] == left);
+        btga::InputSynchronizer encoder;
+        std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
+        const auto packet_size = encoder.encode_batch(
+            packet, UINT64_C(0x1020304050607080), 1U, 7U,
+            batch.first_tick, 0U, std::span{batch.inputs}.first(batch.count));
+        CHECK(packet_size != 0U);
+        BtgaNetHeader header{};
+        CHECK(btga_net_decode_header(&header, packet.data(), packet_size));
+        BtgaNetInputBatch decoded{};
+        CHECK(btga_net_decode_input_batch(
+            &decoded, packet.data() + BTGA_NET_HEADER_SIZE,
+            packet_size - BTGA_NET_HEADER_SIZE));
+        CHECK(decoded.first_tick == 102U && decoded.frame_count == 2U);
+        CHECK(decoded.frames[0].buttons == straight.buttons);
+        CHECK(decoded.frames[1].buttons == left.buttons);
+
+        // Once sampled, a tick is immutable. An identical redundant sample is
+        // accepted; a changed command for the same tick is not substituted.
+        CHECK(history.record(103U, left));
+        CHECK(!history.record(103U, fire));
+        batch = history.batch_ending_at(103U);
+        CHECK(batch.inputs[1] == left);
+
+        // Gaps terminate redundancy rather than filling unknown ticks, and a
+        // reset cannot retain input from an earlier connection epoch.
+        CHECK(history.record(106U, fire));
+        batch = history.batch_ending_at(106U);
+        CHECK(batch.first_tick == 106U && batch.count == 1U);
+        CHECK(batch.inputs[0] == fire);
+        history.reset();
+        CHECK(history.batch_ending_at(106U).count == 0U);
+    }
+
+    {
+        btga::BootstrapRecovery recovery;
+        using Request = btga::BootstrapRequest;
+        using Ack = btga::BootstrapAckKind;
+
+        // A cold seat at tick zero needs a snapshot but cannot pause a world
+        // that has not started. Repeated loss keeps one generation stable.
+        CHECK(recovery.request_cold(0U, 0U) == Request::start_generation);
+        recovery.snapshot_sent(0U, 41U, 0U);
+        CHECK(recovery.pending(0U));
+        CHECK(recovery.snapshot_id(0U) == 41U);
+        CHECK(recovery.expected_ack(0U) == 1U);
+        CHECK(recovery.pending_mask() == 0x01U);
+        CHECK(!recovery.paused());
+        CHECK(recovery.request_cold(0U, 0U) ==
+              Request::continue_generation);
+        CHECK(recovery.snapshot_id(0U) == 41U);
+
+        // Installing a valid tick-zero generation after the authority has
+        // moved creates a replay barrier even though this is not a new
+        // subscription. A matching generation receipt is not convergence.
+        auto ack = recovery.acknowledge(0U, 1U, 41U, 10U, false);
+        CHECK(ack.kind == Ack::replay && ack.next_tick == 0U);
+        CHECK(recovery.paused() && recovery.mask() == 0x01U);
+        ack = recovery.acknowledge(0U, 11U, 41U, 10U, false);
+        CHECK(ack.kind == Ack::ready && !recovery.paused());
+        CHECK(recovery.pending_mask() == 0U);
+
+        // Recreate the unfinished initial transfer for the replacement case.
+        CHECK(recovery.request_cold(0U, 0U) == Request::start_generation);
+        recovery.snapshot_sent(0U, 41U, 0U);
+
+        // Once a positive checkpoint exists, an unfinished initial generation
+        // is superseded exactly once and bound to the current frozen head.
+        CHECK(recovery.request_cold(0U, 15U) ==
+              Request::supersede_initial_generation);
+        CHECK(!recovery.paused());
+        CHECK(recovery.mask() == 0U);
+        CHECK(recovery.snapshot_id(0U) == 0U);
+        recovery.snapshot_sent(0U, 42U, 20U);
+        CHECK(recovery.expected_ack(0U) == 21U);
+        CHECK(recovery.request_cold(0U, 15U) ==
+              Request::continue_generation);
+        CHECK(recovery.snapshot_id(0U) == 42U);
+
+        // Wrong generations and transport receipt alone neither acquire nor
+        // release the barrier. The matching generation proves installation;
+        // replay then proceeds through the newly frozen head.
+        CHECK(recovery.acknowledge(0U, 21U, 41U, 20U, false).kind == Ack::ignore);
+        CHECK(!recovery.paused());
+        ack = recovery.acknowledge(0U, 16U, 42U, 20U, false);
+        CHECK(ack.kind == Ack::replay && ack.next_tick == 15U);
+        CHECK(recovery.paused());
+        ack = recovery.acknowledge(0U, 21U, 42U, 20U, false);
+        CHECK(ack.kind == Ack::ready && ack.next_tick == 20U);
+        CHECK(!recovery.paused());
+        CHECK(!recovery.pending(0U));
+
+        // An authenticated peer cannot release a recovery barrier by claiming
+        // progress beyond the canonical journal head.
+        CHECK(recovery.request_cold(0U, 20U) ==
+              Request::start_generation);
+        recovery.snapshot_sent(0U, 43U, 30U);
+        ack = recovery.acknowledge(0U, 32U, 43U, 30U, false);
+        CHECK(ack.kind == Ack::ignore && !recovery.paused());
+        CHECK(recovery.expected_ack(0U) == 31U);
+        ack = recovery.acknowledge(0U, 31U, 43U, 30U, false);
+        CHECK(ack.kind == Ack::ready && !recovery.paused());
+
+        // A live but behind first subscription opens a replay barrier; a
+        // current subscription does not. Seats remain independent.
+        ack = recovery.acknowledge(1U, 51U, 7U, 60U, true);
+        CHECK(ack.kind == Ack::replay && recovery.mask() == 0x02U);
+        ack = recovery.acknowledge(2U, 61U, 8U, 60U, true);
+        CHECK(ack.kind == Ack::ready && recovery.mask() == 0x02U);
+        ack = recovery.acknowledge(1U, 61U, 7U, 60U, false);
+        CHECK(ack.kind == Ack::ready && !recovery.paused());
+
+        // Disconnect and reset cannot leak a barrier or generation into the
+        // next authenticated endpoint.
+        CHECK(recovery.request_cold(3U, 60U) == Request::start_generation);
+        recovery.snapshot_sent(3U, 99U, 70U);
+        CHECK(recovery.pending_mask() == 0x08U);
+        recovery.disconnect(3U);
+        CHECK(!recovery.pending(3U) && recovery.pending_mask() == 0U &&
+              !recovery.paused());
+        recovery.reset();
+        CHECK(recovery.mask() == 0U);
+    }
     {
         btga::RecoveryBarrier barrier;
         CHECK(!barrier.paused());
@@ -81,6 +315,63 @@ int main() {
         CHECK(!barrier.paused());
     }
     {
+        CHECK(btga::dedicated_resume_path("lobby_A-1").filename() ==
+              "lobby_A-1.token");
+        try {
+            (void)btga::dedicated_resume_path("../wrong-lobby");
+            CHECK(false);
+        } catch (const std::runtime_error&) {}
+        const auto path = std::filesystem::temp_directory_path() /
+            "btga-dedicated-resume-test.token";
+        std::filesystem::remove(path);
+        btga::save_dedicated_resume_token(path, "first.resume.token");
+        CHECK(btga::load_dedicated_resume_token(path) ==
+              "first.resume.token");
+        btga::save_dedicated_resume_token(path, "rotated.resume.token");
+        CHECK(btga::load_dedicated_resume_token(path) ==
+              "rotated.resume.token");
+        try {
+            btga::save_dedicated_resume_token(path, "bad\ncredential");
+            CHECK(false);
+        } catch (const std::runtime_error&) {}
+        CHECK(btga::load_dedicated_resume_token(path) ==
+              "rotated.resume.token");
+        std::filesystem::remove(path);
+    }
+    {
+        const auto path = std::filesystem::temp_directory_path() /
+            "btga-authority-health-test.json";
+        std::filesystem::remove(path);
+        const btga::AuthorityHealth expected{
+            UINT64_C(123456789), 720U, 0x0dU, 0x04U, true};
+        CHECK(btga::save_authority_health(path, expected));
+        const auto loaded = btga::load_authority_health(path);
+        CHECK(loaded && loaded->loop_sequence == expected.loop_sequence);
+        CHECK(loaded->next_tick == expected.next_tick);
+        CHECK(loaded->connected_mask == expected.connected_mask);
+        CHECK(loaded->recovery_mask == expected.recovery_mask);
+        CHECK(loaded->gameplay_tick_active == expected.gameplay_tick_active);
+        const btga::AuthorityHealth replacement{
+            UINT64_C(123456790), 721U, 0x03U, 0x00U, false};
+        CHECK(btga::save_authority_health(path, replacement));
+        const auto replaced = btga::load_authority_health(path);
+        CHECK(replaced &&
+              replaced->loop_sequence == replacement.loop_sequence);
+        CHECK(replaced->next_tick == replacement.next_tick);
+        CHECK(replaced->connected_mask == replacement.connected_mask);
+        CHECK(replaced->recovery_mask == replacement.recovery_mask);
+        CHECK(replaced->gameplay_tick_active ==
+              replacement.gameplay_tick_active);
+        CHECK(!btga::save_authority_health(
+            path, {1U, 1U, 0x10U, 0U, false}));
+        {
+            std::ofstream corrupt{path, std::ios::binary | std::ios::trunc};
+            corrupt << R"({"version":1,"loop_sequence":1,"next_tick":2,"connected_mask":16,"recovery_mask":0,"gameplay_tick_active":false})";
+        }
+        CHECK(!btga::load_authority_health(path));
+        std::filesystem::remove(path);
+    }
+    {
         const auto path = std::filesystem::temp_directory_path() /
             "btga-authority-lease-test.json";
         std::filesystem::remove(path);
@@ -95,6 +386,14 @@ int main() {
         CHECK(loaded->relay.address == expected.relay.address);
         CHECK(loaded->relay.port == expected.relay.port);
         CHECK(loaded->packet_sequence == expected.packet_sequence);
+        auto replacement = expected;
+        replacement.packet_sequence += UINT32_C(65536);
+        CHECK(btga::save_authority_lease(path, replacement));
+        const auto replaced = btga::load_authority_lease(path);
+        CHECK(replaced &&
+              replaced->packet_sequence == replacement.packet_sequence);
+        CHECK(replaced->lobby_id == replacement.lobby_id);
+        CHECK(replaced->host_secret == replacement.host_secret);
         {
             std::ofstream corrupt{path, std::ios::binary | std::ios::trunc};
             corrupt << "{not-json";
@@ -105,6 +404,22 @@ int main() {
     const auto translated_journal_path =
         std::filesystem::temp_directory_path() / "btga-translated-authority-test.journal";
     std::filesystem::remove(translated_journal_path);
+    {
+        // Match transitions can change outer-loop state between periodic
+        // checkpoint intervals. Publishing that state immediately must only
+        // be possible at a completed tick boundary.
+        btga::TranslatedAuthority authority{0U, 30U, 0U};
+        const std::array<std::uint8_t, 4> state{1U, 2U, 3U, 4U};
+        CHECK(!authority.checkpoint_now({}));
+        CHECK(authority.begin_tick(0U));
+        CHECK(!authority.checkpoint_now(state));
+        CHECK(authority.finish_tick(0U, state));
+        CHECK(authority.checkpoint_now(state));
+        CHECK(authority.latest_snapshot());
+        CHECK(authority.latest_snapshot()->next_tick == 1U);
+        CHECK(authority.latest_snapshot()->state ==
+              std::vector<std::uint8_t>(state.begin(), state.end()));
+    }
     {
         // This is the execution model used by the translated dedicated
         // runtime: the guest tick owns the call stack, while the authority
@@ -176,17 +491,29 @@ int main() {
         CHECK(authority.latest_snapshot()->state[0x1235] == 0x6cU);
         CHECK(frame1->state_digest != authority.latest_snapshot()->state_digest);
 
+        // A future sample can already be queued when liveness disconnects its
+        // seat. It must neither drive the tank nor survive in received_mask,
+        // whose wire contract requires a subset of connected_mask.
+        CHECK(authority.submit(2U, 2U, {0x77U, 7, -7}));
         CHECK(authority.ready(5U));
         CHECK(authority.begin_tick(5U));
         CHECK(authority.inputs()[2].buttons == 0U);
-        CHECK(authority.finish_tick(2U, rdram));
+        const auto frame2 = authority.finish_tick(2U, rdram);
+        CHECK(frame2 && (frame2->received_mask & 0x04U) == 0U);
 
-        // A newly authenticated endpoint resumes with a fresh packet sequence
-        // epoch after timeout. The old endpoint's sequence was 3; sequence 1
-        // must be accepted only after set_connected(false) reset that epoch.
+        // A newly authenticated endpoint may resume before the old endpoint's
+        // timeout. Establish a high old replay sequence, then explicitly open
+        // the cold-bootstrap connection epoch so sequence one is accepted.
         CHECK(authority.set_connected(2U, true));
         btga::InputSynchronizer resume_encoder;
         std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> resume_packet{};
+        const auto old_size = resume_encoder.encode(
+            resume_packet, UINT64_C(0x123456789abcdef0), 3U, 99U, 4U, 2U,
+            {0x66U, 2, -2});
+        CHECK(old_size != 0U);
+        CHECK(authority.ingest_client_packet(
+            {resume_packet.data(), old_size}, UINT64_C(0x123456789abcdef0), 3U));
+        CHECK(authority.begin_connection_epoch(2U));
         const auto resume_size = resume_encoder.encode(
             resume_packet, UINT64_C(0x123456789abcdef0), 3U, 1U, 3U, 2U,
             {0x55U, 1, -1});
@@ -200,7 +527,7 @@ int main() {
         CHECK(authority.journal_size() == 4U);
         CHECK(authority.journal_base_tick() == 2U);
         CHECK(authority.copy_journal_from(0U, replay) == 4U);
-        CHECK(std::filesystem::file_size(translated_journal_path) == 16U + 4U * 36U);
+        CHECK(std::filesystem::file_size(translated_journal_path) == 16U + 4U * 40U);
         CHECK(replay[0].tick == 0U && replay[0].inputs[3].buttons == 4U);
         CHECK(replay[1].tick == 1U && replay[1].inputs[0].buttons == 9U);
         CHECK(replay[2].tick == 2U && replay[2].inputs[2].buttons == 0U);
@@ -252,7 +579,7 @@ int main() {
                 CHECK(replay[index].tick == index);
                 CHECK(replay[index].random_seed == index + 1U);
             }
-            CHECK(std::filesystem::file_size(persistent_path) == 16U + 4U * 36U);
+            CHECK(std::filesystem::file_size(persistent_path) == 16U + 4U * 40U);
 
             // After the caller restores the portable checkpoint and replays
             // any newer journal frames, canonical publication can continue at
@@ -266,6 +593,35 @@ int main() {
         std::filesystem::remove(persistent_path);
         std::filesystem::remove(persistent_path.string() + ".snapshot.0");
         std::filesystem::remove(persistent_path.string() + ".snapshot.1");
+    }
+    {
+        const auto corrupt_path = std::filesystem::temp_directory_path() /
+            "btga-translated-authority-corrupt-record-test.journal";
+        std::filesystem::remove(corrupt_path);
+        {
+            btga::TranslatedAuthority authority{0U, 30U, 0U};
+            CHECK(authority.enable_persistent_journal(corrupt_path, 2U));
+            const std::array<std::uint8_t, 4> state{1U, 2U, 3U, 4U};
+            CHECK(authority.begin_tick(0U));
+            CHECK(authority.finish_tick(0U, state));
+        }
+        // Preserve the exact record length while corrupting canonical input.
+        // Header/tick checks alone cannot detect this; the v2 record checksum
+        // must make authority replacement fail closed during open.
+        {
+            std::fstream corrupt{corrupt_path,
+                std::ios::binary | std::ios::in | std::ios::out};
+            CHECK(corrupt.good());
+            corrupt.seekg(16U + 6U);
+            char byte = 0;
+            corrupt.read(&byte, 1);
+            byte ^= 0x40;
+            corrupt.seekp(16U + 6U);
+            corrupt.write(&byte, 1);
+        }
+        btga::TranslatedAuthority recovered{0U, 30U, 0U};
+        CHECK(!recovered.open_persistent_journal(corrupt_path, 2U));
+        std::filesystem::remove(corrupt_path);
     }
     {
         class FourSeatSimulation final : public btga::AuthoritativeSimulation {
@@ -518,8 +874,12 @@ int main() {
         constexpr std::size_t full_vp = 0xB7E30U;
         constexpr std::size_t p1_vp = 0xB7E40U;
         constexpr std::size_t p2_vp = 0xB7E50U;
+        constexpr std::array<std::size_t, 4> four_vp{
+            0xB7E60U, 0xB7E70U, 0xB7E80U, 0xB7E90U};
         constexpr std::size_t p1_scissor = 0xB7F88U;
         constexpr std::size_t p2_scissor = 0xB7FA0U;
+        constexpr std::array<std::size_t, 4> four_scissor{
+            0xB7FB8U, 0xB7FD0U, 0xB7FE8U, 0xB8000U};
         const std::array<std::uint8_t, 16> full{
             0x02,0x80,0x01,0xE0,0x01,0xFF,0,0,
             0x02,0x80,0x01,0xE0,0x01,0xFF,0,0};
@@ -537,32 +897,63 @@ int main() {
             0xED,0,0,0,0,0x50,0x03,0xC0};
         const std::array<std::uint8_t, 8> hidden_scissor{
             0xED,0,0,0,0,0,0x40,0x04};
+        const std::array<std::array<std::uint8_t, 16>, 4> quadrants{{
+            {0x01,0x40,0,0xF0,0x01,0xFF,0,0,0x01,0x40,0,0xF0,0x01,0xFF,0,0},
+            {0x01,0x40,0,0xF0,0x01,0xFF,0,0,0x03,0xC0,0,0xF0,0x01,0xFF,0,0},
+            {0x01,0x40,0,0xF0,0x01,0xFF,0,0,0x01,0x40,0x02,0xD0,0x01,0xFF,0,0},
+            {0x01,0x40,0,0xF0,0x01,0xFF,0,0,0x03,0xC0,0x02,0xD0,0x01,0xFF,0,0},
+        }};
+        const std::array<std::array<std::uint8_t, 8>, 4> quadrant_scissors{{
+            {0xED,0,0,0,0,0x27,0xC1,0xDC},
+            {0xED,0x28,0,0,0,0x50,0x01,0xDC},
+            {0xED,0,0x01,0xE0,0,0x27,0xC3,0xC0},
+            {0xED,0x28,0x01,0xE0,0,0x50,0x03,0xC0},
+        }};
         auto make_rom = [&]() {
-            std::vector<std::uint8_t> rom(0xB8000U);
+            std::vector<std::uint8_t> rom(0xB8010U);
             std::copy(full.begin(), full.end(), rom.begin() + full_vp);
             std::copy(top.begin(), top.end(), rom.begin() + p1_vp);
             std::copy(bottom.begin(), bottom.end(), rom.begin() + p2_vp);
             std::copy(top_scissor.begin(), top_scissor.end(), rom.begin() + p1_scissor);
             std::copy(bottom_scissor.begin(), bottom_scissor.end(), rom.begin() + p2_scissor);
+            for (std::size_t seat = 0; seat < four_vp.size(); ++seat) {
+                std::copy(quadrants[seat].begin(), quadrants[seat].end(),
+                          rom.begin() + four_vp[seat]);
+                std::copy(quadrant_scissors[seat].begin(),
+                          quadrant_scissors[seat].end(),
+                          rom.begin() + four_scissor[seat]);
+            }
             return rom;
         };
-        auto host = make_rom();
-        CHECK(btga::patch_online_local_view(
-            host, btga::OnlineLocalView::HostPlayerOne));
-        CHECK(std::equal(full.begin(), full.end(), host.begin() + p1_vp));
-        CHECK(std::equal(full_scissor.begin(), full_scissor.end(),
-                         host.begin() + p1_scissor));
-        CHECK(std::equal(hidden_scissor.begin(), hidden_scissor.end(),
-                         host.begin() + p2_scissor));
-
-        auto client = make_rom();
-        CHECK(btga::patch_online_local_view(
-            client, btga::OnlineLocalView::ClientPlayerTwo));
-        CHECK(std::equal(full.begin(), full.end(), client.begin() + p2_vp));
-        CHECK(std::equal(hidden_scissor.begin(), hidden_scissor.end(),
-                         client.begin() + p1_scissor));
-        CHECK(std::equal(full_scissor.begin(), full_scissor.end(),
-                         client.begin() + p2_scissor));
+        for (std::size_t seat = 0; seat < four_vp.size(); ++seat) {
+            auto rom = make_rom();
+            CHECK(btga::patch_online_local_view(
+                rom, static_cast<btga::OnlineLocalView>(seat)));
+            CHECK(std::equal(full.begin(), full.end(), rom.begin() + four_vp[seat]));
+            for (std::size_t other = 0; other < four_scissor.size(); ++other) {
+                const auto& expected = other == seat ? full_scissor : hidden_scissor;
+                CHECK(std::equal(expected.begin(), expected.end(),
+                                 rom.begin() + four_scissor[other]));
+            }
+            if (seat == 0U) {
+                CHECK(std::equal(full.begin(), full.end(), rom.begin() + p1_vp));
+                CHECK(std::equal(full_scissor.begin(), full_scissor.end(),
+                                 rom.begin() + p1_scissor));
+                CHECK(std::equal(hidden_scissor.begin(), hidden_scissor.end(),
+                                 rom.begin() + p2_scissor));
+            } else if (seat == 1U) {
+                CHECK(std::equal(full.begin(), full.end(), rom.begin() + p2_vp));
+                CHECK(std::equal(hidden_scissor.begin(), hidden_scissor.end(),
+                                 rom.begin() + p1_scissor));
+                CHECK(std::equal(full_scissor.begin(), full_scissor.end(),
+                                 rom.begin() + p2_scissor));
+            } else {
+                CHECK(std::equal(hidden_scissor.begin(), hidden_scissor.end(),
+                                 rom.begin() + p1_scissor));
+                CHECK(std::equal(hidden_scissor.begin(), hidden_scissor.end(),
+                                 rom.begin() + p2_scissor));
+            }
+        }
 
         auto invalid = make_rom();
         invalid[p1_vp] ^= 1U;
@@ -596,6 +987,11 @@ int main() {
                   client->begin() + 0x001AD128U, std::uint8_t{0xEF});
         std::fill(client->begin() + 0x001AD128U,
                   client->begin() + 0x001AD128U + 24U * 0x4CCU, std::uint8_t{0xAA});
+        constexpr std::size_t scheduler_backref = 0x001AD128U + 0xB0U;
+        const std::array<std::uint8_t, 4> client_scheduler_backref{
+            0x6C, 0x5B, 0x22, 0x80};
+        std::copy(client_scheduler_backref.begin(), client_scheduler_backref.end(),
+                  client->begin() + scheduler_backref);
         constexpr std::size_t sound_handles = 0x001AD128U + 0x280U;
         const std::array<std::uint8_t, 12> client_audio_handles{
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
@@ -622,6 +1018,9 @@ int main() {
                          client->begin() + 0x001AD120U));
         CHECK(std::equal(client_audio_handles.begin(), client_audio_handles.end(),
                          client->begin() + sound_handles));
+        CHECK(std::equal(host->begin() + scheduler_backref,
+                         host->begin() + scheduler_backref + 4U,
+                         client->begin() + scheduler_backref));
         CHECK(btga::gameplay_state_digests(*host).combined ==
               btga::gameplay_state_digests(*client).combined);
         CHECK(std::equal(host->begin() + 0x002195D0U,
@@ -717,6 +1116,8 @@ int main() {
                   client->begin() + collision_end, std::uint8_t{0x31});
         std::fill(client->begin() + gameplay_bss_begin,
                   client->begin() + gameplay_bss_end, std::uint8_t{0x42});
+        std::fill(client->begin() + 0x00224B50U,
+                  client->begin() + 0x00235EF4U, std::uint8_t{0xE1});
         std::fill(client->begin() + grid_cells,
                   client->begin() + grid_cells + grid_cell_bytes,
                   std::uint8_t{0x43});
@@ -735,6 +1136,9 @@ int main() {
         CHECK(std::equal(host->begin() + gameplay_bss_begin,
                          host->begin() + gameplay_bss_end,
                          client->begin() + gameplay_bss_begin));
+        CHECK(std::equal(host->begin() + 0x00224B50U,
+                         host->begin() + 0x00235EF4U,
+                         client->begin() + 0x00224B50U));
         CHECK(std::equal(host->begin() + grid_cells,
                          host->begin() + grid_cells + grid_cell_bytes,
                          client->begin() + grid_cells));
@@ -828,9 +1232,12 @@ int main() {
     }
     {
         constexpr std::size_t rdram_size = 8U * 1024U * 1024U;
-        constexpr std::array<std::size_t, 8> gameplay_offsets{
+        constexpr std::array<std::size_t, 11> gameplay_offsets{
             0x00114C80U, // RNG seed
+            0x00114CB0U, // gameplay task sequence
             0x001AD128U, // object pool
+            0x00224B50U, // gameplay task free-list head
+            0x00224EF0U, // gameplay task/entity pool
             0x0021945CU, // game frame counter
             0x002194A0U, // game mode
             0x002194B0U, // match time
@@ -860,6 +1267,10 @@ int main() {
         // Per-window camera state is deliberately excluded.
         (*changed)[0x00235F00U + 0x78U] = 0xA5U;
         CHECK(btga::gameplay_state_digest(*changed) == baseline_digest);
+        // Object-to-task reverse links are canonical gameplay relationships.
+        (*changed)[0x001AD128U + 0xB0U] = 0xA5U;
+        CHECK(btga::gameplay_state_digest(*changed) != baseline_digest);
+        (*changed)[0x001AD128U + 0xB0U] = 0U;
 
         // Team scores live behind a 32-bit guest pointer in each player.
         constexpr std::size_t team_info_offset = 0x00300000U;
@@ -965,7 +1376,7 @@ int main() {
     } http;
     http.responses = {
         {200, R"({"lobbies":[{"id":"lobby-1","name":"Desert Duel","build":"pc-port-v2","platform":"pc","region":"eastus","state":"lobby","capabilities":2,"max_players":4,"current_players":2}]})"},
-        {201, R"({"lobby":{"id":"hosted-1","name":"My Lobby","build":"pc-port-v2","platform":"pc","region":"eastus","state":"lobby","capabilities":2,"max_players":4,"current_players":1},"host_secret":"host-secret","session_id":"1020304050607080","relay":{"address":"relay.example","udp_port":30420},"relay_token":"host.token"})"},
+        {201, R"({"lobby":{"id":"hosted-1","name":"My Lobby","build":"pc-port-v2","platform":"pc","region":"eastus","state":"lobby","capabilities":34,"max_players":4,"current_players":0},"host_secret":"host-secret","session_id":"1020304050607080","relay":{"address":"relay.example","udp_port":30420},"relay_token":"host.token"})"},
         {200, R"({"session_id":"1020304050607080","seat":2,"relay":{"address":"relay.example","udp_port":30420},"join_token":"join.token","resume_token":"resume.token"})"},
         {200, R"({"id":"hosted-1","name":"My Lobby","build":"pc-port-v2","platform":"pc","region":"eastus","state":"playing","capabilities":2,"max_players":4,"current_players":2,"expires_at":1800000090,"relay_token":"refreshed.token"})"},
         {204, ""}
@@ -974,10 +1385,17 @@ int main() {
     const auto lobbies = master.list_lobbies();
     CHECK(lobbies.size() == 1 && lobbies[0].current_players == 2);
     CHECK(http.last_method == "GET" && http.last_path == "/lobbies?protocol=1&build=pc-port-v2");
-    const auto hosted = master.host("My Lobby", 4);
+    const auto hosted = master.host(
+        "My Lobby", 4, "eastus",
+        BTGA_NET_CAP_RELAY_UDP | BTGA_NET_CAP_DEDICATED_AUTHORITY);
     CHECK(hosted.session_id == UINT64_C(0x1020304050607080));
+    CHECK(hosted.lobby.capabilities ==
+          (BTGA_NET_CAP_RELAY_UDP | BTGA_NET_CAP_DEDICATED_AUTHORITY));
+    CHECK(hosted.lobby.current_players == 0U);
     CHECK(hosted.relay.address == "relay.example" && hosted.relay.port == 30420);
     CHECK(http.last_method == "POST" && http.last_path == "/lobbies");
+    CHECK(http.last_body.find("\"capabilities\":34") != std::string::npos);
+    CHECK(http.last_body.find("\"current_players\":0") != std::string::npos);
     const auto joined = master.join("hosted-1");
     CHECK(joined.session_id == hosted.session_id && joined.join_token == "join.token");
     CHECK(joined.seat == 2 && joined.resume_token == "resume.token");
@@ -1117,6 +1535,29 @@ int main() {
         CHECK(online.accept_relay_datagram(response));
         CHECK(online.state() == btga::OnlineState::Lobby);
         CHECK(online.relay_slot() == 1);
+        static constexpr std::string_view refreshed = "refreshed.signed.token";
+        CHECK(online.rebind_relay(false, UINT64_C(0x1020304050607080), {
+            reinterpret_cast<const std::uint8_t*>(refreshed.data()),
+            refreshed.size()
+        }));
+        CHECK(online.state() == btga::OnlineState::RelayBinding);
+        CHECK(online_io.open_calls == 1 && online_io.send_calls == 2);
+        CHECK(online.accept_relay_datagram(response));
+        CHECK(online.state() == btga::OnlineState::Lobby);
+        CHECK(online.relay_slot() == 1);
+        online_io.send_result = false;
+        CHECK(!online.rebind_relay(false, UINT64_C(0x1020304050607080), {
+            reinterpret_cast<const std::uint8_t*>(refreshed.data()),
+            refreshed.size()
+        }));
+        CHECK(online.state() == btga::OnlineState::Error);
+        online_io.send_result = true;
+        CHECK(online.rebind_relay(false, UINT64_C(0x1020304050607080), {
+            reinterpret_cast<const std::uint8_t*>(refreshed.data()),
+            refreshed.size()
+        }));
+        CHECK(online_io.open_calls == 1 && online_io.send_calls == 4);
+        CHECK(online.accept_relay_datagram(response));
         online.leave_online();
         CHECK(online.state() == btga::OnlineState::Offline);
         CHECK(online_io.close_calls == 1);

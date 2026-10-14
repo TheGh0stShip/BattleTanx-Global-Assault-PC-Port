@@ -8,6 +8,16 @@ namespace btga {
 namespace {
 constexpr std::size_t rdram_size = 8U * 1024U * 1024U;
 constexpr std::size_t random_seed_offset = 0x00114C80U;
+constexpr std::size_t task_sequence_offset = 0x00114CB0U;
+constexpr std::size_t task_sequence_size = sizeof(std::uint32_t);
+constexpr std::size_t task_state_offset = 0x00224B50U;
+// Free-list head, immutable class dispatch table, 65 active-list heads,
+// 1,024 0x44-byte gameplay task/entity records, and the pending-list head.
+// Despite its historical "scheduler" name this state drives AI, pickups,
+// projectiles, mines, spawners, destroyed objects, and object callbacks.
+// Include the two bytes of alignment padding after the pending head so the
+// following serialized N64 structures retain their original word alignment.
+constexpr std::size_t task_state_size = 0x113A4U;
 constexpr std::size_t object_allocator_offset = 0x001AD120U;
 constexpr std::size_t object_allocator_size = 8U;
 constexpr std::size_t object_pool_offset = 0x001AD128U;
@@ -287,6 +297,12 @@ bool capture_dedicated_checkpoint(std::span<const std::uint8_t> rdram,
     if (!capture_gameplay_snapshot(rdram, compact)) return false;
     std::size_t cursor = gameplay_snapshot_size;
     std::memcpy(checkpoint.data() + cursor,
+                rdram.data() + task_sequence_offset, task_sequence_size);
+    cursor += task_sequence_size;
+    std::memcpy(checkpoint.data() + cursor,
+                rdram.data() + task_state_offset, task_state_size);
+    cursor += task_state_size;
+    std::memcpy(checkpoint.data() + cursor,
                 rdram.data() + collision_state_offset, collision_state_size);
     cursor += collision_state_size;
     std::memcpy(checkpoint.data() + cursor,
@@ -323,6 +339,7 @@ bool restore_dedicated_checkpoint(std::span<std::uint8_t> rdram,
     // instead of leaving a half-restored authority process behind.
     constexpr std::size_t checkpoint_grid_descriptors =
         gameplay_snapshot_size +
+        task_sequence_size + task_state_size +
         (grid_descriptors_offset - collision_state_offset);
     std::array<GridCellRange, grid_descriptor_limit> expected{};
     std::size_t expected_count = 0;
@@ -339,6 +356,12 @@ bool restore_dedicated_checkpoint(std::span<std::uint8_t> rdram,
     const auto compact = checkpoint.first(gameplay_snapshot_size);
     if (!restore_gameplay_snapshot(rdram, compact)) return false;
     std::size_t cursor = gameplay_snapshot_size;
+    std::memcpy(rdram.data() + task_sequence_offset,
+                checkpoint.data() + cursor, task_sequence_size);
+    cursor += task_sequence_size;
+    std::memcpy(rdram.data() + task_state_offset,
+                checkpoint.data() + cursor, task_state_size);
+    cursor += task_state_size;
     std::memcpy(rdram.data() + collision_state_offset,
                 checkpoint.data() + cursor, collision_state_size);
     cursor += collision_state_size;

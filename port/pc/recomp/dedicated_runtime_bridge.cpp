@@ -2,7 +2,9 @@
 #include "dedicated_client_bridge.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <charconv>
 #include <cstdio>
@@ -18,18 +20,23 @@
 #include <vector>
 
 #include "btga/authoritative_server.hpp"
+#include "btga/authority_health.hpp"
 #include "btga/authority_lease.hpp"
+#include "btga/bootstrap_recovery.hpp"
+#include "btga/client_resync.hpp"
 #include "btga/gameplay_digest.hpp"
+#include "btga/fixed_tick_clock.hpp"
+#include "btga/snapshot_send_cursor.hpp"
 #include "btga/gameplay_snapshot.hpp"
 #include "btga/master_client.hpp"
 #include "btga/online_multiplayer.hpp"
-#include "btga/recovery_barrier.hpp"
 #include "btga/translated_authority.hpp"
 #include "btga/udp_online_io.hpp"
 #include "recomp.h"
 
 extern "C" void func_8009C524(std::uint8_t* rdram, recomp_context* ctx);
 extern "C" void func_80079FF0(std::uint8_t* rdram, recomp_context* ctx);
+extern "C" void func_800CF0CC(std::uint8_t* rdram, recomp_context* ctx);
 
 extern "C" {
 #include <btga/btga_gameplay.h>
@@ -39,32 +46,44 @@ extern "C" {
 
 namespace {
 constexpr std::size_t rdram_size = 8U * 1024U * 1024U;
+constexpr auto bootstrap_retry_delay = std::chrono::seconds{3};
+constexpr auto stale_input_timeout = std::chrono::seconds{2};
+constexpr auto recovery_abandon_timeout = std::chrono::seconds{10};
+constexpr auto recovery_stall_timeout = std::chrono::seconds{15};
+static_assert(recovery_abandon_timeout > bootstrap_retry_delay,
+              "recovery state must survive at least one snapshot retry");
+static_assert(btga::BootstrapRecovery::player_limit == btga::online_player_limit,
+              "recovery and authoritative seat capacities must match");
 std::mutex authority_mutex;
 std::mutex master_mutex;
 btga::TranslatedAuthority authority{0x0fU, 30U, 3U};
-btga::RecoveryBarrier recovery_barrier;
+btga::BootstrapRecovery bootstrap_recovery;
+btga::RecoveryProgressWatchdog recovery_watchdog;
 std::array<btga::OnlineControllerInput, btga::online_player_limit> active_inputs{};
-std::array<std::chrono::steady_clock::time_point, btga::online_player_limit>
-    client_last_seen{};
-std::array<bool, btga::online_player_limit> client_seen{};
+btga::ClientInputLiveness client_liveness;
 std::chrono::steady_clock::time_point authority_started;
+std::atomic_uint64_t authority_loop_sequence{0U};
 bool enabled = false;
 bool gameplay_tick_active = false;
 bool recovery_replay_running = false;
 bool recovery_pending = false;
 bool recovery_pause_announced = false;
+bool match_started = false;
+bool transition_checkpoint_pending = false;
 thread_local bool dedicated_loop_running = false;
 std::uint32_t active_tick = 0;
 std::uint32_t inactive_tick_probes = 0;
 std::uint32_t network_poll_count = 0;
 std::uint32_t received_datagrams = 0;
+std::array<std::uint32_t, btga::online_player_limit> latest_input_horizons{};
+std::uint64_t simulation_stalls = 0U;
+std::uint64_t maximum_tick_lag_microseconds = 0U;
 std::uint64_t session_id = 0;
 std::uint32_t outgoing_sequence = 0;
 std::uint32_t snapshot_id = 0;
 std::uint8_t snapshot_subscribers = 0;
 std::uint8_t snapshot_requests = 0;
 std::uint8_t bootstrap_requests = 0;
-std::uint8_t bootstrap_pending = 0;
 std::uint8_t replay_requests = 0;
 std::uint8_t disk_replay_announced = 0;
 std::uint8_t replay_send_failure_announced = 0;
@@ -72,12 +91,18 @@ std::uint8_t snapshot_cursor = 0;
 std::array<std::chrono::steady_clock::time_point, btga::online_player_limit>
     snapshot_last_sent{};
 std::array<std::uint32_t, btga::online_player_limit> replay_next_tick{};
-std::array<std::uint32_t, btga::online_player_limit> bootstrap_expected_ack{};
-std::array<std::uint32_t, btga::online_player_limit>
-    bootstrap_expected_snapshot_id{};
 std::array<std::uint32_t, btga::online_player_limit> snapshot_retry_rotation{};
 std::vector<std::uint8_t> initial_snapshot_state;
 bool initial_snapshot_available = false;
+struct SnapshotTransfer {
+    std::vector<std::uint8_t> state;
+    std::uint64_t canonical_digest = 0U;
+    std::uint32_t tick = 0U;
+    std::uint32_t id = 0U;
+    std::uint16_t destination_slot = 0U;
+    btga::SnapshotSendCursor cursor;
+};
+SnapshotTransfer snapshot_transfer;
 unsigned int configured_players = 4;
 std::unique_ptr<btga::UdpOnlineIo> udp;
 std::unique_ptr<btga::OnlineMultiplayer> multiplayer;
@@ -86,10 +111,14 @@ std::unique_ptr<btga::HttpClient> master_http;
 std::unique_ptr<btga::MasterClient> master;
 std::string public_lobby_id;
 std::string public_host_secret;
+std::string pending_authority_relay_token;
 std::chrono::steady_clock::time_point next_heartbeat{};
 std::chrono::steady_clock::time_point next_recovery_status{};
 std::optional<std::filesystem::path> persistent_lease_path;
 btga::PersistentAuthorityLease persistent_lease;
+std::optional<std::filesystem::path> authority_health_path;
+std::chrono::steady_clock::time_point next_health_write{};
+std::uint64_t last_health_sequence = 0U;
 
 std::uint64_t canonical_state_digest(std::span<const std::uint8_t> state) {
     std::uint64_t value = UINT64_C(1469598103934665603);
@@ -100,43 +129,82 @@ std::uint64_t canonical_state_digest(std::span<const std::uint8_t> state) {
     return value;
 }
 
+void poll_authority_health() {
+    const auto now = std::chrono::steady_clock::now();
+    if (!authority_health_path || now < next_health_write) return;
+    next_health_write = now + std::chrono::seconds{1};
+    const auto sequence = authority_loop_sequence.load(std::memory_order_acquire);
+    if (sequence == 0U || sequence == last_health_sequence) return;
+
+    btga::AuthorityHealth health;
+    std::filesystem::path path;
+    {
+        const std::unique_lock lock{authority_mutex, std::try_to_lock};
+        if (!lock.owns_lock()) return;
+        if (!authority_health_path) return;
+        path = *authority_health_path;
+        health = {sequence, authority.next_tick(), authority.connected_mask(),
+                  bootstrap_recovery.mask(), gameplay_tick_active};
+    }
+    if (btga::save_authority_health(path, health)) {
+        last_health_sequence = sequence;
+    } else {
+        std::fputs("BTGA_AUTHORITY could not update process health\n", stderr);
+    }
+}
+
 void poll_master_heartbeat() {
     const auto now = std::chrono::steady_clock::now();
     unsigned players = 0;
     std::uint8_t seat_mask = 0U;
     std::uint32_t packet_sequence = 0U;
+    bool playing = false;
     {
-        const std::lock_guard lock{authority_mutex};
+        const std::unique_lock lock{authority_mutex, std::try_to_lock};
+        if (!lock.owns_lock()) return;
         seat_mask = authority.connected_mask();
         for (unsigned seat = 0; seat < 4; ++seat) {
             players += (seat_mask >> seat) & 1U;
         }
         packet_sequence = outgoing_sequence;
+        playing = match_started;
     }
-    const std::lock_guard lock{master_mutex};
-    if (!master || now < next_heartbeat) return;
-    try {
-        master->heartbeat(public_lobby_id, public_host_secret,
-                          static_cast<std::uint16_t>(std::max(1U, players)),
-                          players == configured_players ? "playing" : "lobby",
-                          seat_mask);
-        if (persistent_lease_path) {
-            persistent_lease.packet_sequence = packet_sequence;
-            if (!btga::save_authority_lease(
-                    *persistent_lease_path, persistent_lease)) {
-                std::fputs("BTGA_AUTHORITY could not persist packet sequence\n", stderr);
+    std::string refreshed_relay_token;
+    {
+        const std::lock_guard lock{master_mutex};
+        if (!master || now < next_heartbeat) return;
+        try {
+            refreshed_relay_token = master->heartbeat(
+                public_lobby_id, public_host_secret,
+                static_cast<std::uint16_t>(players),
+                playing ? "playing" : "lobby", seat_mask);
+            if (persistent_lease_path) {
+                persistent_lease.packet_sequence = packet_sequence;
+                if (!btga::save_authority_lease(
+                        *persistent_lease_path, persistent_lease)) {
+                    std::fputs(
+                        "BTGA_AUTHORITY could not persist packet sequence\n", stderr);
+                }
             }
+        } catch (const std::exception& exception) {
+            std::fprintf(
+                stderr, "BTGA_AUTHORITY heartbeat failed: %s\n", exception.what());
         }
-    } catch (const std::exception& exception) {
-        std::fprintf(stderr, "BTGA_AUTHORITY heartbeat failed: %s\n", exception.what());
+        next_heartbeat = now + std::chrono::seconds{15};
     }
-    next_heartbeat = now + std::chrono::seconds{15};
+    if (!refreshed_relay_token.empty()) {
+        const std::lock_guard lock{authority_mutex};
+        pending_authority_relay_token = std::move(refreshed_relay_token);
+    }
 }
 
 std::uint32_t server_clock_tick() {
     const auto elapsed = std::chrono::steady_clock::now() - authority_started;
-    return static_cast<std::uint32_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() / 33);
+    const auto nanoseconds =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+    if (nanoseconds <= 0) return 0U;
+    return static_cast<std::uint32_t>(btga::fixed_rate_tick(
+        static_cast<std::uint64_t>(nanoseconds), 30U));
 }
 
 extern "C" void btga_advance_retail_mode_counters(std::uint8_t* rdram) {
@@ -171,6 +239,7 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
         error = "dedicated session, relay endpoint, or authority token is invalid";
         return false;
     }
+    authority_health_path.reset();
     session_id = requested_session;
     const auto fault_profile = btga::udp_test_fault_profile_from_environment();
     udp = std::make_unique<btga::UdpOnlineIo>(relay.address, relay.port);
@@ -196,11 +265,13 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
     }
     udp->set_fault_profile(fault_profile);
     if (fault_profile.drop_outgoing_every != 0U ||
-        fault_profile.drop_incoming_every != 0U) {
+        fault_profile.drop_incoming_every != 0U ||
+        fault_profile.delay_milliseconds != 0U) {
         std::fprintf(stderr,
-                     "BTGA_AUTHORITY test UDP loss outgoing=%u incoming=%u\n",
+                     "BTGA_AUTHORITY test UDP loss outgoing=%u incoming=%u delay_ms=%u\n",
                      fault_profile.drop_outgoing_every,
-                     fault_profile.drop_incoming_every);
+                     fault_profile.drop_incoming_every,
+                     fault_profile.delay_milliseconds);
     }
     bool journal_ready = false;
     try {
@@ -228,6 +299,7 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
             if (filesystem_error) {
                 error = "could not create BTGA_DEDICATED_STATE_DIR";
             } else {
+                authority_health_path = directory / "authority-health.json";
                 std::array<char, 64> name{};
                 std::snprintf(name.data(), name.size(), "authority-%016llx.journal",
                               static_cast<unsigned long long>(requested_session));
@@ -271,26 +343,38 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
         if (error.empty()) error = "could not create canonical disk journal";
         return false;
     }
-    authority_started = std::chrono::steady_clock::now() -
-        std::chrono::milliseconds{static_cast<std::int64_t>(authority.next_tick()) * 33};
-    client_seen.fill(false);
+    const auto recovered_elapsed = std::chrono::nanoseconds{
+        static_cast<std::int64_t>(
+            (static_cast<std::uint64_t>(authority.next_tick()) *
+             UINT64_C(1000000000)) / 30U)};
+    authority_started = std::chrono::steady_clock::now() - recovered_elapsed;
+    client_liveness.reset();
+    latest_input_horizons.fill(0U);
+    simulation_stalls = 0U;
+    maximum_tick_lag_microseconds = 0U;
+    authority_loop_sequence.store(0U, std::memory_order_release);
+    next_health_write = {};
+    last_health_sequence = 0U;
     snapshot_subscribers = 0U;
     snapshot_requests = 0U;
     bootstrap_requests = 0U;
-    bootstrap_pending = 0U;
     replay_requests = 0U;
     disk_replay_announced = 0U;
     replay_send_failure_announced = 0U;
-    recovery_barrier.reset();
+    bootstrap_recovery.reset();
+    recovery_watchdog.reset();
     recovery_pause_announced = false;
+    // A recovered non-empty journal is an existing match even while its seats
+    // reconnect. Do not rewrite the dashboard phase back to an open lobby.
+    match_started = recovery_pending;
+    transition_checkpoint_pending = false;
     next_recovery_status = {};
     snapshot_cursor = 0U;
     snapshot_last_sent.fill({});
     replay_next_tick.fill(0U);
-    bootstrap_expected_ack.fill(0U);
-    bootstrap_expected_snapshot_id.fill(0U);
     snapshot_retry_rotation.fill(0U);
     initial_snapshot_state.clear();
+    snapshot_transfer = {};
     // A restarted authority already owns a validated portable checkpoint.
     // Make it available before translated gameplay starts so a genuinely new
     // client (acknowledgment zero) can bootstrap while the authority waits at
@@ -306,8 +390,10 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
     enabled = true;
     network_thread = std::jthread([](std::stop_token stop) {
         while (!stop.stop_requested()) {
+            btga_dedicated_network_poll();
+            poll_authority_health();
             poll_master_heartbeat();
-            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
         }
     });
     return true;
@@ -338,7 +424,13 @@ bool encode_and_send_frame(
     wire.state_digest = frame.state_digest;
     wire.random_seed = frame.random_seed;
     wire.occupied_mask = authority.occupied_mask();
-    wire.connected_mask = authority.connected_mask();
+    // A replayed historical frame may contain an input from a seat that has
+    // since timed out. Preserve the wire invariant that every received seat
+    // was connected for that frame; otherwise the portable encoder correctly
+    // rejects the repair packet. Live frames are unchanged because their
+    // received mask is already a subset of the current connected mask.
+    wire.connected_mask = static_cast<std::uint8_t>(
+        authority.connected_mask() | frame.received_mask);
     wire.received_mask = frame.received_mask;
     for (std::size_t seat = 0; seat < frame.inputs.size(); ++seat) {
         wire.inputs[seat] = {frame.inputs[seat].buttons,
@@ -349,7 +441,10 @@ bool encode_and_send_frame(
     const std::size_t payload_size = btga_net_encode_authoritative_frame(
         packet.data() + BTGA_NET_HEADER_SIZE,
         packet.size() - BTGA_NET_HEADER_SIZE, &wire);
-    if (payload_size == 0U) return false;
+    if (payload_size == 0U) {
+        std::fputs("BTGA_AUTHORITY frame encode payload failed\n", stderr);
+        return false;
+    }
     BtgaNetHeader header{};
     header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
     header.message_type = BTGA_NET_MSG_EVENT;
@@ -363,10 +458,23 @@ bool encode_and_send_frame(
     header.acknowledgment_bits = 0;
     header.payload_size = static_cast<std::uint16_t>(payload_size);
     header.peer_id = 0;
-    if (btga_net_encode_header(packet.data(), packet.size(), &header) == 0U) return false;
-    return multiplayer && multiplayer->send_gameplay(
+    if (btga_net_encode_header(packet.data(), packet.size(), &header) == 0U) {
+        std::fputs("BTGA_AUTHORITY frame encode header failed\n", stderr);
+        return false;
+    }
+    if (!multiplayer) {
+        std::fputs("BTGA_AUTHORITY frame send missing multiplayer\n", stderr);
+        return false;
+    }
+    const bool sent = multiplayer->send_gameplay(
         destination_slot,
         {packet.data(), BTGA_NET_HEADER_SIZE + payload_size});
+    if (!sent && std::getenv("BTGA_NET_TEST_FAULTS") != nullptr) {
+        std::fprintf(stderr,
+                     "BTGA_AUTHORITY frame send failed tick=%u destination=%u\n",
+                     frame.tick, static_cast<unsigned>(destination_slot));
+    }
+    return sent;
 }
 
 bool send_recovery_status_locked() {
@@ -378,18 +486,25 @@ bool send_recovery_status_locked() {
     header.session_id = session_id;
     header.sequence = ++outgoing_sequence;
     header.acknowledgment = authority.next_tick();
-    header.acknowledgment_bits = recovery_barrier.mask();
+    header.acknowledgment_bits = bootstrap_recovery.mask();
     header.payload_size = 0U;
     header.peer_id = 0U;
     return btga_net_encode_header(packet.data(), packet.size(), &header) != 0U &&
         multiplayer && multiplayer->send_gameplay(BTGA_RELAY_BROADCAST_SLOT, packet);
 }
 
-bool encode_and_send_snapshot(std::uint32_t tick, std::uint16_t destination_slot,
-                              std::span<const std::uint8_t> state,
-                              std::uint64_t canonical_digest = 0U,
-                              std::uint32_t retransmit_id = 0U,
-                              std::uint32_t first_chunk = 0U) {
+std::uint32_t next_snapshot_generation() noexcept {
+    ++snapshot_id;
+    if (snapshot_id == 0U) ++snapshot_id; // zero means "no generation"
+    return snapshot_id;
+}
+
+std::uint32_t start_snapshot_transfer_locked(
+    std::uint32_t tick, std::uint16_t destination_slot,
+    std::span<const std::uint8_t> state, std::uint64_t canonical_digest = 0U,
+    std::uint32_t retransmit_id = 0U, std::uint32_t first_chunk = 0U) {
+    if (snapshot_transfer.cursor.active() || state.empty() ||
+        state.size() > UINT32_MAX) return 0U;
     if (canonical_digest == 0U) {
         canonical_digest = UINT64_C(1469598103934665603);
         for (const std::uint8_t byte : state) {
@@ -402,68 +517,85 @@ bool encode_and_send_snapshot(std::uint32_t tick, std::uint16_t destination_slot
     // retains already received chunks for that ID, so UDP loss can be repaired
     // over several sends instead of every retry discarding partial progress.
     const std::uint32_t id = retransmit_id != 0U
-        ? retransmit_id : ++snapshot_id;
+        ? retransmit_id : next_snapshot_generation();
+    snapshot_transfer.state.assign(state.begin(), state.end());
+    snapshot_transfer.canonical_digest = canonical_digest;
+    snapshot_transfer.tick = tick;
+    snapshot_transfer.id = id;
+    snapshot_transfer.destination_slot = destination_slot;
     const std::uint32_t chunk_count =
         (total + BTGA_NET_SNAPSHOT_CHUNK_DATA_LIMIT - 1U) /
         BTGA_NET_SNAPSHOT_CHUNK_DATA_LIMIT;
-    for (std::uint32_t ordinal = 0U; ordinal < chunk_count; ++ordinal) {
-        // Rotate retry order so periodic or burst-correlated loss cannot erase
-        // the same chunk on every full retransmission.
-        const std::uint32_t chunk_index =
-            (first_chunk + ordinal) % chunk_count;
+    snapshot_transfer.cursor.start(
+        chunk_count, first_chunk, std::chrono::steady_clock::now());
+    return id;
+}
+
+void pump_snapshot_transfer_locked() {
+    // At most eight nonblocking datagrams are emitted per network pump. The
+    // paced schedule reserves relay capacity for live authority and repair
+    // traffic, while a delayed pump may catch up without sleeping in the
+    // simulation path.
+    constexpr unsigned packet_budget = 8U;
+    for (unsigned sent = 0U;
+         sent < packet_budget && snapshot_transfer.cursor.active();) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto due_chunk = snapshot_transfer.cursor.next(now);
+        if (!due_chunk) break;
+        const auto total = static_cast<std::uint32_t>(snapshot_transfer.state.size());
+        const std::uint32_t chunk_index = *due_chunk;
         const std::uint32_t offset =
             chunk_index * BTGA_NET_SNAPSHOT_CHUNK_DATA_LIMIT;
         const auto data_size = static_cast<std::uint16_t>(std::min<std::uint32_t>(
             BTGA_NET_SNAPSHOT_CHUNK_DATA_LIMIT, total - offset));
         std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
-        BtgaNetSnapshotChunk chunk{id, tick, canonical_digest, total, offset, data_size,
-                                   state.data() + offset};
+        BtgaNetSnapshotChunk chunk{
+            snapshot_transfer.id, snapshot_transfer.tick,
+            snapshot_transfer.canonical_digest, total, offset, data_size,
+            snapshot_transfer.state.data() + offset};
         const std::size_t payload_size = btga_net_encode_snapshot_chunk(
             packet.data() + BTGA_NET_HEADER_SIZE,
             packet.size() - BTGA_NET_HEADER_SIZE, &chunk);
-        if (payload_size == 0U) return false;
-        // A cold process cannot enter canonical simulation until every chunk
-        // arrives. Send three consecutive copies of each chunk: deterministic
-        // periodic loss cannot erase all three, and independent 10% loss has
-        // only a 0.1% chance of doing so. The largest current checkpoint is
-        // about 124 KiB; pacing below keeps its one-off recovery burst within
-        // the relay's configured token-bucket budget. Rotated full retries
-        // remain the fallback for arbitrary burst loss.
-        constexpr unsigned copies = 3U;
-        for (unsigned copy = 0U; copy < copies; ++copy) {
-            BtgaNetHeader header{};
-            header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
-            header.message_type = BTGA_NET_MSG_SNAPSHOT;
-            header.flags = static_cast<std::uint8_t>(BTGA_NET_FLAG_RELIABLE |
-                                                     BTGA_NET_FLAG_RELAYED);
-            header.session_id = session_id;
-            header.sequence = ++outgoing_sequence;
-            header.payload_size = static_cast<std::uint16_t>(payload_size);
-            header.peer_id = 0;
-            if (btga_net_encode_header(packet.data(), packet.size(), &header) == 0U ||
-                !multiplayer->send_gameplay(
-                    destination_slot,
-                    {packet.data(), BTGA_NET_HEADER_SIZE + payload_size})) return false;
-            // Stay below the relay's egress budget and avoid overflowing the
-            // client's UDP receive buffer while sending redundant chunks.
-            std::this_thread::sleep_for(std::chrono::milliseconds{7});
+        if (payload_size == 0U) {
+            snapshot_transfer = {};
+            return;
         }
+        BtgaNetHeader header{};
+        header.protocol_version = BTGA_NET_PROTOCOL_VERSION;
+        header.message_type = BTGA_NET_MSG_SNAPSHOT;
+        header.flags = static_cast<std::uint8_t>(BTGA_NET_FLAG_RELIABLE |
+                                                 BTGA_NET_FLAG_RELAYED);
+        header.session_id = session_id;
+        header.sequence = ++outgoing_sequence;
+        header.payload_size = static_cast<std::uint16_t>(payload_size);
+        header.peer_id = 0;
+        if (btga_net_encode_header(packet.data(), packet.size(), &header) == 0U ||
+            !multiplayer || !multiplayer->send_gameplay(
+                snapshot_transfer.destination_slot,
+                {packet.data(), BTGA_NET_HEADER_SIZE + payload_size})) {
+            // Retain the same chunk for the next pump when the nonblocking
+            // socket reports backpressure.
+            return;
+        }
+        ++sent;
+        snapshot_transfer.cursor.mark_sent();
+        if (!snapshot_transfer.cursor.active()) snapshot_transfer = {};
     }
-    return true;
 }
 
 // Must be called with authority_mutex held. Bootstrap transport remains live
 // while the recovery barrier has simulation paused; otherwise a cold client
 // could never receive the tick-zero state needed to begin journal replay.
 void send_pending_bootstrap_snapshot_locked() {
-    if (!initial_snapshot_available || snapshot_requests == 0U) return;
+    if (!initial_snapshot_available || snapshot_requests == 0U ||
+        snapshot_transfer.cursor.active()) return;
     std::uint8_t target = UINT8_MAX;
     for (std::uint8_t offset = 0; offset < btga::online_player_limit; ++offset) {
         const auto seat = static_cast<std::uint8_t>(
             (snapshot_cursor + offset) % btga::online_player_limit);
         const auto bit = static_cast<std::uint8_t>(1U << seat);
         if ((snapshot_requests & bit) != 0U &&
-            (bootstrap_pending & bit) != 0U) {
+            bootstrap_recovery.pending(seat)) {
             target = seat;
             break;
         }
@@ -473,9 +605,9 @@ void send_pending_bootstrap_snapshot_locked() {
     std::uint32_t checkpoint_tick = 0U;
     std::span<const std::uint8_t> checkpoint_state{initial_snapshot_state};
     std::uint64_t checkpoint_digest = 0U;
-    const std::uint32_t retransmit_id = bootstrap_expected_snapshot_id[target];
+    const std::uint32_t retransmit_id = bootstrap_recovery.snapshot_id(target);
     const bool retrying_initial_generation = retransmit_id != 0U &&
-        bootstrap_expected_ack[target] == 1U;
+        bootstrap_recovery.expected_ack(target) == 1U;
     if (!retrying_initial_generation) {
         if (const auto& latest = authority.latest_snapshot(); latest &&
             latest->next_tick <= authority.next_tick() &&
@@ -487,28 +619,29 @@ void send_pending_bootstrap_snapshot_locked() {
     }
     const std::uint32_t first_chunk = retransmit_id == 0U
         ? 0U : ++snapshot_retry_rotation[target];
-    if (encode_and_send_snapshot(
-            checkpoint_tick, static_cast<std::uint16_t>(target + 1U),
-            checkpoint_state, checkpoint_digest, retransmit_id, first_chunk)) {
+    const std::uint32_t queued_id = start_snapshot_transfer_locked(
+        checkpoint_tick, static_cast<std::uint16_t>(target + 1U),
+        checkpoint_state, checkpoint_digest, retransmit_id, first_chunk);
+    if (queued_id != 0U) {
         snapshot_last_sent[target] = std::chrono::steady_clock::now();
         // Keep the authority frozen until the replacement has installed this
         // checkpoint *and* replayed through the head at which the recovery
         // barrier began. Releasing at checkpoint_tick strands the client a
         // fixed number of ticks behind because both sides then run at 30 Hz.
-        bootstrap_expected_ack[target] = authority.next_tick() + 1U;
-        bootstrap_expected_snapshot_id[target] = retransmit_id != 0U
-            ? retransmit_id : snapshot_id;
+        bootstrap_recovery.snapshot_sent(
+            target, queued_id,
+            authority.next_tick());
         std::fprintf(stderr,
                      "BTGA_AUTHORITY bootstrap snapshot seat=%u id=%u tick=%u retry=%u\n",
                      static_cast<unsigned>(target),
-                     bootstrap_expected_snapshot_id[target], checkpoint_tick,
+                     bootstrap_recovery.snapshot_id(target), checkpoint_tick,
                      retransmit_id != 0U ? 1U : 0U);
         snapshot_requests &= static_cast<std::uint8_t>(~bit);
         bootstrap_requests &= static_cast<std::uint8_t>(~bit);
         snapshot_cursor = static_cast<std::uint8_t>(
             (target + 1U) % btga::online_player_limit);
     } else {
-        std::fputs("BTGA_AUTHORITY bootstrap snapshot failed\n", stderr);
+        std::fputs("BTGA_AUTHORITY bootstrap snapshot queue failed\n", stderr);
     }
 }
 
@@ -613,11 +746,12 @@ bool btga_dedicated_enable_public(std::string_view name, std::string& error) {
             }
         }
         // The public lobby advertises the service's four-seat capacity even
-        // when a test authority starts with fewer required participants.
-        // Master lobbies count the authority as current_players=1 until a seat
-        // mask arrives, so max_players=1 would reject the first real client.
+        // when a test authority starts with fewer required participants. A
+        // dedicated authority is not itself a player; its seat-mask heartbeat
+        // reports the exact number of authenticated gameplay seats.
         const btga::HostRegistration registration = client->host(
-            name, btga::online_player_limit);
+            name, btga::online_player_limit, "eastus",
+            BTGA_NET_CAP_RELAY_UDP | BTGA_NET_CAP_DEDICATED_AUTHORITY);
         const btga::PersistentAuthorityLease new_lease{
             registration.lobby.id, registration.host_secret,
             registration.session_id, registration.relay, 0U};
@@ -665,16 +799,35 @@ extern "C" int btga_dedicated_enabled()
 
 void btga_dedicated_network_poll()
 {
-    const std::lock_guard lock{authority_mutex};
+    // Network service is independent of the translated simulation. If a tick
+    // boundary briefly owns authority state, skip this 2 ms poll rather than
+    // ever making either thread wait on the other.
+    const std::unique_lock lock{authority_mutex, std::try_to_lock};
+    if (!lock.owns_lock()) return;
     if (!enabled || !multiplayer) return;
     if (++network_poll_count == 1U) {
         std::fputs("BTGA_AUTHORITY network pump active\n", stderr);
     }
+    if (!pending_authority_relay_token.empty()) {
+        const auto token = std::span{
+            reinterpret_cast<const std::uint8_t*>(
+                pending_authority_relay_token.data()),
+            pending_authority_relay_token.size()};
+        if (multiplayer->rebind_relay(true, session_id, token)) {
+            std::fputs("BTGA_AUTHORITY refreshing relay binding\n", stderr);
+        } else {
+            std::fputs("BTGA_AUTHORITY could not refresh relay binding\n", stderr);
+        }
+        pending_authority_relay_token.clear();
+    }
     if (multiplayer->state() == btga::OnlineState::RelayBinding) {
-        (void)multiplayer->poll_relay_binding();
+        if (multiplayer->poll_relay_binding()) {
+            std::fputs("BTGA_AUTHORITY relay binding restored\n", stderr);
+        }
         return;
     }
     if (multiplayer->state() != btga::OnlineState::Lobby) return;
+    pump_snapshot_transfer_locked();
     std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
     const auto now = std::chrono::steady_clock::now();
     for (;;) {
@@ -693,6 +846,26 @@ void btga_dedicated_network_poll()
         const bool accepted = subscription || authority.ingest_client_packet(
                 std::span<const std::uint8_t>{packet.data(), size},
                 session_id, source_slot);
+        bool current_input = false;
+        std::uint32_t input_horizon = 0U;
+        if (accepted && !subscription && source_slot >= 1U &&
+            source_slot <= btga::online_player_limit &&
+            incoming.message_type == BTGA_NET_MSG_INPUT) {
+            BtgaNetInputBatch batch{};
+            const auto payload = std::span<const std::uint8_t>{
+                packet.data() + BTGA_NET_HEADER_SIZE, incoming.payload_size};
+            if (btga_net_decode_input_batch(
+                    &batch, payload.data(), payload.size()) != 0U &&
+                batch.frame_count != 0U) {
+                const std::uint32_t last_tick = batch.first_tick +
+                    static_cast<std::uint32_t>(batch.frame_count - 1U);
+                current_input = last_tick >= batch.first_tick &&
+                    last_tick >= authority.next_tick();
+                input_horizon = last_tick;
+                latest_input_horizons[static_cast<std::size_t>(source_slot - 1U)] =
+                    last_tick;
+            }
+        }
         if (received_datagrams++ < 12U) {
             std::fprintf(stderr, "BTGA_AUTHORITY input source=%u accepted=%d bytes=%zu\n",
                          static_cast<unsigned>(source_slot), accepted ? 1 : 0, size);
@@ -701,21 +874,33 @@ void btga_dedicated_network_poll()
             const auto seat = static_cast<std::size_t>(source_slot - 1U);
             if (subscription) {
                 const auto bit = static_cast<std::uint8_t>(1U << seat);
-                constexpr auto retry_delay = std::chrono::seconds{3};
                 const bool first_subscription = (snapshot_subscribers & bit) == 0U;
                 const bool bootstrap_missing = incoming.acknowledgment == 0U;
                 const bool retry_due = snapshot_last_sent[seat] ==
                         std::chrono::steady_clock::time_point{} ||
-                    now - snapshot_last_sent[seat] >= retry_delay;
+                    now - snapshot_last_sent[seat] >= bootstrap_retry_delay;
                 if (bootstrap_missing) {
-                    if ((bootstrap_pending & bit) == 0U) {
-                        recovery_barrier.begin(
-                            static_cast<std::uint8_t>(seat), authority.next_tick());
-                        bootstrap_pending |= bit;
-                        bootstrap_expected_ack[seat] = 0U;
-                        bootstrap_expected_snapshot_id[seat] = 0U;
+                    const auto& latest = authority.latest_snapshot();
+                    const std::uint32_t latest_tick = latest &&
+                            btga::is_dedicated_checkpoint(latest->state)
+                        ? latest->next_tick : 0U;
+                    const auto request = bootstrap_recovery.request_cold(
+                        static_cast<std::uint8_t>(seat), latest_tick);
+                    if (request != btga::BootstrapRequest::continue_generation) {
+                        // The relay authenticated this bound endpoint and the
+                        // recovery state machine accepted a new connection
+                        // generation. Permit its packet sequence to restart
+                        // immediately, without waiting for the old endpoint's
+                        // liveness timeout. Repeated keepalives for the same
+                        // generation cannot reach this branch.
+                        (void)authority.begin_connection_epoch(
+                            static_cast<std::uint8_t>(seat));
                         snapshot_retry_rotation[seat] = 0U;
+                        snapshot_last_sent[seat] = {};
+                        recovery_watchdog.clear(
+                            static_cast<std::uint8_t>(seat));
                         bootstrap_requests |= bit;
+                        snapshot_requests |= bit;
                         replay_requests &= static_cast<std::uint8_t>(~bit);
                     }
                     if (first_subscription || retry_due) {
@@ -725,65 +910,63 @@ void btga_dedicated_network_poll()
                                          "BTGA_AUTHORITY bootstrap retry requested "
                                          "seat=%zu id=%u\n",
                                          seat,
-                                         bootstrap_expected_snapshot_id[seat]);
+                                         bootstrap_recovery.snapshot_id(
+                                             static_cast<std::uint8_t>(seat)));
                         }
                     }
-                } else if ((bootstrap_pending & bit) != 0U &&
-                           (bootstrap_expected_ack[seat] == 0U ||
-                            bootstrap_expected_snapshot_id[seat] == 0U ||
-                            incoming.acknowledgment_bits !=
-                                bootstrap_expected_snapshot_id[seat])) {
-                    // A resumed relay seat can still have a delayed PING from
-                    // the dead endpoint in flight. Until the replacement
-                    // process confirms tick zero, ignore its predecessor's
-                    // higher acknowledgment rather than sending a live
-                    // snapshot into an unbootstrapped runtime.
-                } else if ((bootstrap_pending & bit) != 0U &&
-                           incoming.acknowledgment <
-                               bootstrap_expected_ack[seat]) {
-                    // The replacement has installed the expected checkpoint
-                    // generation but has not reached the frozen authority
-                    // head. Feed its missing journal tail without releasing
-                    // the barrier; otherwise checkpoint acceptance and replay
-                    // completion form a circular dependency.
-                    replay_next_tick[seat] = incoming.acknowledgment - 1U;
-                    recovery_barrier.acknowledge(
-                        static_cast<std::uint8_t>(seat), replay_next_tick[seat],
-                        authority.next_tick());
-                    if (replay_next_tick[seat] < authority.next_tick()) {
-                        replay_requests |= bit;
-                    }
                 } else {
-                    bootstrap_pending &= static_cast<std::uint8_t>(~bit);
-                    bootstrap_expected_ack[seat] = 0U;
-                    bootstrap_expected_snapshot_id[seat] = 0U;
-                    bootstrap_requests &= static_cast<std::uint8_t>(~bit);
-                    snapshot_requests &= static_cast<std::uint8_t>(~bit);
-                    // acknowledgment is encoded as next_tick + 1 so zero can
-                    // unambiguously mean "no tick-zero bootstrap installed".
-                    replay_next_tick[seat] = incoming.acknowledgment - 1U;
-                    if (first_subscription &&
-                        replay_next_tick[seat] < authority.next_tick()) {
-                        recovery_barrier.begin(
-                            static_cast<std::uint8_t>(seat), authority.next_tick());
+                    const auto ack = bootstrap_recovery.acknowledge(
+                        static_cast<std::uint8_t>(seat), incoming.acknowledgment,
+                        incoming.acknowledgment_bits, authority.next_tick(),
+                        first_subscription);
+                    if (ack.kind != btga::BootstrapAckKind::ignore) {
+                        replay_next_tick[seat] = ack.next_tick;
                     }
-                    recovery_barrier.acknowledge(
-                        static_cast<std::uint8_t>(seat), replay_next_tick[seat],
-                        authority.next_tick());
-                    if (replay_next_tick[seat] >= authority.journal_base_tick()) {
-                        disk_replay_announced &= static_cast<std::uint8_t>(~bit);
-                    }
-                    if (replay_next_tick[seat] < authority.next_tick()) {
+                    if (ack.kind == btga::BootstrapAckKind::replay) {
                         replay_requests |= bit;
-                    } else {
+                        if ((bootstrap_recovery.mask() & bit) != 0U) {
+                            recovery_watchdog.observe(
+                                static_cast<std::uint8_t>(seat), ack.next_tick,
+                                now);
+                        }
+                    } else if (ack.kind == btga::BootstrapAckKind::ready) {
+                        bootstrap_requests &= static_cast<std::uint8_t>(~bit);
+                        snapshot_requests &= static_cast<std::uint8_t>(~bit);
                         replay_requests &= static_cast<std::uint8_t>(~bit);
+                        if (replay_next_tick[seat] >= authority.journal_base_tick()) {
+                            disk_replay_announced &= static_cast<std::uint8_t>(~bit);
+                        }
+                        recovery_watchdog.clear(
+                            static_cast<std::uint8_t>(seat));
+                    }
+                    // The same next-tick acknowledgment also repairs an
+                    // ordinary lost canonical frame after bootstrap. This is
+                    // a bounded journal replay only; it does not reopen the
+                    // global recovery barrier or alter checkpoint state.
+                    const std::uint32_t client_next_tick =
+                        incoming.acknowledgment - 1U;
+                    if (client_next_tick >= authority.journal_base_tick() &&
+                        static_cast<std::int32_t>(
+                            client_next_tick - authority.next_tick()) < 0) {
+                        replay_next_tick[seat] = client_next_tick;
+                        replay_requests |= bit;
                     }
                 }
                 snapshot_subscribers |= bit;
             }
-            client_last_seen[seat] = now;
-            client_seen[seat] = true;
-            (void)authority.set_connected(static_cast<std::uint8_t>(seat), true);
+            // Recovery traffic proves that the endpoint is reachable, but it
+            // does not prove that its gameplay producer is advancing. Track
+            // those independently so a wedged client cannot hold steering by
+            // sending only subscriptions or stale input batches.
+            client_liveness.observe_transport(
+                static_cast<std::uint8_t>(seat), now);
+            const bool input_advanced = current_input &&
+                client_liveness.observe_input(
+                    static_cast<std::uint8_t>(seat), input_horizon, now);
+            if (input_advanced) {
+                (void)authority.set_connected(
+                    static_cast<std::uint8_t>(seat), true);
+            }
         } else {
             BtgaNetHeader rejected{};
             const bool decoded = btga_net_decode_header(&rejected, packet.data(), size) != 0;
@@ -805,9 +988,12 @@ void btga_dedicated_network_poll()
     // tick to the fault profile indefinitely. Clients buffer out-of-order
     // frames and the missing tick is retried with the next acknowledgment.
     // Clients acknowledge about four times per second and consume 30 ticks per
-    // second. Eight frames per acknowledgment supplies 32 ticks per second,
-    // enough to converge while the recovery barrier is closed without
-    // overflowing either endpoint's nonblocking UDP socket.
+    // second. Eight distinct frames per acknowledgment supplies 32 ticks per
+    // second, enough to converge while the recovery barrier is closed without
+    // overflowing either endpoint's nonblocking UDP socket. The oldest missing
+    // frame is repeated once after the window so deterministic periodic loss
+    // cannot phase-lock that same packet forever; this remains nonblocking and
+    // does not duplicate the bulk of the replay.
     constexpr std::size_t replay_window = 8U;
     for (std::uint8_t seat = 0; seat < btga::online_player_limit; ++seat) {
         const auto bit = static_cast<std::uint8_t>(1U << seat);
@@ -824,32 +1010,18 @@ void btga_dedicated_network_poll()
         }
         const std::size_t count = authority.copy_journal_from(
             replay_next_tick[seat], frames);
+        if (std::getenv("BTGA_NET_TEST_FAULTS") != nullptr && count == 0U) {
+            std::fprintf(stderr,
+                         "BTGA_AUTHORITY live repair empty seat=%u next=%u head=%u base=%u\n",
+                         static_cast<unsigned>(seat), replay_next_tick[seat],
+                         authority.next_tick(), authority.journal_base_tick());
+        }
         for (std::size_t index = 0; index < count; ++index) {
-            bool any_copy_sent = false;
-            // A nonblocking UDP socket can briefly report WOULDBLOCK after a
-            // checkpoint burst. Retry local backpressure in place so the
-            // first missing journal tick from remaining at the front of every
-            // later replay window. Send three paced copies as well: periodic
-            // loss can otherwise erase the same indispensable first tick on
-            // every acknowledgment. The client deduplicates by canonical tick.
-            constexpr unsigned frame_copies = 3U;
-            constexpr unsigned local_send_attempts = 3U;
-            for (unsigned copy = 0U; copy < frame_copies; ++copy) {
-                bool copy_sent = false;
-                for (unsigned attempt = 0U;
-                     attempt < local_send_attempts && !copy_sent; ++attempt) {
-                    copy_sent = encode_and_send_frame(
-                        frames[index], static_cast<std::uint16_t>(seat + 1U));
-                    if (!copy_sent && attempt + 1U < local_send_attempts) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds{2});
-                    }
-                }
-                any_copy_sent = any_copy_sent || copy_sent;
-                if (copy + 1U < frame_copies) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds{1});
-                }
-            }
-            if (!any_copy_sent) {
+            // Replay is opportunistic and nonblocking. Missing frames remain
+            // behind the client's acknowledgment cursor and are offered again
+            // on its next subscription; live simulation never sleeps here.
+            if (!encode_and_send_frame(
+                    frames[index], static_cast<std::uint16_t>(seat + 1U))) {
                 if ((replay_send_failure_announced & bit) == 0U) {
                     std::fprintf(stderr,
                                  "BTGA_AUTHORITY journal replay backpressure "
@@ -857,31 +1029,68 @@ void btga_dedicated_network_poll()
                                  static_cast<unsigned>(seat), frames[index].tick);
                     replay_send_failure_announced |= bit;
                 }
+                // Keep offering the remainder of this bounded window. The
+                // client buffers later frames, while its unchanged next-tick
+                // acknowledgment causes the missing frame to be retried on
+                // the next keepalive. Stopping here can phase-lock one loss
+                // to the front of every repair window indefinitely.
                 continue;
-            }
-            if (index + 1U < count) {
-                std::this_thread::sleep_for(std::chrono::milliseconds{1});
             }
             if (index + 1U == count) {
                 replay_send_failure_announced &= static_cast<std::uint8_t>(~bit);
             }
         }
+        if (count != 0U) {
+            (void)encode_and_send_frame(
+                frames[0], static_cast<std::uint16_t>(seat + 1U));
+        }
     }
-    constexpr auto client_timeout = std::chrono::seconds{2};
     for (std::uint8_t seat = 0; seat < btga::online_player_limit; ++seat) {
-        if (client_seen[seat] && now - client_last_seen[seat] > client_timeout) {
-            client_seen[seat] = false;
-            const auto bit = static_cast<std::uint8_t>(1U << seat);
+        const auto bit = static_cast<std::uint8_t>(1U << seat);
+        if ((bootstrap_recovery.mask() & bit) != 0U &&
+            recovery_watchdog.stalled(seat, now, recovery_stall_timeout)) {
+            // A proven endpoint acquired the barrier but stopped consuming
+            // replay. Release healthy players after a bounded pause. Keep its
+            // replay cursor active so it may still catch up in the background;
+            // subsequent ordinary acknowledgments cannot reacquire a barrier.
+            std::fprintf(stderr,
+                         "BTGA_AUTHORITY recovery stalled seat=%u next=%u; "
+                         "releasing barrier\n",
+                         static_cast<unsigned>(seat),
+                         recovery_watchdog.next_tick(seat));
+            bootstrap_recovery.disconnect(seat);
+            bootstrap_requests &= static_cast<std::uint8_t>(~bit);
+            snapshot_requests &= static_cast<std::uint8_t>(~bit);
+            replay_requests |= bit;
+            recovery_watchdog.clear(seat);
+            (void)authority.set_connected(seat, false);
+        }
+
+        if (!client_liveness.seen(seat)) continue;
+
+        // Stop applying a vanished player's last held controls quickly, but
+        // retain its authenticated subscription and bootstrap generation long
+        // enough for the normal retransmit path to survive internet jitter.
+        // An accepted packet below marks it connected again immediately.
+        if (client_liveness.input_stale(seat, now, stale_input_timeout) &&
+            (authority.connected_mask() & bit) != 0U) {
+            (void)authority.set_connected(seat, false);
+            std::fprintf(stderr,
+                         "BTGA_AUTHORITY seat=%u controls neutralized; awaiting reconnect\n",
+                         static_cast<unsigned>(seat));
+        }
+
+        if (client_liveness.transport_stale(
+                seat, now, recovery_abandon_timeout)) {
+            client_liveness.clear(seat);
             snapshot_subscribers &= static_cast<std::uint8_t>(~bit);
             snapshot_requests &= static_cast<std::uint8_t>(~bit);
             bootstrap_requests &= static_cast<std::uint8_t>(~bit);
-            bootstrap_pending &= static_cast<std::uint8_t>(~bit);
-            bootstrap_expected_ack[seat] = 0U;
-            bootstrap_expected_snapshot_id[seat] = 0U;
             replay_requests &= static_cast<std::uint8_t>(~bit);
             disk_replay_announced &= static_cast<std::uint8_t>(~bit);
             replay_send_failure_announced &= static_cast<std::uint8_t>(~bit);
-            recovery_barrier.disconnect(seat);
+            bootstrap_recovery.disconnect(seat);
+            recovery_watchdog.clear(seat);
             (void)authority.set_connected(seat, false);
         }
     }
@@ -904,9 +1113,6 @@ extern "C" void btga_dedicated_tick_begin(
     std::uint8_t* rdram, recomp_context*)
 {
     if (recovery_replay_running || recovery_pending) return;
-    // During retail initialization this hook may be the only callback that is
-    // running regularly. Keep relay admission and readiness moving here too.
-    btga_dedicated_network_poll();
     {
         const std::lock_guard lock{authority_mutex};
         if (!enabled || gameplay_tick_active) return;
@@ -925,9 +1131,10 @@ extern "C" void btga_dedicated_tick_begin(
         }
         return;
     }
+    inactive_tick_probes = 0U;
     std::uint32_t wait_iterations = 0;
     for (;;) {
-        btga_dedicated_network_poll();
+        authority_loop_sequence.fetch_add(1U, std::memory_order_release);
         {
             const std::lock_guard lock{authority_mutex};
             if (!enabled) return;
@@ -990,6 +1197,68 @@ extern "C" void btga_dedicated_match_bootstrap(
     MEM_W(0, random_seed) = static_cast<std::int32_t>(UINT32_C(0x4A6F7921));
     std::fprintf(stderr, "BTGA_AUTHORITY configured native %u-player match\n",
                  configured_players);
+    std::fflush(stderr);
+}
+
+extern "C" void btga_dedicated_test_force_match_end(
+    std::uint8_t* rdram, std::uint32_t next_tick) {
+    static bool forced = false;
+    const char* enabled_flag = std::getenv("BTGA_NET_TEST_FORCE_MATCH_TRANSITION");
+    if (forced || enabled_flag == nullptr ||
+        std::string_view{enabled_flag} != "1" || next_tick != 901U) return;
+
+    constexpr gpr game_mode = static_cast<gpr>(
+        static_cast<std::int32_t>(0x802194A0U));
+    constexpr gpr match_limit = static_cast<gpr>(
+        static_cast<std::int32_t>(0x802194B0U));
+    constexpr gpr frame_counter = static_cast<gpr>(
+        static_cast<std::int32_t>(0x8021945CU));
+    constexpr gpr unit_zero = static_cast<gpr>(
+        static_cast<std::int32_t>(0x80235F00U));
+    const auto mode = static_cast<std::uint32_t>(MEM_W(0, game_mode));
+    const auto limit = static_cast<std::uint32_t>(MEM_W(0, match_limit));
+    const gpr info = static_cast<gpr>(MEM_W(0x10, unit_zero));
+    if (info == 0) return;
+
+    switch (mode) {
+    case 5U:
+        MEM_W(0, frame_counter) = static_cast<std::int32_t>(limit + 1U);
+        break;
+    case 0U:
+    case 6U:
+        MEM_H(0, info) = static_cast<std::uint16_t>(limit);
+        break;
+    case 3U:
+        MEM_W(8, info) = static_cast<std::int32_t>(
+            std::bit_cast<std::uint32_t>(static_cast<float>(limit)));
+        break;
+    case 4U:
+        MEM_W(0x74, unit_zero) = 1;
+        break;
+    default:
+        MEM_H(4, info) = static_cast<std::uint16_t>(limit);
+        break;
+    }
+    forced = true;
+    std::fprintf(stderr,
+                 "BTGA_AUTHORITY test match end forced tick=%u mode=%u limit=%u\n",
+                 next_tick - 1U, mode, limit);
+    std::fflush(stderr);
+}
+
+extern "C" void btga_dedicated_advance_results(
+    std::uint8_t* rdram, recomp_context* context) {
+    constexpr gpr current_mode = static_cast<gpr>(
+        static_cast<std::int32_t>(0x802195CCU));
+    constexpr gpr mode_frames = static_cast<gpr>(
+        static_cast<std::int32_t>(0x802195C4U));
+    if (MEM_W(0, current_mode) != 6 || MEM_W(0, mode_frames) != 120) return;
+    // A rendered local match waits for the user on the results screen. A
+    // dedicated session has no shared menu owner, so invoke the exact retail
+    // results-continue callback after a deterministic two-second display.
+    func_800CF0CC(rdram, context);
+    if (enabled) transition_checkpoint_pending = true;
+    std::fputs("BTGA_AUTHORITY dedicated results continued\n", stderr);
     std::fflush(stderr);
 }
 
@@ -1097,11 +1366,12 @@ extern "C" void btga_dedicated_run_loop(
     constexpr auto tick_period = std::chrono::microseconds{33333};
     auto deadline = std::chrono::steady_clock::now();
     bool announced_ready = false;
+    std::int32_t observed_inner_mode = MEM_W(0, static_cast<gpr>(
+        static_cast<std::int32_t>(0x802195CCU)));
     // Never relabel a recovered live state as tick zero. Fresh clients are
     // bootstrapped from the persisted portable checkpoint and journal tail.
     bool initial_snapshot_sent = restored_persistent_session;
     for (;;) {
-        btga_dedicated_network_poll();
         bool wait_for_players = false;
         bool wait_for_recovery = false;
         std::uint8_t recovery_mask = 0U;
@@ -1120,26 +1390,26 @@ extern "C" void btga_dedicated_run_loop(
                 std::fprintf(stderr, "BTGA_AUTHORITY all %u seats ready\n",
                              configured_players);
                 announced_ready = true;
+                match_started = true;
             }
-            if (!wait_for_players && recovery_barrier.paused()) {
+            const bool initial_bootstrap_pending = initial_snapshot_sent &&
+                (bootstrap_recovery.pending_mask() & required) != 0U;
+            if (!wait_for_players &&
+                (initial_bootstrap_pending || bootstrap_recovery.paused())) {
                 wait_for_recovery = true;
-                recovery_mask = recovery_barrier.mask();
+                recovery_mask = static_cast<std::uint8_t>(
+                    bootstrap_recovery.mask() |
+                    (initial_bootstrap_pending
+                        ? bootstrap_recovery.pending_mask() & required : 0U));
                 recovery_head = authority.next_tick();
                 if (!recovery_pause_announced) {
                     std::fprintf(stderr,
-                                 "BTGA_AUTHORITY recovery barrier mask=%02x head=%u\n",
+                                 "BTGA_AUTHORITY recovery wait mask=%02x head=%u\n",
                                  recovery_mask, recovery_head);
                     std::fflush(stderr);
                     recovery_pause_announced = true;
                 }
-                const auto now = std::chrono::steady_clock::now();
-                if (now >= next_recovery_status) {
-                    if (!send_recovery_status_locked()) {
-                        std::fputs("BTGA_AUTHORITY recovery status send failed\n", stderr);
-                    }
-                    next_recovery_status = now + std::chrono::milliseconds{250};
-                }
-            } else if (recovery_pause_announced && !recovery_barrier.paused()) {
+            } else if (recovery_pause_announced && !bootstrap_recovery.paused()) {
                 std::fprintf(stderr,
                              "BTGA_AUTHORITY recovery complete head=%u\n",
                              authority.next_tick());
@@ -1149,6 +1419,17 @@ extern "C" void btga_dedicated_run_loop(
                 }
                 recovery_pause_announced = false;
             }
+            // Canonical gameplay frames stop while retail advances match and
+            // level-transition states. Keep the existing PING/status channel
+            // alive throughout that interval so clients distinguish a healthy
+            // authority at a stationary gameplay head from a lost server.
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= next_recovery_status) {
+                if (!send_recovery_status_locked()) {
+                    std::fputs("BTGA_AUTHORITY status heartbeat send failed\n", stderr);
+                }
+                next_recovery_status = now + std::chrono::milliseconds{250};
+            }
         }
         if (wait_for_players || wait_for_recovery) {
             deadline = std::chrono::steady_clock::now();
@@ -1157,6 +1438,17 @@ extern "C" void btga_dedicated_run_loop(
         }
         btga_advance_retail_mode_counters(rdram);
         func_80079FF0(rdram, context);
+        btga_dedicated_test_force_match_end(rdram, authority.next_tick());
+        const auto current_inner_mode = MEM_W(0, static_cast<gpr>(
+            static_cast<std::int32_t>(0x802195CCU)));
+        if (current_inner_mode != observed_inner_mode) {
+            std::fprintf(stderr,
+                         "BTGA_AUTHORITY mode transition %d->%d tick=%u\n",
+                         observed_inner_mode, current_inner_mode,
+                         authority.next_tick());
+            std::fflush(stderr);
+            observed_inner_mode = current_inner_mode;
+        }
         if (!initial_snapshot_sent) {
             const std::lock_guard lock{authority_mutex};
             std::vector<std::uint8_t> state;
@@ -1169,25 +1461,26 @@ extern "C" void btga_dedicated_run_loop(
             for (std::uint8_t seat = 0; seat < btga::online_player_limit; ++seat) {
                 const auto bit = static_cast<std::uint8_t>(1U << seat);
                 if ((snapshot_subscribers & bit) != 0U) {
-                    if (!encode_and_send_snapshot(
-                            0U, static_cast<std::uint16_t>(seat + 1U), state)) {
-                        std::fputs("BTGA_AUTHORITY initial snapshot failed\n", stderr);
-                        continue;
-                    }
-                    snapshot_last_sent[seat] = std::chrono::steady_clock::now();
-                    bootstrap_expected_ack[seat] = 1U;
-                    bootstrap_expected_snapshot_id[seat] = snapshot_id;
-                    snapshot_requests &= static_cast<std::uint8_t>(~bit);
-                    bootstrap_requests &= static_cast<std::uint8_t>(~bit);
+                    snapshot_requests |= bit;
+                    bootstrap_requests |= bit;
                 }
             }
             initial_snapshot_sent = true;
-            std::fputs("BTGA_AUTHORITY initial snapshot published\n", stderr);
+            std::fputs("BTGA_AUTHORITY initial snapshot queued\n", stderr);
         }
         func_8009C524(rdram, context);
+        btga_dedicated_advance_results(rdram, context);
         deadline += tick_period;
         std::this_thread::sleep_until(deadline);
         const auto now = std::chrono::steady_clock::now();
+        if (now > deadline) {
+            const auto lag = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    now - deadline).count());
+            maximum_tick_lag_microseconds =
+                (std::max)(maximum_tick_lag_microseconds, lag);
+            if (now - deadline > tick_period) ++simulation_stalls;
+        }
         if (now > deadline + tick_period * 4) deadline = now;
     }
 }
@@ -1206,7 +1499,7 @@ extern "C" void btga_dedicated_tick_end(
         return;
     }
     std::vector<std::uint8_t> checkpoint_state;
-    if ((active_tick + 1U) % 30U == 0U) {
+    if ((active_tick + 1U) % 30U == 0U || transition_checkpoint_pending) {
         if (!btga::capture_dedicated_checkpoint(
                 {rdram, rdram_size}, checkpoint_state)) {
             std::fputs("Dedicated authority could not capture recovery checkpoint\n", stderr);
@@ -1221,6 +1514,17 @@ extern "C" void btga_dedicated_tick_end(
         std::fputs("Dedicated authority rejected translated tick completion\n", stderr);
         return;
     }
+    if (transition_checkpoint_pending) {
+        if (!authority.checkpoint_now(checkpoint_state)) {
+            std::fputs("BTGA_AUTHORITY transition checkpoint failed\n", stderr);
+            std::abort();
+        }
+        transition_checkpoint_pending = false;
+        std::fprintf(stderr,
+                     "BTGA_AUTHORITY transition checkpoint tick=%u\n",
+                     authority.next_tick());
+        std::fflush(stderr);
+    }
     if (!authority.persistent_storage_healthy()) {
         std::fputs("BTGA_AUTHORITY persistent checkpoint storage failed\n", stderr);
         std::abort();
@@ -1231,10 +1535,15 @@ extern "C" void btga_dedicated_tick_end(
     }
     if (frame->tick % 30U == 0U) {
         std::fprintf(stderr,
-                     "BTGA_AUTHORITY tick=%u digest=%016llx connected=%02x\n",
+                     "BTGA_AUTHORITY tick=%u digest=%016llx connected=%02x "
+                     "stalls=%llu max_lag_us=%llu input_horizons=%u,%u,%u,%u\n",
                      frame->tick,
                      static_cast<unsigned long long>(frame->state_digest),
-                     authority.connected_mask());
+                     authority.connected_mask(),
+                     static_cast<unsigned long long>(simulation_stalls),
+                     static_cast<unsigned long long>(maximum_tick_lag_microseconds),
+                     latest_input_horizons[0], latest_input_horizons[1],
+                     latest_input_horizons[2], latest_input_horizons[3]);
         std::fflush(stderr);
     }
 }

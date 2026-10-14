@@ -20,6 +20,7 @@
 #include "funcs.h"
 #include "librecomp/game.hpp"
 #include "btga/rom.hpp"
+#include "btga/dedicated_resume.hpp"
 #include "btga/pc_settings.hpp"
 #include "btga/master_client.hpp"
 #include "btga/input_sync.hpp"
@@ -55,50 +56,6 @@ namespace {
 constexpr std::u8string_view game_id = u8"battletanx-ga.n64.us.1.0";
 constexpr int max_controllers = 4;
 
-std::filesystem::path dedicated_resume_path() {
-    const char* value = std::getenv("BTGA_DEDICATED_RESUME_FILE");
-    return value == nullptr || *value == '\0'
-        ? std::filesystem::path{} : std::filesystem::u8path(value);
-}
-
-std::string load_dedicated_resume_token(const std::filesystem::path& path) {
-    if (path.empty()) return {};
-    std::ifstream input{path, std::ios::binary};
-    if (!input) return {};
-    std::string token((std::istreambuf_iterator<char>{input}),
-                      std::istreambuf_iterator<char>{});
-    while (!token.empty() && (token.back() == '\r' || token.back() == '\n')) {
-        token.pop_back();
-    }
-    if (token.size() > BTGA_NET_MAX_JOIN_TOKEN_SIZE) {
-        throw std::runtime_error{"Dedicated resume credential is oversized"};
-    }
-    return token;
-}
-
-void save_dedicated_resume_token(const std::filesystem::path& path,
-                                 std::string_view token) {
-    if (path.empty() || token.empty()) return;
-    std::error_code error;
-    if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), error);
-    if (error) throw std::runtime_error{"Could not create resume credential directory"};
-    const std::filesystem::path temporary = path.string() + ".tmp";
-    {
-        std::ofstream output{temporary, std::ios::binary | std::ios::trunc};
-        if (!output || !output.write(token.data(), static_cast<std::streamsize>(token.size())) ||
-            !output.put('\n')) {
-            throw std::runtime_error{"Could not write resume credential"};
-        }
-    }
-    std::filesystem::rename(temporary, path, error);
-    if (error) {
-        std::filesystem::remove(path, error);
-        error.clear();
-        std::filesystem::rename(temporary, path, error);
-    }
-    if (error) throw std::runtime_error{"Could not install resume credential"};
-}
-
 std::atomic_uint32_t created_threads{0};
 std::atomic_uint32_t display_lists{0};
 std::atomic_uint32_t screen_updates{0};
@@ -106,13 +63,19 @@ std::atomic_uint32_t vi_events{0};
 std::atomic_uint32_t rsp_requests{0};
 std::array<std::atomic<float>, max_controllers> turret_stick_x{};
 std::atomic_bool online_input_presampled{false};
+std::atomic_bool dedicated_input_presampling{false};
 std::atomic_bool mouse_turret_aiming{false};
 btga::PcSettings pc_settings = btga::PcSettings::defaults();
 std::mutex input_settings_mutex;
 bool preboot_online_requested = false;
 bool automated_online = false;
 bool automated_online_host = false;
+bool dedicated_test_scripted_inputs = false;
+std::uint64_t dedicated_test_input_poll = 0U;
 bool boot_requested = false;
+// Headless builds do not compile the RT64/SDL block, but the dedicated input
+// bridge still needs to distinguish them from an interactive renderer.
+bool interactive = false;
 std::atomic_uint32_t automated_poll_counter{0};
 std::atomic_uint32_t automated_input_tick{0};
 #ifdef BTGA_HAS_RT64
@@ -121,7 +84,6 @@ SDL_AudioDeviceID audio_device = 0;
 std::mutex audio_mutex;
 std::uint32_t audio_frequency = 44100;
 std::array<SDL_GameController*, max_controllers> gamepads{};
-bool interactive = false;
 
 struct KeyboardScancodes {
     SDL_Scancode stick_up = SDL_SCANCODE_W;
@@ -405,12 +367,17 @@ void poll_input() {
 #ifdef BTGA_HAS_RT64
     online_slot = btga::renderer::online_local_player_slot();
 #endif
-    if (online_slot >= 0 && online_slot < 2) {
+    const int dedicated_slot = btga_dedicated_client_local_seat();
+    const int sample_slot = dedicated_slot >= 0 ? dedicated_slot : online_slot;
+    if (sample_slot >= 0 && sample_slot < max_controllers) {
         std::uint16_t buttons = 0;
         float x = 0.0F;
         float y = 0.0F;
         online_input_presampled.store(false, std::memory_order_relaxed);
-        (void)get_input(online_slot, &buttons, &x, &y);
+        dedicated_input_presampling.store(
+            dedicated_slot >= 0, std::memory_order_release);
+        (void)get_input(sample_slot, &buttons, &x, &y);
+        dedicated_input_presampling.store(false, std::memory_order_release);
         online_input_presampled.store(true, std::memory_order_release);
     }
 #endif
@@ -419,7 +386,8 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
     if (controller < 0 || controller >= max_controllers) {
         return false;
     }
-    if (btga_dedicated_controller_input(controller, *buttons, *x, *y)) {
+    if (!dedicated_input_presampling.load(std::memory_order_acquire) &&
+        btga_dedicated_controller_input(controller, *buttons, *x, *y)) {
         return true;
     }
     const int dedicated_local_seat = btga_dedicated_client_local_seat();
@@ -428,6 +396,25 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
         // controller port, including the assigned seat, must consume the
         // authority's canonical frame; falling through to the host-input path
         // made seat 0 simulate a different tick from the authority.
+        // Neutral is nevertheless a real sample for the assigned seat, taken
+        // at this controller boundary. Submit it once for the target tick so
+        // headless clients participate without a keepalive inventing future
+        // neutral commands.
+        if (controller == dedicated_local_seat) {
+            std::uint16_t sampled_buttons = 0U;
+            float sampled_x = 0.0F;
+            float sampled_y = 0.0F;
+            if (dedicated_test_scripted_inputs) {
+                const std::uint64_t sample = dedicated_test_input_poll++;
+                const auto phase = static_cast<unsigned>(
+                    (sample / 90U + static_cast<std::uint64_t>(dedicated_local_seat)) % 4U);
+                sampled_x = phase < 2U ? 0.75F : -0.75F;
+                sampled_y = (phase & 1U) == 0U ? 1.0F : 0.55F;
+                if (sample % 20U < 2U) sampled_buttons = 0x2000U;
+            }
+            btga_dedicated_client_submit_local(
+                sampled_buttons, sampled_x, sampled_y);
+        }
         return btga_dedicated_client_controller_input(
             controller, *buttons, *x, *y);
     }
@@ -447,7 +434,9 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
             btga::renderer::online_synchronized_input(controller, *buttons, *x, *y);
             return controller == 0 || controller == 1;
         }
-        const int input_controller = online_slot == controller ? 0 : controller;
+        const int input_controller =
+            dedicated_local_seat == controller || online_slot == controller
+                ? 0 : controller;
         if (btga::renderer::settings_overlay_visible()) {
             if (input_controller == 0) {
                 SDL_SetRelativeMouseMode(SDL_FALSE);
@@ -575,7 +564,38 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
     return true;
 }
 
+// Headless translated clients have no SDL device thread. Take one genuine
+// test-controller sample at each canonical tick boundary instead of relying on
+// the retail controller-poll path (which consumes authority inputs) or
+// fabricating commands for future ticks in a keepalive.
+extern "C" void btga_sample_headless_dedicated_input_for_tick() {
+    if (interactive) return;
+    const int seat = btga_dedicated_client_local_seat();
+    if (seat < 0) return;
+
+    std::uint16_t buttons = 0U;
+    float x = 0.0F;
+    float y = 0.0F;
+    if (dedicated_test_scripted_inputs) {
+        const std::uint64_t sample = dedicated_test_input_poll++;
+        const auto phase = static_cast<unsigned>(
+            (sample / 90U + static_cast<std::uint64_t>(seat)) % 4U);
+        x = phase < 2U ? 0.75F : -0.75F;
+        y = (phase & 1U) == 0U ? 1.0F : 0.55F;
+        if (sample % 20U < 2U) buttons = 0x2000U;
+    }
+    btga_dedicated_client_submit_local(buttons, x, y);
+}
+
 extern "C" bool btga_extended_visibility_enabled() {
+    // Retail reuses its draw-distance global as an AI acquisition range.
+    // The current mod extends visibility by overriding that guest global, so
+    // allowing only one dedicated process to enable it changes canonical
+    // target selection and projectile creation. Until the render hooks are
+    // decoupled from the gameplay value, keep this presentation option out of
+    // authoritative and replicated simulation just like independent turret
+    // control below.
+    if (btga_dedicated_enabled() || btga_dedicated_client_enabled()) return false;
     const std::lock_guard lock(input_settings_mutex);
     return pc_settings.mod_extended_visibility;
 }
@@ -771,7 +791,9 @@ void drive_headless_runtime(void*) {
                   << " vi=" << vi_events.load()
                   << " display_lists=" << display_lists.load()
                   << " screens=" << screen_updates.load()
-                  << " rsp_requests=" << rsp_requests.load() << '\n';
+                  << " rsp_requests=" << rsp_requests.load()
+                  << " dedicated_tick=" << btga_dedicated_client_next_tick()
+                  << '\n';
         if (!headless_host_lobby_id.empty() && !headless_host_secret.empty()) {
             try {
                 auto http = btga::make_platform_http_client(btga::master_service_url());
@@ -843,16 +865,26 @@ void patch_screen_edge_scissors(std::uint8_t*, recomp_context*) {
         patched[fix.offset + 2] = static_cast<std::uint8_t>(fix.replacement >> 8);
         patched[fix.offset + 3] = static_cast<std::uint8_t>(fix.replacement);
     }
-    if (const char* role = std::getenv("BTGA_ONLINE_LOCAL_VIEW"); role != nullptr) {
+    std::optional<btga::OnlineLocalView> local_view;
+    const int dedicated_seat = btga_dedicated_client_local_seat();
+    if (dedicated_seat >= 0 && dedicated_seat < 4) {
+        local_view = static_cast<btga::OnlineLocalView>(dedicated_seat);
+    } else if (const char* role = std::getenv("BTGA_ONLINE_LOCAL_VIEW");
+               role != nullptr) {
         const std::string_view value{role};
-        const std::optional<btga::OnlineLocalView> local_view =
-            value == "host" ? std::optional{btga::OnlineLocalView::HostPlayerOne}
-            : value == "client" ? std::optional{btga::OnlineLocalView::ClientPlayerTwo}
-                                : std::nullopt;
-        if (local_view && !btga::patch_online_local_view(patched, *local_view)) {
-            std::cerr << "Verified ROM did not contain the expected online viewport templates\n";
-            std::abort();
-        }
+        local_view = value == "host" || value == "player1"
+            ? std::optional{btga::OnlineLocalView::PlayerOne}
+            : value == "client" || value == "player2"
+            ? std::optional{btga::OnlineLocalView::PlayerTwo}
+            : value == "player3"
+            ? std::optional{btga::OnlineLocalView::PlayerThree}
+            : value == "player4"
+            ? std::optional{btga::OnlineLocalView::PlayerFour}
+            : std::nullopt;
+    }
+    if (local_view && !btga::patch_online_local_view(patched, *local_view)) {
+        std::cerr << "Verified ROM did not contain the expected online viewport templates\n";
+        std::abort();
     }
     recomp::set_rom_contents(std::move(patched));
 }
@@ -913,8 +945,18 @@ int runtime_main(int argc, char** argv) {
         argc == 5 && std::string_view{argv[1]} == "--dedicated-headless";
     const bool dedicated_headless_direct =
         argc == 4 && std::string_view{argv[1]} == "--dedicated-headless-direct";
+    const bool dedicated_client_direct =
+        argc == 3 && std::string_view{argv[1]} == "--dedicated-client-direct";
     automated_online = headless_online;
     automated_online_host = headless_online_host;
+    dedicated_test_scripted_inputs = false;
+    if (const char* scripted = std::getenv("BTGA_NET_TEST_SCRIPTED_INPUT");
+        scripted != nullptr && std::string_view{scripted} == "1") {
+        const char* faults = std::getenv("BTGA_NET_TEST_FAULTS");
+        dedicated_test_scripted_inputs = faults != nullptr &&
+            std::string_view{faults} == "1";
+    }
+    dedicated_test_input_poll = 0U;
     const bool online_host = headless_online_host ||
         (argc == 3 && std::string_view{argv[1]} == "--online-host");
     const bool online_join = headless_online_join ||
@@ -925,7 +967,8 @@ int runtime_main(int argc, char** argv) {
                 (argc == 3 && std::string_view{argv[1]} == "--boot");
     bool timed_boot = (argc == 4 && std::string_view{argv[1]} == "--boot-seconds") ||
                       dedicated_headless || dedicated_headless_direct;
-    bool play = dedicated_join || (!headless_online && (online_host || online_join)) ||
+    bool play = dedicated_join || dedicated_client_direct ||
+                (!headless_online && (online_host || online_join)) ||
                 online_resume || picked_rom.has_value() ||
                 (argc == 3 && std::string_view{argv[1]} == "--play") ||
                 (argc == 2 && std::string_view{argv[1]}.starts_with("-") == false);
@@ -938,6 +981,7 @@ int runtime_main(int argc, char** argv) {
                      " | --online-headless-join SECONDS LOBBY_ID ROM"
                      " | --dedicated-server ROM | --dedicated-server-public ROM"
                      " | --dedicated-join LOBBY_ID ROM"
+                     " | --dedicated-client-direct ROM"
                      " | --dedicated-headless SECONDS LOBBY_ID ROM"
                      " | --dedicated-headless-direct SECONDS ROM]\n";
         return 2;
@@ -967,6 +1011,7 @@ int runtime_main(int argc, char** argv) {
         else if (online_resume) rom_path = argv[2];
         else if (dedicated_headless) rom_path = argv[4];
         else if (dedicated_headless_direct) rom_path = argv[3];
+        else if (dedicated_client_direct) rom_path = argv[2];
         else if (timed_boot) rom_path = argv[3];
         else if (argc == 2) rom_path = argv[1];
         else rom_path = argv[2];
@@ -996,7 +1041,7 @@ int runtime_main(int argc, char** argv) {
             throw std::runtime_error{"Could not start dedicated authority: " + error};
         }
     }
-    if (dedicated_headless_direct) {
+    if (dedicated_headless_direct || dedicated_client_direct) {
         const auto environment = [](const char* name) -> std::string {
             const char* value = std::getenv(name);
             return value == nullptr ? std::string{} : std::string{value};
@@ -1005,6 +1050,17 @@ int runtime_main(int argc, char** argv) {
         const std::string relay_host = environment("BTGA_DEDICATED_RELAY_HOST");
         const std::string relay_port_text = environment("BTGA_DEDICATED_RELAY_PORT");
         const std::string token = environment("BTGA_DEDICATED_TOKEN");
+        const std::string lobby_id = environment("BTGA_DEDICATED_LOBBY");
+        for (const char* name : {
+                 "BTGA_DEDICATED_SESSION", "BTGA_DEDICATED_RELAY_HOST",
+                 "BTGA_DEDICATED_RELAY_PORT", "BTGA_DEDICATED_TOKEN",
+                 "BTGA_DEDICATED_LOBBY"}) {
+#if defined(_WIN32)
+            SetEnvironmentVariableA(name, nullptr);
+#else
+            unsetenv(name);
+#endif
+        }
         std::uint64_t session = 0U;
         unsigned int relay_port = 0U;
         const auto [session_end, session_error] = std::from_chars(
@@ -1027,20 +1083,34 @@ int runtime_main(int argc, char** argv) {
                 token, error)) {
             throw std::runtime_error{"Could not join direct dedicated authority: " + error};
         }
+        if (!lobby_id.empty()) {
+            btga_dedicated_client_configure_reconnect(
+                lobby_id, btga::dedicated_resume_path(lobby_id));
+        }
     } else if (dedicated_join || dedicated_headless) {
         auto http = btga::make_platform_http_client(btga::master_service_url());
         btga::MasterClient master{*http};
         const char* lobby_id = dedicated_headless ? argv[3] : argv[2];
-        const std::filesystem::path resume_path = dedicated_resume_path();
-        const std::string resume_token = load_dedicated_resume_token(resume_path);
+        const std::filesystem::path resume_path =
+            btga::dedicated_resume_path(lobby_id);
+        const std::string resume_token =
+            btga::load_dedicated_resume_token(resume_path);
         const btga::JoinRegistration registration = master.join(lobby_id, resume_token);
-        save_dedicated_resume_token(resume_path, registration.resume_token);
+        btga::save_dedicated_resume_token(resume_path, registration.resume_token);
         std::string error;
         if (!btga_dedicated_client_enable(registration.session_id,
                                           registration.relay,
                                           registration.join_token, error)) {
             throw std::runtime_error{"Could not join dedicated authority: " + error};
         }
+        btga_dedicated_client_configure_reconnect(lobby_id, resume_path);
+    }
+    if (dedicated_headless || dedicated_headless_direct) {
+        // The headless runtime has no device callback before its first
+        // canonical frame. Seed its first genuine neutral sample so the
+        // authority can cross the initial jitter deadline; subsequent samples
+        // are taken at the translated controller boundary above.
+        btga_dedicated_client_submit_local(0U, 0.0F, 0.0F);
     }
 
     std::cout << "Registered all translated game code at entrypoint 0x"
@@ -1148,7 +1218,7 @@ int runtime_main(int argc, char** argv) {
         if (!window) { std::cerr << "Window creation failed: " << SDL_GetError() << '\n'; return 1; }
         if (online_host) SDL_SetWindowTitle(window, "BattleTanx GA - HOST (waiting to cold boot)");
         if (online_join) SDL_SetWindowTitle(window, "BattleTanx GA - CLIENT (waiting to cold boot)");
-        if (dedicated_join) {
+        if (dedicated_join || dedicated_client_direct) {
             const std::string title = "BattleTanx GA - ONLINE (Seat " +
                 std::to_string(btga_dedicated_client_local_seat() + 1) + ")";
             SDL_SetWindowTitle(window, title.c_str());

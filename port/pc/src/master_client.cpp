@@ -20,6 +20,18 @@ using Json = nlohmann::json;
 
 constexpr std::size_t max_response_size = 64 * 1024;
 
+bool valid_lobby_id(std::string_view value) {
+    if (value.empty() || value.size() > 64U) return false;
+    for (const unsigned char character : value) {
+        if ((character >= 'A' && character <= 'Z') ||
+            (character >= 'a' && character <= 'z') ||
+            (character >= '0' && character <= '9') ||
+            character == '-' || character == '_') continue;
+        return false;
+    }
+    return true;
+}
+
 std::optional<std::string> environment_value(const char* name) {
 #ifdef _WIN32
     char* value = nullptr;
@@ -99,6 +111,9 @@ std::uint16_t bounded_u16(const Json& object, const char* key, std::uint16_t min
 OnlineLobby decode_lobby(const Json& source) {
     OnlineLobby lobby;
     lobby.id = bounded_string(source, "id", 64);
+    if (!valid_lobby_id(lobby.id)) {
+        throw std::runtime_error("master response has invalid lobby id");
+    }
     lobby.name = bounded_string(source, "name", 48);
     lobby.build = bounded_string(source, "build", 64);
     lobby.platform = bounded_string(source, "platform", 16);
@@ -107,8 +122,6 @@ OnlineLobby decode_lobby(const Json& source) {
     if (lobby.state != "lobby" && lobby.state != "playing") {
         throw std::runtime_error("master response has invalid state");
     }
-    lobby.max_players = bounded_u16(source, "max_players", 1, 16);
-    lobby.current_players = bounded_u16(source, "current_players", 1, lobby.max_players);
     if (!source.contains("capabilities") || !source["capabilities"].is_number_unsigned()) {
         throw std::runtime_error("master response is missing capabilities");
     }
@@ -117,6 +130,11 @@ OnlineLobby decode_lobby(const Json& source) {
         throw std::runtime_error("master response has invalid capabilities");
     }
     lobby.capabilities = static_cast<std::uint32_t>(capabilities);
+    lobby.max_players = bounded_u16(source, "max_players", 1, 16);
+    const std::uint16_t minimum_players =
+        (lobby.capabilities & BTGA_NET_CAP_DEDICATED_AUTHORITY) != 0U ? 0U : 1U;
+    lobby.current_players = bounded_u16(
+        source, "current_players", minimum_players, lobby.max_players);
     return lobby;
 }
 
@@ -198,11 +216,16 @@ std::vector<OnlineLobby> MasterClient::list_lobbies() {
 }
 
 HostRegistration MasterClient::host(std::string_view name, std::uint16_t max_players,
-                                    std::string_view region) {
+                                    std::string_view region,
+                                    std::uint32_t capabilities) {
+    if (capabilities == 0U) capabilities = BTGA_NET_CAP_RELAY_UDP;
+    const std::uint16_t initial_players =
+        (capabilities & BTGA_NET_CAP_DEDICATED_AUTHORITY) != 0U ? 0U : 1U;
     const Json request = {
         {"name", name}, {"protocol", protocol_version}, {"build", build_},
-        {"platform", "pc"}, {"capabilities", BTGA_NET_CAP_RELAY_UDP},
-        {"region", region}, {"max_players", max_players}, {"current_players", 1},
+        {"platform", "pc"}, {"capabilities", capabilities},
+        {"region", region}, {"max_players", max_players},
+        {"current_players", initial_players},
         {"state", "lobby"}
     };
     const Json body = parse_response(request_with_rate_limit_retry(

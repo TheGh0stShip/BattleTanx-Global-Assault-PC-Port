@@ -15,8 +15,8 @@ extern "C" {
 #include <thread>
 
 namespace {
-bool bind(btga::OnlineMultiplayer& online, bool host, std::uint64_t session,
-          std::string_view token) {
+bool bind_relay(btga::OnlineMultiplayer& online, bool host,
+                std::uint64_t session, std::string_view token) {
     const auto bytes = std::span{
         reinterpret_cast<const std::uint8_t*>(token.data()), token.size()};
     if (!online.enter_online() || !online.begin_relay(host, session, bytes)) return false;
@@ -61,8 +61,8 @@ int main() {
         btga::OnlineMultiplayer host{host_io};
         btga::OnlineMultiplayer client{client_io};
         stage = "bind relay";
-        if (!bind(host, true, hosted.session_id, hosted.relay_token) ||
-            !bind(client, false, joined.session_id, joined.join_token)) {
+        if (!bind_relay(host, true, hosted.session_id, hosted.relay_token) ||
+            !bind_relay(client, false, joined.session_id, joined.join_token)) {
             throw std::runtime_error("native relay binding failed");
         }
         std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> gameplay{};

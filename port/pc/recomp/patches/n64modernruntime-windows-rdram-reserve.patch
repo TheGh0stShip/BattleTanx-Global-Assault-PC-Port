@@ -1,0 +1,23 @@
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+index 67ae0c1..0ff0f7c 100644
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -936,12 +936,14 @@ void start(ultramodern::WindowHandle window_handle, const recomp::config& cfg) {
+     uint8_t* rdram;
+     bool alloc_failed;
+ #ifdef _WIN32
+-    rdram = reinterpret_cast<uint8_t*>(VirtualAlloc(nullptr, allocation_size, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS));
+-    DWORD old_protect = 0;
++    // Reserve the complete guest address window, but commit only the usable
++    // memory. Committing all 4 GiB exhausts the Windows commit limit when a
++    // dedicated authority and four headless clients run together.
++    rdram = reinterpret_cast<uint8_t*>(VirtualAlloc(nullptr, allocation_size, MEM_RESERVE, PAGE_NOACCESS));
+     alloc_failed = (rdram == nullptr);
+     if (!alloc_failed) {
+-        // VirtualProtect returns 0 on failure.
+-        alloc_failed = (VirtualProtect(rdram, mem_size, PAGE_READWRITE, &old_protect) == 0);
++        alloc_failed = (VirtualAlloc(rdram, mem_size, MEM_COMMIT,
++                                     PAGE_READWRITE) == nullptr);
+         if (alloc_failed) {
+             VirtualFree(rdram, 0, MEM_RELEASE);
+         }

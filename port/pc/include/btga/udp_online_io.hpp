@@ -1,10 +1,12 @@
 #pragma once
 
 #include <cstddef>
+#include <chrono>
 #include <cstdint>
 #include <span>
 #include <string>
 
+#include "btga/delayed_datagram_queue.hpp"
 #include "btga/online_multiplayer.hpp"
 
 namespace btga {
@@ -15,6 +17,9 @@ struct UdpFaultProfile {
     // than an application-visible socket error.
     std::uint32_t drop_outgoing_every = 0;
     std::uint32_t drop_incoming_every = 0;
+    // Test-only one-way delay. Fifty milliseconds in each endpoint direction
+    // produces approximately 100 ms RTT without changing the host network.
+    std::uint32_t delay_milliseconds = 0;
 };
 
 // Test-only environment adapter. It returns an empty profile unless
@@ -42,6 +47,9 @@ public:
     void set_fault_profile(UdpFaultProfile fault_profile) noexcept;
 
 private:
+    [[nodiscard]] bool send_now(std::span<const std::uint8_t> datagram);
+    void flush_delayed_outgoing();
+
     static constexpr std::uintptr_t invalid_socket = ~std::uintptr_t{0};
 
     std::string relay_host_;
@@ -49,6 +57,9 @@ private:
     UdpFaultProfile fault_profile_;
     std::uint64_t outgoing_datagrams_ = 0;
     std::uint64_t incoming_datagrams_ = 0;
+    bool send_failure_reported_ = false;
+    bool delay_queue_full_reported_ = false;
+    DelayedDatagramQueue delayed_outgoing_;
     std::uintptr_t socket_ = invalid_socket;
 #if defined(_WIN32)
     bool winsock_started_ = false;

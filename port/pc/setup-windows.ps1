@@ -107,6 +107,9 @@ Checkout-Pinned "https://github.com/N64Recomp/N64Recomp.git" $n64Recomp $n64Reco
 Checkout-Pinned "https://github.com/N64Recomp/N64ModernRuntime.git" $runtime $runtimeRevision
 Checkout-Pinned "https://github.com/rt64/rt64.git" $rt64 $rt64Revision
 
+$runtimePatch = Join-Path $root "port\pc\recomp\patches\n64modernruntime-windows-rdram-reserve.patch"
+Apply-CheckedPatch $runtime $runtimePatch `
+    "Applying the N64ModernRuntime Windows RDRAM reservation patch"
 $nfd = Join-Path $rt64 "src\contrib\nativefiledialog-extended"
 Apply-CheckedPatch $nfd (Join-Path $root "port\pc\recomp\patches\rt64-nfd-stub.patch") `
     "Applying the RT64 file-dialog patch"

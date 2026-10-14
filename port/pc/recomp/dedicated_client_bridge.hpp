@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <string_view>
 
@@ -10,6 +11,8 @@
 bool btga_dedicated_client_enable(
     std::uint64_t session_id, const btga::RelayEndpoint& relay,
     std::string_view token, std::string& error);
+void btga_dedicated_client_configure_reconnect(
+    std::string lobby_id, std::filesystem::path resume_path);
 extern "C" int btga_dedicated_client_enabled();
 extern "C" void btga_dedicated_client_tick_begin(
     std::uint8_t* rdram, recomp_context* context);
@@ -20,6 +23,7 @@ extern "C" void btga_dedicated_client_run_loop(
 bool btga_dedicated_client_controller_input(
     int controller, std::uint16_t& buttons, float& x, float& y);
 int btga_dedicated_client_local_seat();
+std::uint32_t btga_dedicated_client_next_tick();
 void btga_dedicated_client_pump();
 void btga_dedicated_client_submit_local(
     std::uint16_t buttons, float x, float y);

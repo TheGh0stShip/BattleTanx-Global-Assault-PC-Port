@@ -9,6 +9,10 @@ namespace {
 
 constexpr std::size_t rdram_size = 8U * 1024U * 1024U;
 constexpr std::size_t random_seed_offset = 0x00114C80U;
+constexpr std::size_t task_sequence_offset = 0x00114CB0U;
+constexpr std::size_t task_sequence_size = sizeof(std::uint32_t);
+constexpr std::size_t task_state_offset = 0x00224B50U;
+constexpr std::size_t task_state_size = 0x113A4U;
 constexpr std::size_t object_pool_offset = 0x001AD128U;
 constexpr std::size_t object_pool_size = 24U * 0x4CCU;
 constexpr std::size_t object_size = 0x4CCU;
@@ -90,6 +94,10 @@ GameplayStateDigests gameplay_state_digests(
                     0, object_sound_handles_size);
     }
     const auto objects = std::span<const std::uint8_t>{canonical_objects};
+    std::uint32_t tasks = append_fnv1a(
+        initial, region(rdram, task_sequence_offset, task_sequence_size));
+    tasks = append_fnv1a(
+        tasks, region(rdram, task_state_offset, task_state_size));
     const auto random_seed = region(rdram, random_seed_offset, sizeof(std::uint32_t));
     const auto frame_counter = region(rdram, frame_counter_offset, sizeof(std::uint32_t));
     const auto game_mode = region(rdram, game_mode_offset, sizeof(std::uint32_t));
@@ -138,6 +146,7 @@ GameplayStateDigests gameplay_state_digests(
     }
 
     GameplayStateDigests digests{
+        .tasks = tasks,
         .objects = append_fnv1a(initial, objects),
         .object_core = object_core,
         .object_tail = object_tail,
@@ -151,6 +160,7 @@ GameplayStateDigests gameplay_state_digests(
         .match_time = append_fnv1a(initial, match_time),
     };
     std::uint32_t hash = UINT32_C(2166136261);
+    hash = append_u32(hash, tasks);
     hash = append_fnv1a(hash, objects);
     for (const std::uint32_t component : {
              player_headers, player_gameplay, team_info}) {

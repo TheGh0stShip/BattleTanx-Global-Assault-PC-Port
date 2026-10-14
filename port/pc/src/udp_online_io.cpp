@@ -97,6 +97,17 @@ std::uint32_t fault_interval(const char* name) {
         ? value : 0U;
 }
 
+std::uint32_t fault_delay() {
+    const auto text = environment_value("BTGA_NET_TEST_DELAY_MS");
+    if (!text) return 0U;
+    std::uint32_t value = 0U;
+    const auto* begin = text->data();
+    const auto* finish = begin + text->size();
+    const auto [end, error] = std::from_chars(begin, finish, value);
+    return error == std::errc{} && end == finish && value <= 5000U
+        ? value : 0U;
+}
+
 } // namespace
 
 UdpFaultProfile udp_test_fault_profile_from_environment() noexcept {
@@ -105,7 +116,8 @@ UdpFaultProfile udp_test_fault_profile_from_environment() noexcept {
         if (!enabled || *enabled != "1") return {};
         return {
             fault_interval("BTGA_NET_TEST_DROP_OUTGOING_EVERY"),
-            fault_interval("BTGA_NET_TEST_DROP_INCOMING_EVERY")
+            fault_interval("BTGA_NET_TEST_DROP_INCOMING_EVERY"),
+            fault_delay()
         };
     } catch (...) {
         return {};
@@ -184,6 +196,41 @@ void UdpOnlineIo::close() {
         winsock_started_ = false;
     }
 #endif
+    delayed_outgoing_.clear();
+}
+
+bool UdpOnlineIo::send_now(std::span<const std::uint8_t> datagram) {
+    if (!is_open()) return false;
+#if defined(_WIN32)
+    const int sent = send(from_storage(socket_),
+                          reinterpret_cast<const char*>(datagram.data()),
+                          static_cast<int>(datagram.size()), 0);
+    if (sent < 0 && !send_failure_reported_) {
+        std::fprintf(stderr,
+                     "BTGA_UDP native send failed error=%d queued=%zu\n",
+                     WSAGetLastError(), delayed_outgoing_.size());
+        send_failure_reported_ = true;
+    }
+#else
+    const ssize_t sent = send(from_storage(socket_), datagram.data(), datagram.size(), 0);
+    if (sent < 0 && !send_failure_reported_) {
+        std::fprintf(stderr,
+                     "BTGA_UDP native send failed error=%d queued=%zu\n",
+                     errno, delayed_outgoing_.size());
+        send_failure_reported_ = true;
+    }
+#endif
+    if (sent >= 0) send_failure_reported_ = false;
+    return sent >= 0 && static_cast<std::size_t>(sent) == datagram.size();
+}
+
+void UdpOnlineIo::flush_delayed_outgoing() {
+    const auto now = std::chrono::steady_clock::now();
+    for (;;) {
+        const auto datagram = delayed_outgoing_.front_due(now);
+        if (datagram.empty() || !send_now(datagram)) return;
+        delayed_outgoing_.pop_front();
+    }
 }
 
 bool UdpOnlineIo::send_relay(std::span<const std::uint8_t> datagram) {
@@ -197,18 +244,26 @@ bool UdpOnlineIo::send_relay(std::span<const std::uint8_t> datagram) {
         outgoing_datagrams_ % fault_profile_.drop_outgoing_every == 0U) {
         return true;
     }
-#if defined(_WIN32)
-    const int sent = send(from_storage(socket_),
-                          reinterpret_cast<const char*>(datagram.data()),
-                          static_cast<int>(datagram.size()), 0);
-#else
-    const ssize_t sent = send(from_storage(socket_), datagram.data(), datagram.size(), 0);
-#endif
-    return sent >= 0 && static_cast<std::size_t>(sent) == datagram.size();
+    if (fault_profile_.delay_milliseconds == 0U) return send_now(datagram);
+    flush_delayed_outgoing();
+    const bool queued = delayed_outgoing_.enqueue(
+        datagram,
+        std::chrono::steady_clock::now() +
+            std::chrono::milliseconds{fault_profile_.delay_milliseconds});
+    if (!queued && !delay_queue_full_reported_) {
+        std::fprintf(stderr,
+                     "BTGA_UDP delayed queue full queued=%zu\n",
+                     delayed_outgoing_.size());
+        delay_queue_full_reported_ = true;
+    } else if (queued) {
+        delay_queue_full_reported_ = false;
+    }
+    return queued;
 }
 
 std::size_t UdpOnlineIo::receive_relay(std::span<std::uint8_t> datagram) {
     if (!is_open() || datagram.empty()) return 0;
+    flush_delayed_outgoing();
     const std::size_t capacity = (std::min)(
         datagram.size(), static_cast<std::size_t>((std::numeric_limits<int>::max)()));
     for (;;) {
@@ -243,6 +298,7 @@ void UdpOnlineIo::set_fault_profile(UdpFaultProfile fault_profile) noexcept {
     }
     outgoing_datagrams_ = 0U;
     incoming_datagrams_ = 0U;
+    delayed_outgoing_.clear();
 }
 
 } // namespace btga

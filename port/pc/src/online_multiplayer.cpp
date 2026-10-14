@@ -1,6 +1,7 @@
 #include "btga/online_multiplayer.hpp"
 
 #include <array>
+#include <cstdio>
 #include <cstring>
 
 namespace btga {
@@ -58,6 +59,17 @@ bool OnlineMultiplayer::begin_relay(
     return true;
 }
 
+bool OnlineMultiplayer::rebind_relay(
+    bool host, std::uint64_t session_id,
+    std::span<const std::uint8_t> admission_token) {
+    if (!io_open_ || (state_ != OnlineState::Lobby &&
+                      state_ != OnlineState::RelayBinding &&
+                      state_ != OnlineState::Error)) return false;
+    btga_relay_client_disconnect(&relay_);
+    state_ = OnlineState::Browsing;
+    return begin_relay(host, session_id, admission_token);
+}
+
 bool OnlineMultiplayer::accept_relay_datagram(
     std::span<const std::uint8_t> datagram) {
     if (state_ != OnlineState::RelayBinding ||
@@ -80,11 +92,40 @@ bool OnlineMultiplayer::send_gameplay(
     std::uint16_t destination_slot,
     std::span<const std::uint8_t> inner_datagram) {
     std::array<std::uint8_t, BTGA_RELAY_MAX_DATAGRAM_SIZE> relay_datagram{};
-    if (state_ != OnlineState::Lobby) return false;
+    if (state_ != OnlineState::Lobby) {
+        if (!gameplay_send_failure_reported_) {
+            std::fprintf(stderr,
+                         "BTGA_RELAY gameplay send rejected state=%u bytes=%zu\n",
+                         static_cast<unsigned>(state_), inner_datagram.size());
+            gameplay_send_failure_reported_ = true;
+        }
+        return false;
+    }
     const std::size_t size = btga_relay_client_wrap(
         &relay_, destination_slot, inner_datagram.data(), inner_datagram.size(),
         relay_datagram.data(), relay_datagram.size());
-    return size != 0 && io_.send_relay({relay_datagram.data(), size});
+    if (size == 0U) {
+        if (!gameplay_send_failure_reported_) {
+            std::fprintf(stderr,
+                         "BTGA_RELAY gameplay envelope rejected source=%u "
+                         "destination=%u bytes=%zu relay_state=%u\n",
+                         static_cast<unsigned>(relay_.relay_slot),
+                         static_cast<unsigned>(destination_slot),
+                         inner_datagram.size(),
+                         static_cast<unsigned>(relay_.state));
+            gameplay_send_failure_reported_ = true;
+        }
+        return false;
+    }
+    const bool sent = io_.send_relay({relay_datagram.data(), size});
+    if (!sent && !gameplay_send_failure_reported_) {
+        std::fprintf(stderr,
+                     "BTGA_RELAY gameplay transport rejected bytes=%zu\n", size);
+        gameplay_send_failure_reported_ = true;
+    } else if (sent) {
+        gameplay_send_failure_reported_ = false;
+    }
+    return sent;
 }
 
 std::size_t OnlineMultiplayer::receive_gameplay(

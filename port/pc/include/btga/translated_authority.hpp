@@ -30,6 +30,9 @@ public:
         std::span<const std::uint8_t> packet, std::uint64_t session_id,
         std::uint16_t relay_source_slot);
     [[nodiscard]] bool set_connected(std::uint8_t seat, bool connected);
+    // Starts a new packet replay window after the authenticated relay endpoint
+    // for this seat begins a new cold-bootstrap generation.
+    [[nodiscard]] bool begin_connection_epoch(std::uint8_t seat) noexcept;
 
     // Called once at the entry of the translated gameplay update. Returns the
     // immutable controller inputs that get_input must expose for this tick.
@@ -48,6 +51,8 @@ public:
 
     [[nodiscard]] const std::optional<AuthoritativeSnapshot>&
     latest_snapshot() const noexcept;
+    [[nodiscard]] bool checkpoint_now(
+        std::span<const std::uint8_t> checkpoint_state);
     [[nodiscard]] std::uint32_t next_tick() const noexcept;
     [[nodiscard]] std::uint8_t occupied_mask() const noexcept;
     [[nodiscard]] std::uint8_t connected_mask() const noexcept;

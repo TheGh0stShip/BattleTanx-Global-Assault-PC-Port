@@ -12,7 +12,7 @@ constexpr std::size_t gameplay_snapshot_size = 32'340U;
 // Dedicated authorities need enough canonical state to resume a cold process
 // at a live tick.  The smaller gameplay snapshot remains the wire format used
 // by the legacy peer-to-peer bootstrap path.
-constexpr std::size_t dedicated_checkpoint_base_size = 123'225U;
+constexpr std::size_t dedicated_checkpoint_base_size = 193'793U;
 
 [[nodiscard]] bool gameplay_snapshot_random_seed(
     std::span<const std::uint8_t> snapshot,
