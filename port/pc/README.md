@@ -347,6 +347,9 @@ of the other recovery modes. `-AllSeatReconnectCycles 3` repeats that entire
 four-seat sweep three times, consuming a new rotated credential on every
 replacement and checking that no replay, snapshot, or barrier state leaks
 between recoveries. `-ReconnectEverySeat` is its one-cycle shorthand.
+Combine `-ColdJoinAfterAuthorityRestart` with
+`-AllSeatReconnectCycles 2` to restore the authority first and then rotate all
+four seats twice without creating a new lobby or canonical timeline.
 
 For an actual persistent authority, use the supervisor rather than launching
 the executable directly:

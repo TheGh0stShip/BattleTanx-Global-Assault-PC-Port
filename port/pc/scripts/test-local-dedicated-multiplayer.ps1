@@ -32,10 +32,14 @@ if ($ReconnectEverySeat -and $AllSeatReconnectCycles -ne 0) {
 $allSeatCycles = if ($ReconnectEverySeat) { 1 } else {
     $AllSeatReconnectCycles
 }
-if (($ColdJoinAfterAuthorityRestart -and $ClientReconnectCycles -ne 0) -or
-    ($ColdJoinAfterAuthorityRestart -and $allSeatCycles -ne 0) -or
-    ($ClientReconnectCycles -ne 0 -and $allSeatCycles -ne 0)) {
-    throw "Authority restart, translated-client reconnect, and all-seat reconnect are separate gates."
+if ($ClientReconnectCycles -ne 0 -and $allSeatCycles -ne 0) {
+    throw "Translated-client reconnect and all-seat reconnect are separate gates."
+}
+if ($ColdJoinAfterAuthorityRestart -and $ClientReconnectCycles -ne 0) {
+    throw "Use the all-seat mode to combine authority and client recovery."
+}
+if ($ColdJoinAfterAuthorityRestart -and $allSeatCycles -gt 2) {
+    throw "The local fixture has three client credential rotations; authority restart consumes seat 0's first rotation, leaving at most two all-seat cycles."
 }
 $root = (Resolve-Path (Join-Path $PSScriptRoot "../../..")).Path
 $build = if ([IO.Path]::IsPathRooted($BuildDirectory)) {
@@ -150,14 +154,15 @@ try {
     # targets the translated authority/client recovery path rather than token
     # admission. Each witness sends a distinct input and verifies its echo.
     Start-Sleep -Milliseconds 250
-    $peerSeconds = if ($ColdJoinAfterAuthorityRestart) {
+    $peerSeconds = if ($allSeatCycles -ne 0) {
+        $Seconds + 20 + 5 * $Players * $allSeatCycles +
+            $(if ($ColdJoinAfterAuthorityRestart) { 15 } else { 0 })
+    } elseif ($ColdJoinAfterAuthorityRestart) {
         # Cover the initial run, forced restart and replacement-client run,
         # then finish soon enough for the gate's bounded validation wait.
         $Seconds + 10
     } elseif ($ClientReconnectCycles -ne 0) {
         $Seconds + 15 + 5 * $ClientReconnectCycles
-    } elseif ($allSeatCycles -ne 0) {
-        $Seconds + 15 + 5 * $Players * $allSeatCycles
     } else {
         $Seconds
     }
@@ -223,11 +228,40 @@ try {
         $clientErrorPaths.Add($clientErrorPath)
         $env:BTGA_DEDICATED_TOKEN = [string]$fixture.client_restart_tokens[0]
         $client = Start-Process $game -PassThru -WindowStyle Minimized `
-            -ArgumentList @("--dedicated-headless-direct", [string]$Seconds, $quotedRom) `
+            -ArgumentList @("--dedicated-headless-direct", [string]$translatedSeconds,
+                $quotedRom) `
             -RedirectStandardOutput (Join-Path $evidence "client-restart.stdout.log") `
             -RedirectStandardError $clientErrorPath
         $processes.Add($client)
-    } elseif ($ClientReconnectCycles -ne 0) {
+
+        if ($allSeatCycles -ne 0) {
+            # Do not immediately replace the freshly bootstrapped process. The
+            # combined gate first proves that the replacement authority and a
+            # cold translated client converge on persisted state, then starts
+            # rotating every seat on that same canonical timeline.
+            $restartDeadline = [DateTime]::UtcNow.AddSeconds(60)
+            do {
+                Start-Sleep -Milliseconds 100
+                $restartClientLog = if (Test-Path $clientErrorPath) {
+                    [string](Get-Content $clientErrorPath -Raw)
+                } else { "" }
+                $restartAuthorityLog = if (Test-Path $restartAuthorityError) {
+                    [string](Get-Content $restartAuthorityError -Raw)
+                } else { "" }
+                $restartApplied = $restartClientLog -match
+                    "BTGA_CLIENT (applied|confirmed) snapshot tick=[1-9][0-9]*"
+                $restartReleased = $restartAuthorityLog -match
+                    "BTGA_AUTHORITY recovery complete head=[1-9][0-9]*"
+            } until (($restartApplied -and $restartReleased) -or
+                $client.HasExited -or $authority.HasExited -or
+                [DateTime]::UtcNow -ge $restartDeadline)
+            if (-not $restartApplied -or -not $restartReleased) {
+                throw "Cold client did not converge with the replacement authority."
+            }
+        }
+    }
+
+    if ($ClientReconnectCycles -ne 0) {
         for ($cycle = 1; $cycle -le $ClientReconnectCycles; ++$cycle) {
             if (-not $client.HasExited) {
                 Stop-Process -Id $client.Id -Force
@@ -279,6 +313,11 @@ try {
         # than by a special-case client role. Repeating the sweep consumes a
         # fresh rotated credential for every seat and catches leaked replay,
         # snapshot, or barrier state between recoveries.
+        $liveAuthorityErrorPath =
+            $authorityErrorPaths[$authorityErrorPaths.Count - 1]
+        $barriersBeforeAllSeat = [regex]::Matches(
+            [string](Get-Content $liveAuthorityErrorPath -Raw),
+            "BTGA_AUTHORITY recovery complete head=[1-9][0-9]*").Count
         for ($cycle = 1; $cycle -le $allSeatCycles; ++$cycle) {
             if (-not $client.HasExited) {
                 Stop-Process -Id $client.Id -Force
@@ -287,8 +326,10 @@ try {
             $clientErrorPath = Join-Path $evidence `
                 ("client-reconnect-cycle-{0}-seat-0.stderr.log" -f $cycle)
             $clientErrorPaths.Add($clientErrorPath)
+            $seatZeroTokenIndex = ($cycle - 1) +
+                $(if ($ColdJoinAfterAuthorityRestart) { 1 } else { 0 })
             $env:BTGA_DEDICATED_TOKEN =
-                [string]$fixture.client_reconnect_tokens[0][$cycle - 1]
+                [string]$fixture.client_reconnect_tokens[0][$seatZeroTokenIndex]
             $client = Start-Process $game -PassThru -WindowStyle Minimized `
                 -ArgumentList @("--dedicated-headless-direct",
                     [string]$translatedSeconds, $quotedRom) `
@@ -310,12 +351,13 @@ try {
             if (-not $seatZeroReady) {
                 throw "Translated seat 0 did not recover in cycle $cycle."
             }
-            $expectedBarrier = (($cycle - 1) * $Players) + 1
+            $expectedBarrier = $barriersBeforeAllSeat +
+                (($cycle - 1) * $Players) + 1
             $barrierDeadline = [DateTime]::UtcNow.AddSeconds(60)
             do {
                 Start-Sleep -Milliseconds 100
                 $liveAuthorityLog =
-                    [string](Get-Content $authorityErrorPaths[0] -Raw)
+                    [string](Get-Content $liveAuthorityErrorPath -Raw)
                 $completedBarriers = [regex]::Matches(
                     $liveAuthorityLog,
                     "BTGA_AUTHORITY recovery complete head=[1-9][0-9]*").Count
@@ -358,12 +400,13 @@ try {
                 if (-not $peerReady) {
                     throw "Protocol witness seat $seat did not recover in cycle $cycle."
                 }
-                $expectedBarrier = (($cycle - 1) * $Players) + $seat + 1
+                $expectedBarrier = $barriersBeforeAllSeat +
+                    (($cycle - 1) * $Players) + $seat + 1
                 $barrierDeadline = [DateTime]::UtcNow.AddSeconds(60)
                 do {
                     Start-Sleep -Milliseconds 100
                     $liveAuthorityLog =
-                        [string](Get-Content $authorityErrorPaths[0] -Raw)
+                        [string](Get-Content $liveAuthorityErrorPath -Raw)
                     $completedBarriers = [regex]::Matches(
                         $liveAuthorityLog,
                         "BTGA_AUTHORITY recovery complete head=[1-9][0-9]*").Count
@@ -445,7 +488,8 @@ try {
         $recoveryCount = [regex]::Matches(
             $authorityLog, "BTGA_AUTHORITY recovery complete head=[1-9][0-9]*").Count
         $expectedRecoveries = if ($allSeatCycles -ne 0) {
-            $Players * $allSeatCycles
+            $Players * $allSeatCycles +
+                $(if ($ColdJoinAfterAuthorityRestart) { 1 } else { 0 })
         } else {
             $ClientReconnectCycles
         }

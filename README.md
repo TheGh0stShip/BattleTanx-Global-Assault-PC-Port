@@ -329,7 +329,9 @@ seats once during one live match, or `-AllSeatReconnectCycles 3` to perform
 three full sweeps with independently rotated credentials. The translated
 player and all three protocol witnesses must each install a positive-tick
 checkpoint, complete journal replay, and resume canonical input/state
-observation. The recovery modes are intentionally separate gates.
+observation. Single-client and all-seat rotation remain separate gates;
+authority recovery can also be composed with up to two all-seat sweeps to prove
+that a restored server does not retain stale per-seat replay or barrier state.
 
 If the master has expired a saved lobby, the supervisor now creates a new
 lobby automatically and prints its new `ONLINE_LOBBY_ID`. A client must select

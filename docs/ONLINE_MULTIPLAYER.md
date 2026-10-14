@@ -234,6 +234,22 @@ successful sweep must leave the live authority ready for the next one; stale
 snapshot generations, replay cursors, or recovery-barrier bits therefore fail
 the following cycle rather than escaping detection.
 
+Authority and client recovery can also be composed in one persistent session:
+
+```powershell
+.\port\pc\scripts\test-local-dedicated-multiplayer.ps1 `
+    -Rom 'C:\Games\BattleTanx - Global Assault (USA).z64' `
+    -NetworkingRoot 'C:\src\BattleTanx-Global-Assault-Networking' `
+    -ColdJoinAfterAuthorityRestart -AllSeatReconnectCycles 2
+```
+
+This first kills and restores the translated authority from its portable disk
+checkpoint, requires a cold translated client to converge with that replacement,
+then performs two complete all-seat credential rotations on the same canonical
+timeline. The local fixture has three rotations per seat; the authority restart
+uses seat 0's first one, so the combined gate is intentionally capped at two
+subsequent sweeps.
+
 The older peer-hosted flow documented below remains available for comparison,
 but it is not the architecture being taken to production.
 
