@@ -109,6 +109,7 @@ int main(int argc, char** argv) {
         std::cout << "BOUND_SEAT=" << seat << '\n' << std::flush;
 
         btga::InputSynchronizer encoder;
+        btga::TickInputHistory sampled_inputs;
         btga::AuthoritativeReplica replica;
         std::optional<btga::CanonicalFrame> latest_frame;
         std::map<std::uint32_t, btga::CanonicalFrame> pending_frames;
@@ -124,12 +125,23 @@ int main(int argc, char** argv) {
         std::uint32_t installed_snapshot_id = 0;
         bool bootstrapped = !recovery_join;
         bool recovery_ready_announced = false;
-        const auto send_inputs = [&](std::uint32_t first_tick) {
-            std::array<btga::OnlineControllerInput, 8> initial{};
-            initial.fill(distinctive);
+        const auto send_inputs = [&](std::uint32_t sampled_tick) {
+            // This bot has a stable synthetic controller, but it still makes
+            // exactly one decision for the tick being sampled. Older actual
+            // decisions are carried only as loss redundancy; no future tick
+            // is pre-committed on behalf of a controller that has not sampled
+            // it yet.
+            if (!sampled_inputs.record(sampled_tick, distinctive)) {
+                throw std::runtime_error("conflicting local input sample");
+            }
+            const auto batch = sampled_inputs.batch_ending_at(sampled_tick);
+            if (batch.count == 0U) {
+                throw std::runtime_error("local input history disappeared");
+            }
             const std::size_t encoded = encoder.encode_batch(
-                packet, session, online.relay_slot(), ++sequence, first_tick,
-                static_cast<std::uint8_t>(seat), initial);
+                packet, session, online.relay_slot(), ++sequence,
+                batch.first_tick, static_cast<std::uint8_t>(seat),
+                std::span{batch.inputs}.first(batch.count));
             if (encoded == 0U || !online.send_gameplay(0U, {packet.data(), encoded})) {
                 throw std::runtime_error("input transmission failed");
             }

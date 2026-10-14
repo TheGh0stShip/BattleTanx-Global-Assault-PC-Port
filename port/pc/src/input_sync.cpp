@@ -70,6 +70,7 @@ std::size_t InputSynchronizer::encode_batch(
     std::optional<OnlineSyncOrigin> sync_origin) const {
     if (player_id >= max_players || inputs.empty() ||
         inputs.size() > BTGA_NET_MAX_INPUT_FRAMES ||
+        inputs.size() - 1U > UINT32_MAX - first_tick ||
         packet.size() < BTGA_NET_HEADER_SIZE) return 0;
 
     BtgaNetInputBatch batch{};
@@ -122,19 +123,41 @@ bool InputSynchronizer::accept(std::span<const std::uint8_t> packet,
         batch.player_id != expected_peer) return false;
 
     PlayerHistory& history = histories_[batch.player_id];
-    if (history.valid && header.sequence <= history.latest_sequence) return true;
+    if (history.valid &&
+        static_cast<std::int32_t>(header.sequence - history.latest_sequence) <= 0) {
+        return true;
+    }
+    // Validate the whole redundant window before mutating history. A newer
+    // transport packet may repeat an old decision, but cannot revise it; a
+    // conflict must not partially commit later frames from the same packet.
     for (std::uint8_t index = 0; index < batch.frame_count; ++index) {
         const std::uint32_t tick = batch.first_tick + index;
-        StoredInput& stored = history.inputs[tick % history_size];
-        stored.input = {
+        if (tick < batch.first_tick) return false;
+        const StoredInput& stored = history.inputs[tick % history_size];
+        const OnlineControllerInput incoming{
             batch.frames[index].buttons,
             batch.frames[index].stick_x,
             batch.frames[index].stick_y,
         };
+        if (stored.valid && stored.tick == tick && stored.input != incoming) {
+            return false;
+        }
+    }
+    for (std::uint8_t index = 0; index < batch.frame_count; ++index) {
+        const std::uint32_t tick = batch.first_tick + index;
+        StoredInput& stored = history.inputs[tick % history_size];
+        const OnlineControllerInput incoming{
+            batch.frames[index].buttons,
+            batch.frames[index].stick_x,
+            batch.frames[index].stick_y,
+        };
+        if (stored.valid && stored.tick == tick) continue;
+        stored.input = incoming;
         stored.tick = tick;
         stored.sequence = header.sequence;
         stored.valid = true;
-        if (!history.valid || tick >= history.latest_tick) {
+        if (!history.valid ||
+            static_cast<std::int32_t>(tick - history.latest_tick) >= 0) {
             history.latest_input = stored.input;
             history.latest_tick = tick;
         }

@@ -187,6 +187,91 @@ int main() {
         CHECK(batch.inputs[0] == fire);
         history.reset();
         CHECK(history.batch_ending_at(106U).count == 0U);
+
+        // A wire batch never wraps its contiguous first_tick + index range.
+        // Tick zero remains a valid fresh sample after the 32-bit boundary;
+        // the prior UINT32_MAX decision is not mislabeled as tick zero.
+        CHECK(history.record(UINT32_MAX, straight));
+        CHECK(history.record(0U, fire));
+        batch = history.batch_ending_at(0U);
+        CHECK(batch.first_tick == 0U && batch.count == 1U);
+        const std::array wrap_inputs{straight, fire};
+        CHECK(encoder.encode_batch(
+            packet, UINT64_C(0x1020304050607080), 1U, 8U,
+            UINT32_MAX, 0U, wrap_inputs) == 0U);
+    }
+
+    {
+        // Dedicated input decisions are immutable once the authority accepts
+        // them. Every later batch carries only real, previously sampled
+        // history, so loss and reordering recover old ticks without freezing
+        // a future direction, fire press, or release.
+        constexpr std::uint64_t session = UINT64_C(0x3141592653589793);
+        btga::TranslatedAuthority authority{0x01U, 30U, 0U};
+        btga::InputSynchronizer encoder;
+        std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE> packet{};
+        const btga::OnlineControllerInput north{0U, 0, 127};
+        const btga::OnlineControllerInput west{0U, -127, 0};
+        const btga::OnlineControllerInput fire{0x2000U, -127, 0};
+        const btga::OnlineControllerInput released{0U, 0, 0};
+        const btga::OnlineControllerInput east{0U, 127, 0};
+        const auto send = [&](std::uint32_t sequence, std::uint32_t first_tick,
+                              std::span<const btga::OnlineControllerInput> inputs) {
+            const auto size = encoder.encode_batch(
+                packet, session, 1U, sequence, first_tick, 0U, inputs);
+            return size != 0U && authority.ingest_client_packet(
+                {packet.data(), size}, session, 1U);
+        };
+
+        // Sequence one is lost. Sequence two redundantly recovers its actual
+        // north sample and adds the newly sampled west turn.
+        const std::array first_two{north, west};
+        CHECK(send(2U, 0U, first_two));
+        // Sequence three (fire) is delayed. Sequence four includes that exact
+        // press, the subsequent release, and another direction change.
+        const std::array all_four{north, west, fire, released};
+        CHECK(send(4U, 0U, all_four));
+        const std::array delayed{west, fire};
+        CHECK(send(3U, 1U, delayed)); // stale transport packet is harmless
+        CHECK(send(4U, 0U, all_four)); // exact duplicate is harmless
+
+        // A newer packet cannot revise an already committed, unconsumed tick.
+        const std::array conflicting{east};
+        CHECK(!send(5U, 3U, conflicting));
+
+        std::array<std::uint8_t, 4> state{};
+        for (std::uint32_t tick = 0U; tick < 4U; ++tick) {
+            CHECK(authority.begin_tick(tick));
+            const auto expected = tick == 0U ? north : tick == 1U ? west :
+                                  tick == 2U ? fire : released;
+            CHECK(authority.inputs()[0] == expected);
+            state[0] = static_cast<std::uint8_t>(tick);
+            CHECK(authority.finish_tick(tick, state));
+        }
+
+        // The authority's finite history bounds how far an authenticated
+        // client can commit decisions ahead of simulation.
+        CHECK(send(6U, 4U + 255U, conflicting));
+        CHECK(!send(7U, 4U + 256U, conflicting));
+
+        // Sequence ordering uses 32-bit serial arithmetic, including wrap.
+        btga::TranslatedAuthority wrapped{0x01U, 30U, 0U};
+        const auto send_wrapped = [&](std::uint32_t sequence,
+                                      std::uint32_t tick,
+                                      btga::OnlineControllerInput input) {
+            const std::array inputs{input};
+            const auto size = encoder.encode_batch(
+                packet, session, 1U, sequence, tick, 0U, inputs);
+            return size != 0U && wrapped.ingest_client_packet(
+                {packet.data(), size}, session, 1U);
+        };
+        CHECK(send_wrapped(UINT32_MAX, 0U, north));
+        CHECK(send_wrapped(0U, 1U, east));
+        CHECK(wrapped.begin_tick(0U));
+        CHECK(wrapped.inputs()[0] == north);
+        CHECK(wrapped.finish_tick(0U, state));
+        CHECK(wrapped.begin_tick(1U));
+        CHECK(wrapped.inputs()[0] == east);
     }
 
     {
@@ -1386,6 +1471,38 @@ int main() {
         CHECK(receiver.input_for(1, 902) == redundant[2]);
         const btga::OnlineSyncOrigin expected_origin{900, 17};
         CHECK(receiver.sync_origin_for(1) == expected_origin);
+
+        // A higher transport sequence provides redundancy, not permission to
+        // rewrite an input decision already stamped for a tick.
+        const btga::OnlineControllerInput conflicting{0x4000U, -20, 20};
+        const std::array conflicting_batch{
+            input, conflicting, btga::OnlineControllerInput{0x0800U, 3, 4}};
+        const auto conflicting_size = sender.encode_batch(
+            packet, UINT64_C(0x1020304050607080), 1U, 45U,
+            900U, 1U, conflicting_batch);
+        CHECK(conflicting_size != 0U);
+        CHECK(!receiver.accept({packet.data(), conflicting_size},
+                               UINT64_C(0x1020304050607080), 1U));
+        CHECK(receiver.input_for(1, 901) == newer);
+        CHECK(!receiver.input_for(1, 903)); // packet rejected atomically
+
+        btga::InputSynchronizer wrapped_receiver;
+        const auto final_sequence_size = sender.encode(
+            packet, UINT64_C(0x1020304050607080), 1U, UINT32_MAX,
+            0U, 1U, input);
+        CHECK(final_sequence_size != 0U);
+        CHECK(wrapped_receiver.accept(
+            {packet.data(), final_sequence_size},
+            UINT64_C(0x1020304050607080), 1U));
+        const auto wrapped_sequence_size = sender.encode(
+            packet, UINT64_C(0x1020304050607080), 1U, 0U,
+            1U, 1U, newer);
+        CHECK(wrapped_sequence_size != 0U);
+        CHECK(wrapped_receiver.accept(
+            {packet.data(), wrapped_sequence_size},
+            UINT64_C(0x1020304050607080), 1U));
+        CHECK(wrapped_receiver.latest_tick_for(1) == 1U);
+        CHECK(wrapped_receiver.latest_input_for(1) == newer);
     }
     class TestHttpClient final : public btga::HttpClient {
     public:
