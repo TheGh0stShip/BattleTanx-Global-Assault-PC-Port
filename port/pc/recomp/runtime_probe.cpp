@@ -423,6 +423,14 @@ bool get_input(int controller, std::uint16_t* buttons, float* x, float* y) {
         return true;
     }
     const int dedicated_local_seat = btga_dedicated_client_local_seat();
+    if (dedicated_local_seat >= 0 && !interactive) {
+        // Headless translated witnesses have no local device to sample. Every
+        // controller port, including the assigned seat, must consume the
+        // authority's canonical frame; falling through to the host-input path
+        // made seat 0 simulate a different tick from the authority.
+        return btga_dedicated_client_controller_input(
+            controller, *buttons, *x, *y);
+    }
     if (dedicated_local_seat >= 0 && controller != dedicated_local_seat) {
         return btga_dedicated_client_controller_input(controller, *buttons, *x, *y);
     }

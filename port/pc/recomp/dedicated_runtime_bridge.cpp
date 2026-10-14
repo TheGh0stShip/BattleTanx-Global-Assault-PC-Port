@@ -76,7 +76,7 @@ std::array<std::uint32_t, btga::online_player_limit> bootstrap_expected_ack{};
 std::array<std::uint32_t, btga::online_player_limit>
     bootstrap_expected_snapshot_id{};
 std::array<std::uint32_t, btga::online_player_limit> snapshot_retry_rotation{};
-std::array<std::uint8_t, btga::gameplay_snapshot_size> initial_snapshot_state{};
+std::vector<std::uint8_t> initial_snapshot_state;
 bool initial_snapshot_available = false;
 unsigned int configured_players = 4;
 std::unique_ptr<btga::UdpOnlineIo> udp;
@@ -290,6 +290,7 @@ bool enable_relay(std::uint64_t requested_session, const btga::RelayEndpoint& re
     bootstrap_expected_ack.fill(0U);
     bootstrap_expected_snapshot_id.fill(0U);
     snapshot_retry_rotation.fill(0U);
+    initial_snapshot_state.clear();
     // A restarted authority already owns a validated portable checkpoint.
     // Make it available before translated gameplay starts so a genuinely new
     // client (acknowledgment zero) can bootstrap while the authority waits at
@@ -824,8 +825,31 @@ void btga_dedicated_network_poll()
         const std::size_t count = authority.copy_journal_from(
             replay_next_tick[seat], frames);
         for (std::size_t index = 0; index < count; ++index) {
-            if (!encode_and_send_frame(
-                    frames[index], static_cast<std::uint16_t>(seat + 1U))) {
+            bool any_copy_sent = false;
+            // A nonblocking UDP socket can briefly report WOULDBLOCK after a
+            // checkpoint burst. Retry local backpressure in place so the
+            // first missing journal tick from remaining at the front of every
+            // later replay window. Send three paced copies as well: periodic
+            // loss can otherwise erase the same indispensable first tick on
+            // every acknowledgment. The client deduplicates by canonical tick.
+            constexpr unsigned frame_copies = 3U;
+            constexpr unsigned local_send_attempts = 3U;
+            for (unsigned copy = 0U; copy < frame_copies; ++copy) {
+                bool copy_sent = false;
+                for (unsigned attempt = 0U;
+                     attempt < local_send_attempts && !copy_sent; ++attempt) {
+                    copy_sent = encode_and_send_frame(
+                        frames[index], static_cast<std::uint16_t>(seat + 1U));
+                    if (!copy_sent && attempt + 1U < local_send_attempts) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+                    }
+                }
+                any_copy_sent = any_copy_sent || copy_sent;
+                if (copy + 1U < frame_copies) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+                }
+            }
+            if (!any_copy_sent) {
                 if ((replay_send_failure_announced & bit) == 0U) {
                     std::fprintf(stderr,
                                  "BTGA_AUTHORITY journal replay backpressure "
@@ -1135,8 +1159,8 @@ extern "C" void btga_dedicated_run_loop(
         func_80079FF0(rdram, context);
         if (!initial_snapshot_sent) {
             const std::lock_guard lock{authority_mutex};
-            std::array<std::uint8_t, btga::gameplay_snapshot_size> state{};
-            if (!btga::capture_gameplay_snapshot({rdram, rdram_size}, state)) {
+            std::vector<std::uint8_t> state;
+            if (!btga::capture_dedicated_checkpoint({rdram, rdram_size}, state)) {
                 std::fputs("BTGA_AUTHORITY initial snapshot failed\n", stderr);
                 continue;
             }

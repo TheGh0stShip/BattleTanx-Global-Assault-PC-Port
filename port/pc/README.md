@@ -343,7 +343,10 @@ seat 0 and then each of the three protocol-witness seats with a fresh process
 and rotated credential while the authority remains live. Every replacement
 must bootstrap from a positive tick, release its recovery barrier, and observe
 canonical frames and its own echoed input. It cannot be combined with either
-of the other recovery modes.
+of the other recovery modes. `-AllSeatReconnectCycles 3` repeats that entire
+four-seat sweep three times, consuming a new rotated credential on every
+replacement and checking that no replay, snapshot, or barrier state leaks
+between recoveries. `-ReconnectEverySeat` is its one-cycle shorthand.
 
 For an actual persistent authority, use the supervisor rather than launching
 the executable directly:

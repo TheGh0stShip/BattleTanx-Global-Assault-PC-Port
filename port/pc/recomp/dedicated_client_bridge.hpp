@@ -15,6 +15,8 @@ extern "C" void btga_dedicated_client_tick_begin(
     std::uint8_t* rdram, recomp_context* context);
 extern "C" void btga_dedicated_client_tick_end(
     std::uint8_t* rdram, recomp_context* context);
+extern "C" void btga_dedicated_client_run_loop(
+    std::uint8_t* rdram, recomp_context* context);
 bool btga_dedicated_client_controller_input(
     int controller, std::uint16_t& buttons, float& x, float& y);
 int btga_dedicated_client_local_seat();

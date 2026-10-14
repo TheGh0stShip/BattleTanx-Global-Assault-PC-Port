@@ -19,6 +19,9 @@
 #include "btga/udp_online_io.hpp"
 #include "dedicated_runtime_bridge.hpp"
 
+extern "C" void func_8009C524(std::uint8_t* rdram, recomp_context* ctx);
+extern "C" void func_80079FF0(std::uint8_t* rdram, recomp_context* ctx);
+
 extern "C" {
 #include <btga/btga_gameplay.h>
 #include <btga/btga_net.h>
@@ -249,6 +252,12 @@ extern "C" int btga_dedicated_client_enabled() {
     return client_enabled ? 1 : 0;
 }
 
+extern "C" int btga_dedicated_client_loop_ready(std::uint8_t* rdram) {
+    const std::lock_guard lock{client_mutex};
+    return client_enabled &&
+        btga::gameplay_frame_input_active({rdram, rdram_size}) ? 1 : 0;
+}
+
 extern "C" void btga_dedicated_client_tick_begin(
     std::uint8_t* rdram, recomp_context*) {
     std::unique_lock lock{client_mutex};
@@ -257,6 +266,17 @@ extern "C" void btga_dedicated_client_tick_begin(
     for (;;) {
         (void)poll_frames_locked();
         send_keepalive_if_due_locked();
+        // A checkpoint contains canonical gameplay state, not the receiving
+        // process's scheduler, renderer, audio, SI, or other host-local
+        // structures. Let the translated game finish its deterministic level
+        // bootstrap before installing a cold checkpoint. Restoring into the
+        // zero-initialized pre-level process leaves retail intrusive lists and
+        // interrupt-owned state uninitialized (for example, a 0 -> 0 render
+        // list), so the first gameplay tick can never complete.
+        if (!bootstrap_complete &&
+            !btga::gameplay_frame_input_active({rdram, rdram_size})) {
+            return;
+        }
         if (pending_snapshot && bootstrap_complete &&
             pending_snapshot->tick < expected_tick) {
             pending_snapshot.reset();
@@ -300,16 +320,16 @@ extern "C" void btga_dedicated_client_tick_begin(
                 }
             }
             if (already_current || restored) {
-                // The client hook runs after the retail outer loop has advanced
-                // these counters for the tick about to be simulated. Restoring
-                // an end-of-previous-tick checkpoint erases that transition, so
-                // reproduce it exactly once before replaying a positive tick.
-                // Tick-zero snapshots are captured at the client's existing
-                // bootstrap boundary and must retain their established path.
-                if (restored && extended && pending_snapshot->tick != 0U) {
+                expected_tick = pending_snapshot->tick;
+                // Periodic checkpoints are captured at the end of tick N-1
+                // and name N as their next tick. The authority advances the
+                // two retail outer-loop counters before executing N, so a
+                // replacement must do the same exactly once after restore.
+                // Tick-zero's initial checkpoint is captured after that
+                // advance already happened and must not be advanced again.
+                if (restored && expected_tick != 0U) {
                     btga_advance_retail_mode_counters(rdram);
                 }
-                expected_tick = pending_snapshot->tick;
                 installed_snapshot_id = pending_snapshot->snapshot_id;
                 (void)btga::gameplay_snapshot_random_seed(
                     pending_snapshot->state, current_random_seed);
@@ -376,6 +396,27 @@ extern "C" void btga_dedicated_client_tick_begin(
         std::this_thread::sleep_for(std::chrono::milliseconds{1});
         lock.lock();
     }
+}
+
+extern "C" void btga_dedicated_client_run_loop(
+    std::uint8_t* rdram, recomp_context* context) {
+    thread_local bool running = false;
+    if (running) return;
+    running = true;
+    constexpr auto tick_period = std::chrono::nanoseconds{1'000'000'000 / 30};
+    auto deadline = std::chrono::steady_clock::now();
+    while (btga_dedicated_client_enabled() != 0) {
+        // Mirror the authority's one-call-per-canonical-tick orchestration.
+        // Offline play never enters this loop and retains the retail mode loop.
+        btga_advance_retail_mode_counters(rdram);
+        func_80079FF0(rdram, context);
+        func_8009C524(rdram, context);
+        deadline += tick_period;
+        std::this_thread::sleep_until(deadline);
+        const auto now = std::chrono::steady_clock::now();
+        if (now > deadline + tick_period * 4) deadline = now;
+    }
+    running = false;
 }
 
 extern "C" void btga_dedicated_client_tick_end(

@@ -325,10 +325,11 @@ seat through three translated-client terminations and fresh processes. Each
 replacement must install a positive-tick checkpoint, replay the canonical
 journal, and release the authority's recovery barrier without disturbing the
 other three seats. Use `-ReconnectEverySeat` to replace all four authenticated
-seats in sequence during one live match. The translated player and all three
-protocol witnesses must each install the same positive-tick checkpoint,
-complete journal replay, and resume canonical input/state observation. The
-three recovery modes are intentionally separate gates.
+seats once during one live match, or `-AllSeatReconnectCycles 3` to perform
+three full sweeps with independently rotated credentials. The translated
+player and all three protocol witnesses must each install a positive-tick
+checkpoint, complete journal replay, and resume canonical input/state
+observation. The recovery modes are intentionally separate gates.
 
 If the master has expired a saved lobby, the supervisor now creates a new
 lobby automatically and prints its new `ONLINE_LOBBY_ID`. A client must select

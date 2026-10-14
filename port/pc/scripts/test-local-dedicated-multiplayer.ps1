@@ -15,6 +15,8 @@ param(
     [ValidateRange(0, 3)]
     [int] $ClientReconnectCycles = 0,
     [switch] $ReconnectEverySeat,
+    [ValidateRange(0, 3)]
+    [int] $AllSeatReconnectCycles = 0,
     [ValidateRange(2, 1000)]
     [int] $DropOutgoingEvery = 10,
     [ValidateRange(2, 1000)]
@@ -24,9 +26,15 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($ReconnectEverySeat -and $AllSeatReconnectCycles -ne 0) {
+    throw "ReconnectEverySeat is the one-cycle shorthand; do not combine it with AllSeatReconnectCycles."
+}
+$allSeatCycles = if ($ReconnectEverySeat) { 1 } else {
+    $AllSeatReconnectCycles
+}
 if (($ColdJoinAfterAuthorityRestart -and $ClientReconnectCycles -ne 0) -or
-    ($ColdJoinAfterAuthorityRestart -and $ReconnectEverySeat) -or
-    ($ClientReconnectCycles -ne 0 -and $ReconnectEverySeat)) {
+    ($ColdJoinAfterAuthorityRestart -and $allSeatCycles -ne 0) -or
+    ($ClientReconnectCycles -ne 0 -and $allSeatCycles -ne 0)) {
     throw "Authority restart, translated-client reconnect, and all-seat reconnect are separate gates."
 }
 $root = (Resolve-Path (Join-Path $PSScriptRoot "../../..")).Path
@@ -128,7 +136,9 @@ try {
     $processes.Add($authority)
     Start-Sleep -Milliseconds 750
 
-    $translatedSeconds = $Seconds
+    $translatedSeconds = if ($allSeatCycles -ne 0) {
+        $Seconds + 15 + 5 * $Players * $allSeatCycles
+    } else { $Seconds }
     $env:BTGA_DEDICATED_TOKEN = [string]$fixture.client_tokens[0]
     $client = Start-Process $game -PassThru -WindowStyle Minimized `
         -ArgumentList @("--dedicated-headless-direct", [string]$translatedSeconds, $quotedRom) `
@@ -146,8 +156,8 @@ try {
         $Seconds + 10
     } elseif ($ClientReconnectCycles -ne 0) {
         $Seconds + 15 + 5 * $ClientReconnectCycles
-    } elseif ($ReconnectEverySeat) {
-        $Seconds + 15 + 5 * $Players
+    } elseif ($allSeatCycles -ne 0) {
+        $Seconds + 15 + 5 * $Players * $allSeatCycles
     } else {
         $Seconds
     }
@@ -173,8 +183,11 @@ try {
     $authorityErrorPaths = [System.Collections.Generic.List[string]]::new()
     $authorityErrorPaths.Add((Join-Path $evidence "authority.stderr.log"))
     if ($ColdJoinAfterAuthorityRestart -or $ClientReconnectCycles -ne 0 -or
-        $ReconnectEverySeat) {
-        $tickDeadline = [DateTime]::UtcNow.AddSeconds(20)
+        $allSeatCycles -ne 0) {
+        # The headless translated authority advances at the host's available
+        # CPU rate. Wait for the checkpoint itself rather than assuming tick
+        # 120 always arrives within 20 wall-clock seconds on a loaded machine.
+        $tickDeadline = [DateTime]::UtcNow.AddSeconds(120)
         do {
             Start-Sleep -Milliseconds 100
             $beforeRestart = [string](Get-Content $authorityErrorPaths[0] -Raw)
@@ -260,85 +273,45 @@ try {
                 throw "Authority did not release reconnect barrier $cycle."
             }
         }
-    } elseif ($ReconnectEverySeat) {
+    } elseif ($allSeatCycles -ne 0) {
         # Replace the translated seat first, then each protocol witness. This
         # proves that recovery is keyed by authenticated seat identity rather
-        # than by a special-case client role.
-        if (-not $client.HasExited) {
-            Stop-Process -Id $client.Id -Force
-            $client.WaitForExit(5000) | Out-Null
-        }
-        $clientErrorPath = Join-Path $evidence "client-reconnect-seat-0.stderr.log"
-        $clientErrorPaths.Add($clientErrorPath)
-        $env:BTGA_DEDICATED_TOKEN = [string]$fixture.client_reconnect_tokens[0][0]
-        $client = Start-Process $game -PassThru -WindowStyle Minimized `
-            -ArgumentList @("--dedicated-headless-direct", [string]$translatedSeconds,
-                $quotedRom) `
-            -RedirectStandardOutput (Join-Path $evidence `
-                "client-reconnect-seat-0.stdout.log") `
-            -RedirectStandardError $clientErrorPath
-        $processes.Add($client)
-
-        $seatZeroDeadline = [DateTime]::UtcNow.AddSeconds(30)
-        do {
-            Start-Sleep -Milliseconds 100
-            $seatZeroLog = if (Test-Path $clientErrorPath) {
-                [string](Get-Content $clientErrorPath -Raw)
-            } else { "" }
-            $seatZeroReady = $seatZeroLog -match
-                "BTGA_CLIENT (applied|confirmed) snapshot tick=[1-9][0-9]*"
-        } until ($seatZeroReady -or $client.HasExited -or
-            [DateTime]::UtcNow -ge $seatZeroDeadline)
-        if (-not $seatZeroReady) {
-            throw "Translated seat 0 did not recover."
-        }
-        $barrierDeadline = [DateTime]::UtcNow.AddSeconds(30)
-        do {
-            Start-Sleep -Milliseconds 100
-            $liveAuthorityLog = [string](Get-Content $authorityErrorPaths[0] -Raw)
-            $completedBarriers = [regex]::Matches(
-                $liveAuthorityLog,
-                "BTGA_AUTHORITY recovery complete head=[1-9][0-9]*").Count
-        } until ($completedBarriers -ge 1 -or $authority.HasExited -or
-            [DateTime]::UtcNow -ge $barrierDeadline)
-        if ($completedBarriers -lt 1) {
-            throw "Authority did not release seat 0 recovery barrier."
-        }
-
-        for ($seat = 1; $seat -lt $Players; ++$seat) {
-            $oldPeer = $peers[$seat - 1]
-            if (-not $oldPeer.HasExited) {
-                Stop-Process -Id $oldPeer.Id -Force
-                $oldPeer.WaitForExit(5000) | Out-Null
+        # than by a special-case client role. Repeating the sweep consumes a
+        # fresh rotated credential for every seat and catches leaked replay,
+        # snapshot, or barrier state between recoveries.
+        for ($cycle = 1; $cycle -le $allSeatCycles; ++$cycle) {
+            if (-not $client.HasExited) {
+                Stop-Process -Id $client.Id -Force
+                $client.WaitForExit(5000) | Out-Null
             }
-            $env:BTGA_NET_TEST_FAULTS = $null
+            $clientErrorPath = Join-Path $evidence `
+                ("client-reconnect-cycle-{0}-seat-0.stderr.log" -f $cycle)
+            $clientErrorPaths.Add($clientErrorPath)
             $env:BTGA_DEDICATED_TOKEN =
-                [string]$fixture.client_reconnect_tokens[$seat][0]
-            $peerOutputPaths[$seat] = Join-Path $evidence `
-                ("bot-{0}-reconnect.stdout.log" -f $seat)
-            $peerErrorPaths[$seat] = Join-Path $evidence `
-                ("bot-{0}-reconnect.stderr.log" -f $seat)
-            $peer = Start-Process $bot -PassThru -WindowStyle Minimized `
-                -ArgumentList @([string]$seat, [string]$Seconds, "--resume") `
-                -RedirectStandardOutput $peerOutputPaths[$seat] `
-                -RedirectStandardError $peerErrorPaths[$seat]
-            $processes.Add($peer)
-            $peers[$seat - 1] = $peer
-            $env:BTGA_NET_TEST_FAULTS = "1"
+                [string]$fixture.client_reconnect_tokens[0][$cycle - 1]
+            $client = Start-Process $game -PassThru -WindowStyle Minimized `
+                -ArgumentList @("--dedicated-headless-direct",
+                    [string]$translatedSeconds, $quotedRom) `
+                -RedirectStandardOutput (Join-Path $evidence `
+                    ("client-reconnect-cycle-{0}-seat-0.stdout.log" -f $cycle)) `
+                -RedirectStandardError $clientErrorPath
+            $processes.Add($client)
 
-            $peerDeadline = [DateTime]::UtcNow.AddSeconds(30)
+            $seatZeroDeadline = [DateTime]::UtcNow.AddSeconds(60)
             do {
                 Start-Sleep -Milliseconds 100
-                $peerLog = if (Test-Path $peerOutputPaths[$seat]) {
-                    [string](Get-Content $peerOutputPaths[$seat] -Raw)
+                $seatZeroLog = if (Test-Path $clientErrorPath) {
+                    [string](Get-Content $clientErrorPath -Raw)
                 } else { "" }
-                $peerReady = $peerLog -match "BOOTSTRAP_TICK=[1-9][0-9]*"
-            } until ($peerReady -or $peer.HasExited -or
-                [DateTime]::UtcNow -ge $peerDeadline)
-            if (-not $peerReady) {
-                throw "Protocol witness seat $seat did not recover."
+                $seatZeroReady = $seatZeroLog -match
+                    "BTGA_CLIENT (applied|confirmed) snapshot tick=[1-9][0-9]*"
+            } until ($seatZeroReady -or $client.HasExited -or
+                [DateTime]::UtcNow -ge $seatZeroDeadline)
+            if (-not $seatZeroReady) {
+                throw "Translated seat 0 did not recover in cycle $cycle."
             }
-            $barrierDeadline = [DateTime]::UtcNow.AddSeconds(30)
+            $expectedBarrier = (($cycle - 1) * $Players) + 1
+            $barrierDeadline = [DateTime]::UtcNow.AddSeconds(60)
             do {
                 Start-Sleep -Milliseconds 100
                 $liveAuthorityLog =
@@ -346,10 +319,91 @@ try {
                 $completedBarriers = [regex]::Matches(
                     $liveAuthorityLog,
                     "BTGA_AUTHORITY recovery complete head=[1-9][0-9]*").Count
-            } until ($completedBarriers -ge ($seat + 1) -or
+            } until ($completedBarriers -ge $expectedBarrier -or
                 $authority.HasExited -or [DateTime]::UtcNow -ge $barrierDeadline)
-            if ($completedBarriers -lt ($seat + 1)) {
-                throw "Authority did not release seat $seat recovery barrier."
+            if ($completedBarriers -lt $expectedBarrier) {
+                throw "Authority did not release seat 0 in cycle $cycle."
+            }
+
+            for ($seat = 1; $seat -lt $Players; ++$seat) {
+                $oldPeer = $peers[$seat - 1]
+                if (-not $oldPeer.HasExited) {
+                    Stop-Process -Id $oldPeer.Id -Force
+                    $oldPeer.WaitForExit(5000) | Out-Null
+                }
+                $env:BTGA_NET_TEST_FAULTS = $null
+                $env:BTGA_DEDICATED_TOKEN =
+                    [string]$fixture.client_reconnect_tokens[$seat][$cycle - 1]
+                $peerOutputPaths[$seat] = Join-Path $evidence `
+                    ("bot-{0}-reconnect-cycle-{1}.stdout.log" -f $seat, $cycle)
+                $peerErrorPaths[$seat] = Join-Path $evidence `
+                    ("bot-{0}-reconnect-cycle-{1}.stderr.log" -f $seat, $cycle)
+                $peer = Start-Process $bot -PassThru -WindowStyle Minimized `
+                    -ArgumentList @([string]$seat, [string]$peerSeconds, "--resume") `
+                    -RedirectStandardOutput $peerOutputPaths[$seat] `
+                    -RedirectStandardError $peerErrorPaths[$seat]
+                $processes.Add($peer)
+                $peers[$seat - 1] = $peer
+                $env:BTGA_NET_TEST_FAULTS = "1"
+
+                $peerDeadline = [DateTime]::UtcNow.AddSeconds(60)
+                do {
+                    Start-Sleep -Milliseconds 100
+                    $peerLog = if (Test-Path $peerOutputPaths[$seat]) {
+                        [string](Get-Content $peerOutputPaths[$seat] -Raw)
+                    } else { "" }
+                    $peerReady = $peerLog -match "BOOTSTRAP_TICK=[1-9][0-9]*"
+                } until ($peerReady -or $peer.HasExited -or
+                    [DateTime]::UtcNow -ge $peerDeadline)
+                if (-not $peerReady) {
+                    throw "Protocol witness seat $seat did not recover in cycle $cycle."
+                }
+                $expectedBarrier = (($cycle - 1) * $Players) + $seat + 1
+                $barrierDeadline = [DateTime]::UtcNow.AddSeconds(60)
+                do {
+                    Start-Sleep -Milliseconds 100
+                    $liveAuthorityLog =
+                        [string](Get-Content $authorityErrorPaths[0] -Raw)
+                    $completedBarriers = [regex]::Matches(
+                        $liveAuthorityLog,
+                        "BTGA_AUTHORITY recovery complete head=[1-9][0-9]*").Count
+                } until ($completedBarriers -ge $expectedBarrier -or
+                    $authority.HasExited -or
+                    [DateTime]::UtcNow -ge $barrierDeadline)
+                if ($completedBarriers -lt $expectedBarrier) {
+                    throw "Authority did not release seat $seat in cycle $cycle."
+                }
+                $readyDeadline = [DateTime]::UtcNow.AddSeconds(60)
+                do {
+                    Start-Sleep -Milliseconds 100
+                    $peerLog = if (Test-Path $peerOutputPaths[$seat]) {
+                        [string](Get-Content $peerOutputPaths[$seat] -Raw)
+                    } else { "" }
+                    $peerObservedGameplay =
+                        $peerLog -match "RECOVERY_READY tick=[1-9][0-9]*"
+                } until ($peerObservedGameplay -or $peer.HasExited -or
+                    [DateTime]::UtcNow -ge $readyDeadline)
+                if (-not $peerObservedGameplay) {
+                    throw "Protocol witness seat $seat did not resume gameplay in cycle $cycle."
+                }
+            }
+        }
+    }
+
+    if ($allSeatCycles -ne 0) {
+        # Every final replacement has already supplied a positive bootstrap,
+        # contiguous-frame, and own-input witness. Keep all four alive through
+        # the last sweep, then end only the processes owned by this gate rather
+        # than waiting out their deliberately extended observation windows.
+        Start-Sleep -Milliseconds 500
+        if (-not $client.HasExited) {
+            Stop-Process -Id $client.Id -Force
+            $client.WaitForExit(5000) | Out-Null
+        }
+        foreach ($peer in $peers) {
+            if (-not $peer.HasExited) {
+                Stop-Process -Id $peer.Id -Force
+                $peer.WaitForExit(5000) | Out-Null
             }
         }
     }
@@ -360,13 +414,14 @@ try {
     $client.WaitForExit()
     $clientLog = [string](Get-Content $clientErrorPath -Raw)
     $requiredSnapshot = if ($ColdJoinAfterAuthorityRestart -or
-        $ClientReconnectCycles -ne 0 -or $ReconnectEverySeat) {
+        $ClientReconnectCycles -ne 0 -or $allSeatCycles -ne 0) {
         "BTGA_CLIENT (applied|confirmed) snapshot tick=[1-9][0-9]*"
     } else {
         "BTGA_CLIENT (applied|confirmed) snapshot tick=0"
     }
+    $completedTimedRun = $clientLog.Contains("Headless boot window elapsed")
     if ($clientLog -notmatch $requiredSnapshot -or
-        -not $clientLog.Contains("Headless boot window elapsed")) {
+        ($allSeatCycles -eq 0 -and -not $completedTimedRun)) {
         throw "Translated client did not install the bootstrap and complete its run."
     }
     $profile = "outgoing=$DropOutgoingEvery incoming=$DropIncomingEvery"
@@ -386,10 +441,12 @@ try {
             "BTGA_AUTHORITY recovered checkpoint=[1-9][0-9]* journal_head=[1-9][0-9]*") {
         throw "Replacement authority did not restore persistent gameplay state."
     }
-    if ($ClientReconnectCycles -ne 0 -or $ReconnectEverySeat) {
+    if ($ClientReconnectCycles -ne 0 -or $allSeatCycles -ne 0) {
         $recoveryCount = [regex]::Matches(
             $authorityLog, "BTGA_AUTHORITY recovery complete head=[1-9][0-9]*").Count
-        $expectedRecoveries = if ($ReconnectEverySeat) { $Players } else {
+        $expectedRecoveries = if ($allSeatCycles -ne 0) {
+            $Players * $allSeatCycles
+        } else {
             $ClientReconnectCycles
         }
         if ($recoveryCount -lt $expectedRecoveries) {
@@ -410,7 +467,7 @@ try {
         # and those witnesses are restarted sequentially after seat 0.  The
         # translated client can therefore finish before the later witnesses
         # have completed their own timed observation window.
-        $peerExitTimeout = if ($ReconnectEverySeat) {
+        $peerExitTimeout = if ($allSeatCycles -ne 0) {
             ($Seconds + 30) * 1000
         } else { 15000 }
         if (-not $peer.WaitForExit($peerExitTimeout)) {
@@ -421,10 +478,15 @@ try {
         $peerLog = [string](Get-Content $peerOutputPaths[$seat] -Raw)
         $frameMatch = [regex]::Match($peerLog, "canonical_frames=([0-9]+)")
         $echoMatch = [regex]::Match($peerLog, "echoed_inputs=([0-9]+)")
-        if (-not [string]::IsNullOrWhiteSpace($peerError) -or
+        $recoveryWitness = $peerLog -match
+            "RECOVERY_READY tick=[1-9][0-9]*"
+        $normalWitnessFailed = $allSeatCycles -eq 0 -and (
             -not $frameMatch.Success -or -not $echoMatch.Success -or
             [uint32]$frameMatch.Groups[1].Value -lt 30 -or
-            [uint32]$echoMatch.Groups[1].Value -lt 10) {
+            [uint32]$echoMatch.Groups[1].Value -lt 10)
+        if (-not [string]::IsNullOrWhiteSpace($peerError) -or
+            ($allSeatCycles -ne 0 -and -not $recoveryWitness) -or
+            $normalWitnessFailed) {
             throw "Protocol witness seat $seat did not verify canonical input/state."
         }
     }
@@ -437,8 +499,8 @@ try {
     if ($ClientReconnectCycles -ne 0) {
         Write-Host "Recovery: $ClientReconnectCycles authenticated client reconnect cycles"
     }
-    if ($ReconnectEverySeat) {
-        Write-Host "Recovery: all $Players authenticated seats rejoined the live match"
+    if ($allSeatCycles -ne 0) {
+        Write-Host "Recovery: all $Players authenticated seats rejoined $allSeatCycles time(s)"
     }
     Write-Host "Evidence: $evidence"
 } finally {

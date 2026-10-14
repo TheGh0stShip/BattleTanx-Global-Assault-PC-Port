@@ -123,6 +123,7 @@ int main(int argc, char** argv) {
         std::uint32_t echoed_frames = 0;
         std::uint32_t installed_snapshot_id = 0;
         bool bootstrapped = !recovery_join;
+        bool recovery_ready_announced = false;
         const auto send_inputs = [&](std::uint32_t first_tick) {
             std::array<btga::OnlineControllerInput, 8> initial{};
             initial.fill(distinctive);
@@ -155,8 +156,11 @@ int main(int argc, char** argv) {
         auto next_readiness = std::chrono::steady_clock::now() +
             std::chrono::milliseconds{250};
         auto next_keepalive = next_readiness;
+        // A full checkpoint is about 124 KiB and is deliberately transferred
+        // through the same lossy datagram path as gameplay. Leave enough time
+        // for chunk retries before declaring a resumed process dead.
         const auto startup_deadline = std::chrono::steady_clock::now() +
-            std::chrono::seconds{15};
+            std::chrono::seconds{45};
         auto run_deadline = startup_deadline;
         bool session_started = false;
 
@@ -257,6 +261,12 @@ int main(int argc, char** argv) {
                         ++echoed_frames;
                     }
                     ++next_input_tick;
+                    if (recovery_join && !recovery_ready_announced &&
+                        accepted_frames >= 30U && echoed_frames >= 1U) {
+                        std::cout << "RECOVERY_READY tick=" << next_input_tick
+                                  << '\n' << std::flush;
+                        recovery_ready_announced = true;
+                    }
                 }
             }
 

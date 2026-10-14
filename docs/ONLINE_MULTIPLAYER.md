@@ -226,6 +226,14 @@ that recovery is keyed by authenticated seat identity rather than special
 treatment of the translated client. It is mutually exclusive with the cold
 authority-restart and repeated-seat gates.
 
+`-AllSeatReconnectCycles 3` is the sustained form of the same gate. It performs
+three complete four-seat sweeps (12 authenticated process replacements) and
+uses the fixture's next rotated credential for each seat on every sweep. The
+one-cycle `-ReconnectEverySeat` switch remains as a quick shorthand. Each
+successful sweep must leave the live authority ready for the next one; stale
+snapshot generations, replay cursors, or recovery-barrier bits therefore fail
+the following cycle rather than escaping detection.
+
 The older peer-hosted flow documented below remains available for comparison,
 but it is not the architecture being taken to production.
 

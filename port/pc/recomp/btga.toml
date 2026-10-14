@@ -70,7 +70,7 @@ text = """
 func = "func_8009D3A4"
 before_vram = 0x8009D478
 text = """
-    { extern int btga_dedicated_enabled(); extern void btga_dedicated_run_loop(uint8_t*, recomp_context*); if (btga_dedicated_enabled()) { btga_dedicated_run_loop(rdram, ctx); return; } }
+    { extern int btga_dedicated_client_loop_ready(uint8_t*); extern void btga_dedicated_client_run_loop(uint8_t*, recomp_context*); extern int btga_dedicated_enabled(); extern void btga_dedicated_run_loop(uint8_t*, recomp_context*); if (btga_dedicated_client_loop_ready(rdram)) { btga_dedicated_client_run_loop(rdram, ctx); return; } if (btga_dedicated_enabled()) { btga_dedicated_run_loop(rdram, ctx); return; } }
 """
 
 [[patches.hook]]
