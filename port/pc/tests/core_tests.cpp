@@ -275,6 +275,61 @@ int main() {
     }
 
     {
+        // Model three ticks of one-way WAN latency. Each controller decision
+        // is sampled once and stamped at the same bounded authority lead used
+        // by the translated client. Losing the first datagram is recovered by
+        // genuine history in the second; rapid direction/fire/release changes
+        // still take effect at their individual target ticks before commit.
+        constexpr std::uint64_t session = UINT64_C(0x2718281828459045);
+        constexpr std::size_t sample_count = 16U;
+        btga::TranslatedAuthority authority{0x01U, 30U, 0U};
+        CHECK(authority.set_connected(0U, false));
+        btga::TickInputHistory history;
+        btga::InputSynchronizer encoder;
+        std::array<btga::OnlineControllerInput, sample_count> samples{};
+        std::array<std::array<std::uint8_t, BTGA_NET_MAX_DATAGRAM_SIZE>,
+                   sample_count> packets{};
+        std::array<std::size_t, sample_count> packet_sizes{};
+        std::array<std::uint8_t, 4> state{};
+
+        for (std::uint32_t head = 0U; head < sample_count; ++head) {
+            const btga::OnlineControllerInput input =
+                head % 4U == 0U ? btga::OnlineControllerInput{0U, 127, 0} :
+                head % 4U == 1U ? btga::OnlineControllerInput{0U, -127, 0} :
+                head % 4U == 2U ? btga::OnlineControllerInput{0x2000U, 0, 0} :
+                                  btga::OnlineControllerInput{0U, 0, 0};
+            samples[head] = input;
+            const std::uint32_t target = btga::choose_authority_input_tick(
+                head, head);
+            CHECK(target == head + 4U);
+            CHECK(history.record(target, input));
+            const auto batch = history.batch_ending_at(target);
+            packet_sizes[head] = encoder.encode_batch(
+                packets[head], session, 1U, head + 1U,
+                batch.first_tick, 0U,
+                std::span{batch.inputs}.first(batch.count));
+            CHECK(packet_sizes[head] != 0U);
+
+            if (head >= 3U) {
+                const std::uint32_t sent = head - 3U;
+                if (sent != 0U) { // lose the first batch entirely
+                    CHECK(authority.ingest_client_packet(
+                        {packets[sent].data(), packet_sizes[sent]}, session, 1U));
+                }
+            }
+            if (head == 4U) CHECK(authority.set_connected(0U, true));
+            CHECK(authority.begin_tick(head));
+            if (head >= 4U) {
+                CHECK(authority.inputs()[0] == samples[head - 4U]);
+            } else {
+                CHECK(authority.inputs()[0] == btga::OnlineControllerInput{});
+            }
+            state[0] = static_cast<std::uint8_t>(head);
+            CHECK(authority.finish_tick(head, state));
+        }
+    }
+
+    {
         btga::BootstrapRecovery recovery;
         using Request = btga::BootstrapRequest;
         using Ack = btga::BootstrapAckKind;

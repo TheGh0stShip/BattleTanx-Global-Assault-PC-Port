@@ -120,12 +120,13 @@ int main(int argc, char** argv) {
             static_cast<std::int8_t>(-20 - static_cast<int>(seat) * 13)};
         std::uint32_t sequence = 0;
         std::uint32_t next_input_tick = 0;
+        std::uint32_t observed_authority_head = 0;
         std::uint32_t accepted_frames = 0;
         std::uint32_t echoed_frames = 0;
         std::uint32_t installed_snapshot_id = 0;
         bool bootstrapped = !recovery_join;
         bool recovery_ready_announced = false;
-        const auto send_inputs = [&](std::uint32_t sampled_tick) {
+        const auto send_sample = [&](std::uint32_t sampled_tick) {
             // This bot has a stable synthetic controller, but it still makes
             // exactly one decision for the tick being sampled. Older actual
             // decisions are carried only as loss redundancy; no future tick
@@ -146,6 +147,15 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("input transmission failed");
             }
         };
+        const auto send_live_sample = [&] {
+            // Match the translated client: the decision is sampled now, but
+            // stamped far enough ahead of both the replica and the observed
+            // authority head to survive ordinary WAN transit. This is one
+            // decision for one target tick, not a prediction for every tick
+            // in the lead window.
+            send_sample(btga::choose_authority_input_tick(
+                next_input_tick, observed_authority_head));
+        };
         const auto send_subscription = [&] {
             std::array<std::uint8_t, BTGA_NET_HEADER_SIZE> message{};
             BtgaNetHeader header{};
@@ -164,7 +174,9 @@ int main(int argc, char** argv) {
             }
         };
         if (recovery_join) send_subscription();
-        send_inputs(0U);
+        // Tick zero is the admission barrier before an authority has a live
+        // head. It is the only sample not assigned through the lead policy.
+        send_sample(0U);
         auto next_readiness = std::chrono::steady_clock::now() +
             std::chrono::milliseconds{250};
         auto next_keepalive = next_readiness;
@@ -180,14 +192,15 @@ int main(int argc, char** argv) {
             const auto now = std::chrono::steady_clock::now();
             if (!session_started && now >= next_readiness) {
                 if (recovery_join) send_subscription();
-                send_inputs(0U);
+                send_sample(0U);
                 next_readiness = now + std::chrono::milliseconds{250};
             } else if (session_started && now >= next_keepalive) {
                 // Keep the relay binding and authority-side seat alive while
                 // a replacement authority restores and replays its journal.
-                // Re-sending the next uncommitted tick is idempotent.
+                // If the authority head has not moved, recording the same
+                // stable synthetic sample for the same target is idempotent.
                 if (recovery_join) send_subscription();
-                send_inputs(next_input_tick);
+                send_live_sample();
                 next_keepalive = now + std::chrono::milliseconds{250};
             }
             bool received_new_frame = false;
@@ -241,6 +254,10 @@ int main(int argc, char** argv) {
                         "invalid authoritative frame payload size " +
                         std::to_string(header.payload_size));
                 }
+                if (static_cast<std::int32_t>(
+                        frame.tick - observed_authority_head) >= 0) {
+                    observed_authority_head = frame.tick;
+                }
                 if (static_cast<std::int32_t>(frame.tick - next_input_tick) < 0) {
                     if (latest_frame && frame.tick == latest_frame->tick &&
                         frame.state_digest != latest_frame->state_digest) {
@@ -283,7 +300,7 @@ int main(int argc, char** argv) {
             }
 
             if (received_new_frame && next_input_tick != 0U) {
-                send_inputs(next_input_tick);
+                send_live_sample();
             }
             std::this_thread::sleep_for(std::chrono::milliseconds{2});
         }
