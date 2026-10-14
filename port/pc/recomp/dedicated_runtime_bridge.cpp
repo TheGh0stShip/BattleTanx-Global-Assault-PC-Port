@@ -1117,6 +1117,12 @@ extern "C" void btga_dedicated_tick_begin(
         const std::lock_guard lock{authority_mutex};
         if (!enabled || gameplay_tick_active) return;
     }
+    // This hook is also the dedicated process's main-loop liveness signal.
+    // Empty public lobbies remain in the frontend until their first player
+    // connects, so count those inactive passes as progress too. Otherwise the
+    // supervisor mistakes a healthy, idle authority for a hung process and
+    // restarts it after the startup-health deadline.
+    authority_loop_sequence.fetch_add(1U, std::memory_order_release);
     if (!btga::gameplay_frame_input_active({rdram, rdram_size})) {
         const std::lock_guard lock{authority_mutex};
         if (inactive_tick_probes++ < 5U) {
@@ -1134,7 +1140,6 @@ extern "C" void btga_dedicated_tick_begin(
     inactive_tick_probes = 0U;
     std::uint32_t wait_iterations = 0;
     for (;;) {
-        authority_loop_sequence.fetch_add(1U, std::memory_order_release);
         {
             const std::lock_guard lock{authority_mutex};
             if (!enabled) return;
