@@ -46,6 +46,15 @@ controller rebinding in **F10 → Controllers**.
 - Press **F10** to open the settings overlay.
 - Press **F10** again, select **Close**, or select the window **X** to close it.
 - After it closes, **F10** opens it again; it is a toggle, not a one-use key.
+
+### Joining online play
+
+Open **F10 → Online**, select **Refresh public lobbies**, then select **Join**
+beside a listed dedicated server. Refresh and Join are explicit opt-in network
+actions; merely opening F10 or the Online tab contacts nothing. The game
+relaunches into an authoritative client and returns to the selected server with
+the same seat after a recoverable disconnect. Players do not host matches from
+this tab; a supervised dedicated authority owns the canonical game.
 - Use **Apply & Save** to persist changed bindings and settings.
 - Opening settings releases mouse capture, so it is safe to use while the
   independent-turret mod is enabled.

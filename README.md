@@ -52,10 +52,10 @@ to play the full demonstration on YouTube.
 - Native PC host/client transport passes an automated public relay test in both
   directions. The runtime has an experimental synchronized cold-boot path with
   deterministic game timing, a bounded four-update lead window, bounded
-  peer-loss recovery, and one full-screen local camera per device. The remote
-  player's camera is suppressed, though duplicate retail multiplayer HUD
-  elements still need a presentation-only cleanup. General rollback and full
-  campaign validation remain in development.
+  peer-loss recovery, and one full-screen local camera per device for every
+  dedicated seat from 1 through 4. All remote cameras are suppressed, though
+  duplicate retail multiplayer HUD elements still need a presentation-only
+  cleanup. General rollback and full campaign validation remain in development.
 
 This is still a development port. Long-session stability, every game mode,
 representative GPUs/controllers, in-game save-flow validation, and visual
@@ -251,7 +251,8 @@ Cross-platform multiplayer is developed independently in
 The portable GPLv3 protocol and relay client are pinned into this build but
 remain dormant: constructing or launching the game performs no network access.
 The native PC transport has been tested end to end through the public master
-and relay. **F10 → Online** browses, hosts, and joins real public relay lobbies.
+and relay. **F10 → Online** explicitly browses and joins dedicated-authority
+servers; it no longer creates peer-hosted lobbies.
 The earlier peer-hosted synchronization mode remains experimental and is being
 superseded by a native dedicated authority: the server executes the translated
 gameplay simulation, publishes canonical four-player inputs, and periodically
@@ -271,8 +272,9 @@ never copies opaque RDRAM. Interactive campaign plus cross-architecture validati
 remain required before this becomes a release-ready public multiplayer mode. Live
 service status is available at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/).
-Opening the Online tab itself remains network-inert; Refresh, Host, and Join are
-the explicit opt-in actions.
+Opening the Online tab itself remains network-inert; Refresh and Join are the
+explicit opt-in actions. Hosting is an operator action through the dedicated
+server supervisor, not a responsibility assigned to one player's game.
 
 Dedicated-authority developer commands on Windows are:
 
@@ -303,6 +305,13 @@ BattleTanxGA.exe --dedicated-join LOBBY_ID BattleTanxGA.z64
   -ReconnectClient -ReconnectCycles 2 `
   -JournalMemoryFrames 64 -RequireDiskReplay
 
+```
+
+Linux uses the same durable headless authority and recovery state:
+
+```sh
+./port/pc/scripts/run-dedicated-server.sh \
+  "$HOME/Games/BattleTanxGA.z64" ./build-pc/BattleTanxGA
 ```
 
 For a real-relay loss gate, add

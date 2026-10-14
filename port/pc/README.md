@@ -258,44 +258,47 @@ when the online flow ends.
 
 The design is relay-first and uses outbound UDP only. It does not use UPnP,
 NAT-PMP, inbound port forwarding, or expose a host's home connection. Each
-device runs the original two-controller simulation but now receives its own
-full-screen local camera: the runtime-private ROM copy expands that player's
-verified viewport/scissor template and suppresses the remote camera. The
-user's ROM is never modified, and offline/local multiplayer is unchanged.
-Some duplicate remote-player HUD elements remain visible and are tracked as a
-presentation-only cleanup.
+device runs the same authoritative one-to-four-player simulation but now
+receives its own full-screen local camera: the runtime-private ROM copy expands
+the selected seat's verified two-player or four-player viewport/scissor
+template and suppresses every remote camera. This covers dedicated seats 1–4;
+the older two-peer path remains compatible. The user's ROM is never modified,
+and offline/local multiplayer is unchanged. Some duplicate remote-player HUD
+elements remain visible and are tracked as a presentation-only cleanup.
 
 The public service dashboard at
 [`btga.thegh0stship.com`](https://btga.thegh0stship.com/) shows active games,
 open lobbies, and players without exposing addresses or credentials.
-The F10 settings overlay's **Online** tab can refresh compatible lobbies, host
-a public lobby, join a listed lobby, authenticate with the relay, maintain the
-host lease, disconnect, and open the dashboard. Merely opening the tab performs
-no network access.
+The F10 settings overlay's **Online** tab can refresh compatible dedicated
+servers, join a listed server, and open the dashboard. Dedicated lobbies carry
+an explicit protocol capability, so the UI cannot accidentally launch the old
+peer-hosted synchronization path. Merely opening the tab performs no network
+access. Hosting is performed by the supervised headless authority below.
 
-The normal Windows experimental play flow is:
+The normal Windows dedicated play flow is:
 
-1. Both players launch normally with their own verified local ROM.
-2. The host opens **F10 → Online** and selects **Host**. The other player uses
-   **Refresh** and **Join** on that lobby.
-3. Each application automatically restarts into a synchronized pre-boot relay
-   rendezvous. No command-line arguments or manual cold boot are required.
-4. Both processes remain outside N64 code until the handshake completes. Host
-   input occupies original controller port 1 and the joining player's input
-   occupies port 2.
+1. An operator starts the supervised authority with their verified local ROM.
+2. Each player launches normally with their own verified local ROM.
+3. Each player opens **F10 → Online**, selects **Refresh public lobbies**, and
+   selects **Join** on the dedicated server.
+4. The application restarts itself as an authoritative client, claims a stable
+   seat, installs the server checkpoint, and replays to the canonical head.
+   No manual cold boot or copied command-line credentials are required.
 
 The automatic restart is the state guarantee: an online session never attempts
-to attach one live emulation instance to another. Developer fallback commands
-remain available as `--online-host ROM` and `--online-join LOBBY_ID ROM`.
-General rollback/resimulation and full-campaign validation are still under
-development. The peer-hosted path is being superseded by a four-player native
-dedicated authority. The authority runs the translated gameplay simulation,
-waits for four authenticated seats before tick zero, continues when a seat
-times out, publishes canonical input frames, and sends periodic canonical
-gameplay snapshots. A real translated Windows client plus three protocol peers
+to attach an already-running local simulation to a canonical server. The old
+`--online-host` / `--online-join` peer flow remains only as a developer
+comparison path. General rollback/resimulation and full-campaign validation
+are still under development. The authority runs the translated gameplay
+simulation for one to four configured seats, waits for those seats before tick
+zero, continues when a seat times out, publishes canonical input frames, and
+sends targeted recovery checkpoints only to seats that request them. A real
+translated Windows client plus three protocol peers
 has completed this flow through the public service. Recovery state is captured
-at tick entry. Snapshot delivery targets one subscribed seat every eight ticks,
-avoiding the old broadcast bandwidth spike. A returning connection atomically
+at tick entry. Snapshot delivery selects subscribed seats in round-robin order
+and incrementally paces one transfer through bounded nonblocking pumps,
+avoiding the old broadcast bandwidth spike and multi-second simulation stall.
+A returning connection atomically
 reclaims its stable seat with a rotating resume token. The authority reports
 its exact connected-seat mask so the master renews active reservations without
 preserving abandoned anonymous joins. A rendered Windows client has separately
@@ -359,9 +362,20 @@ the executable directly:
     -Rom 'C:\Games\BattleTanxGA.z64' -BuildDirectory build-pc-windows
 ```
 
+The headless translated authority also runs natively on Linux:
+
+```sh
+./port/pc/scripts/run-dedicated-server.sh \
+    "$HOME/Games/BattleTanxGA.z64" ./build-pc/BattleTanxGA
+```
+
 It retains recovery state and per-generation logs in
 `build-pc-windows\dedicated-state`, restarts a failed authority with bounded
-backoff, and prints the active `ONLINE_LOBBY_ID`. If Azure has expired the
+backoff, locks that state against a second supervisor, and prints the active
+`ONLINE_LOBBY_ID`. It also restarts a process whose translated main-loop health
+stops advancing or disappears after being observed, rather than treating an
+alive-but-deadlocked process as healthy.
+If Azure has expired the
 saved lobby, the replacement authority discards only that stale control record
 and creates a new lobby. Players must join the newly printed/listed ID; a copied
 expired ID returns `404 lobby not found` by design. Press Ctrl+C once to stop

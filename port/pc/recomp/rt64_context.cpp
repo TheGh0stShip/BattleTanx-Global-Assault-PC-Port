@@ -29,6 +29,7 @@
 
 #include "btga/texture_packs.hpp"
 #include "btga/btga_gameplay.h"
+#include "btga/dedicated_resume.hpp"
 #include "btga/gameplay_digest.hpp"
 #include "btga/gameplay_snapshot.hpp"
 #include "btga/master_client.hpp"
@@ -932,11 +933,10 @@ public:
     }
 
 private:
-    enum class OnlineTaskKind { Browse, Host, Join, Heartbeat };
+    enum class OnlineTaskKind { Browse, Join, Heartbeat };
     struct OnlineTaskResult {
         OnlineTaskKind kind = OnlineTaskKind::Browse;
         std::vector<btga::OnlineLobby> lobbies;
-        std::optional<btga::HostRegistration> host;
         std::optional<btga::JoinRegistration> join;
         int error_status = 0;
         std::string error;
@@ -985,25 +985,109 @@ private:
         });
     }
 
-    void host_online() {
-        if (!ensure_online_master()) return;
-        const std::string name = online_lobby_name_.data();
-        const std::uint16_t max_players = static_cast<std::uint16_t>(online_max_players_);
-        btga::MasterClient* master = online_master_.get();
-        start_online_task(OnlineTaskKind::Host,
-            [master, name, max_players](OnlineTaskResult& result) {
-                result.host = master->host(name, max_players);
-            });
-    }
-
     void join_online(std::string lobby_id) {
         if (!ensure_online_master()) return;
         btga::MasterClient* master = online_master_.get();
         online_pending_lobby_ = lobby_id;
+        std::string resume_token;
+        std::filesystem::path resume_path;
+        try {
+            resume_path = btga::dedicated_resume_path(lobby_id);
+            resume_token = btga::load_dedicated_resume_token(
+                resume_path);
+        } catch (const std::exception& error) {
+            online_status_ = error.what();
+            return;
+        }
         start_online_task(OnlineTaskKind::Join,
-            [master, lobby_id = std::move(lobby_id)](OnlineTaskResult& result) {
-                result.join = master->join(lobby_id);
+            [master, lobby_id = std::move(lobby_id),
+             resume_token = std::move(resume_token),
+             resume_path = std::move(resume_path)](OnlineTaskResult& result) {
+                if (resume_token.empty()) {
+                    result.join = master->join(lobby_id);
+                    return;
+                }
+                try {
+                    result.join = master->join(lobby_id, resume_token);
+                } catch (const btga::MasterServiceError& error) {
+                    // A rotated/expired credential must not permanently brick
+                    // this server entry. Retire it and make one ordinary join;
+                    // never loop on a credential the master rejected.
+                    if (error.status() != 401 && error.status() != 403 &&
+                        error.status() != 409) throw;
+                    std::error_code remove_error;
+                    std::filesystem::remove(resume_path, remove_error);
+                    result.join = master->join(lobby_id);
+                }
             });
+    }
+
+    bool restart_for_dedicated_join(
+        const btga::JoinRegistration& registration) {
+#if defined(_WIN32)
+        if (pc_settings.last_rom_path.empty()) {
+            online_status_ = "Select and validate a local ROM before joining a server.";
+            return false;
+        }
+        wchar_t executable[MAX_PATH]{};
+        const DWORD length = GetModuleFileNameW(nullptr, executable, MAX_PATH);
+        if (length == 0 || length >= MAX_PATH) {
+            online_status_ = "Could not locate the running executable.";
+            return false;
+        }
+        const std::string session_text = std::to_string(registration.session_id);
+        const std::string port_text = std::to_string(registration.relay.port);
+        const auto set = [](const char* name, const std::string& value) {
+            return SetEnvironmentVariableA(name, value.c_str()) != FALSE;
+        };
+        const auto clear = [](const char* name) {
+            SetEnvironmentVariableA(name, nullptr);
+        };
+        const std::array<const char*, 5> names{
+            "BTGA_DEDICATED_SESSION", "BTGA_DEDICATED_RELAY_HOST",
+            "BTGA_DEDICATED_RELAY_PORT", "BTGA_DEDICATED_TOKEN",
+            "BTGA_DEDICATED_LOBBY"};
+        const bool environment_ready =
+            set(names[0], session_text) &&
+            set(names[1], registration.relay.address) &&
+            set(names[2], port_text) && set(names[3], registration.join_token) &&
+            set(names[4], online_pending_lobby_);
+        if (!environment_ready) {
+            for (const char* name : names) clear(name);
+            online_status_ = "Could not prepare dedicated client credentials.";
+            return false;
+        }
+        const std::filesystem::path rom =
+            std::filesystem::u8path(pc_settings.last_rom_path);
+        std::wstring command = L"\"";
+        command += executable;
+        command += L"\" --dedicated-client-direct \"";
+        command += rom.wstring();
+        command += L"\"";
+        std::vector<wchar_t> mutable_command(command.begin(), command.end());
+        mutable_command.push_back(L'\0');
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        const BOOL created = CreateProcessW(
+            executable, mutable_command.data(), nullptr, nullptr, FALSE, 0,
+            nullptr, nullptr, &startup, &process);
+        for (const char* name : names) clear(name);
+        if (!created) {
+            online_status_ = "Could not start the authoritative client.";
+            return false;
+        }
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        online_status_ = "Restarting into the selected dedicated server...";
+        ultramodern::quit();
+        return true;
+#else
+        (void)registration;
+        online_status_ =
+            "In-app dedicated-server restart is not implemented on this platform yet.";
+        return false;
+#endif
     }
 
     bool restart_for_online_preboot(bool host, std::uint64_t session,
@@ -1676,23 +1760,24 @@ private:
                 }
             } else if (result.kind == OnlineTaskKind::Browse) {
                 online_lobbies_ = std::move(result.lobbies);
+                std::erase_if(online_lobbies_, [](const btga::OnlineLobby& lobby) {
+                    return (lobby.capabilities &
+                            BTGA_NET_CAP_DEDICATED_AUTHORITY) == 0U;
+                });
                 online_status_ = online_lobbies_.empty()
-                    ? "No compatible public lobbies are currently open."
-                    : "Compatible public lobbies refreshed.";
-            } else if (result.host) {
-                online_lobby_id_ = result.host->lobby.id;
-                online_host_secret_ = result.host->host_secret;
-                online_is_host_ = true;
-                (void)restart_for_online_preboot(
-                    true, result.host->session_id, result.host->relay,
-                    result.host->relay_token, result.host->lobby.id,
-                    result.host->host_secret);
+                    ? "No compatible dedicated servers are currently open."
+                    : "Dedicated server list refreshed.";
             } else if (result.join) {
                 online_lobby_id_ = online_pending_lobby_;
                 online_is_host_ = false;
-                (void)restart_for_online_preboot(
-                    false, result.join->session_id, result.join->relay,
-                    result.join->join_token, online_pending_lobby_, {});
+                try {
+                    btga::save_dedicated_resume_token(
+                        btga::dedicated_resume_path(online_pending_lobby_),
+                        result.join->resume_token);
+                    (void)restart_for_dedicated_join(*result.join);
+                } catch (const std::exception& error) {
+                    online_status_ = error.what();
+                }
             } else {
                 online_next_heartbeat_ = std::chrono::steady_clock::now() +
                     std::chrono::seconds(30);
@@ -1783,7 +1868,7 @@ private:
 
     void draw_online_tab() {
         ImGui::SeparatorText("Online Multiplayer");
-        ImGui::TextWrapped("Networking remains offline until Refresh, Host, or Join is selected. Relay play requires no port forwarding or UPnP and does not disclose your address to other players.");
+        ImGui::TextWrapped("Networking remains offline until Refresh or Join is selected. Matches use a persistent dedicated gameplay authority through the relay; no port forwarding or UPnP is required, and players never receive one another's address.");
         ImGui::TextWrapped("Status: %s", online_status_.c_str());
         const bool busy = online_task_.valid();
         const bool connected = online_connection_ &&
@@ -1806,15 +1891,12 @@ private:
         if (ImGui::Button("Open service dashboard")) {
             open_external_url("https://btga.thegh0stship.com/");
         }
-        ImGui::InputText("Lobby name", online_lobby_name_.data(), online_lobby_name_.size());
-        ImGui::SliderInt("Maximum players", &online_max_players_, 2, 4);
-        if (ImGui::Button("Host public lobby")) host_online();
         ImGui::EndDisabled();
         if (connected) {
             ImGui::SameLine();
             if (ImGui::Button("Disconnect")) disconnect_online();
         }
-        ImGui::SeparatorText("Compatible lobbies");
+        ImGui::SeparatorText("Dedicated servers");
         if (online_lobbies_.empty()) ImGui::TextDisabled("Select Refresh public lobbies.");
         for (const btga::OnlineLobby& lobby : online_lobbies_) {
             ImGui::PushID(lobby.id.c_str());
@@ -1830,7 +1912,7 @@ private:
             ImGui::EndDisabled();
             ImGui::PopID();
         }
-        ImGui::TextWrapped("Experimental two-player input synchronization is active after relay binding. The host is N64 controller port 1 and the joining player is port 2. Both players must currently select the same original multiplayer mode and match settings; synchronized lobby navigation and match launch are still in development.");
+        ImGui::TextWrapped("The authority owns the canonical four-player world and controller timeline. Each device renders only its local view. A reconnect reclaims the same seat, installs the latest checkpoint, and replays the journal before gameplay resumes.");
     }
 
     static int window_mode_index(btga::WindowMode mode) {
@@ -2196,8 +2278,6 @@ private:
     std::unique_ptr<btga::OnlineMultiplayer> online_connection_;
     std::future<OnlineTaskResult> online_task_;
     std::vector<btga::OnlineLobby> online_lobbies_;
-    std::array<char, 49> online_lobby_name_{"BattleTanx Lobby"};
-    int online_max_players_ = 4;
     std::string online_status_ = "Offline. No multiplayer sockets are open.";
     std::string online_lobby_id_;
     std::string online_pending_lobby_;
