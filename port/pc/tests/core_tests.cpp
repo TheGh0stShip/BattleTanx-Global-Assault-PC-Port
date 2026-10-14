@@ -579,11 +579,16 @@ int main() {
                 CHECK(replay[index].tick == index);
                 CHECK(replay[index].random_seed == index + 1U);
             }
+            std::vector<btga::AuthoritativeFrame> complete_replay;
+            CHECK(recovered.copy_complete_journal(complete_replay));
+            CHECK(complete_replay.size() == replay.size());
+            for (std::size_t index = 0; index < complete_replay.size(); ++index) {
+                CHECK(complete_replay[index].tick == index);
+            }
             CHECK(std::filesystem::file_size(persistent_path) == 16U + 4U * 40U);
 
-            // After the caller restores the portable checkpoint and replays
-            // any newer journal frames, canonical publication can continue at
-            // the recovered tick without changing authority ownership.
+            // After authority origin replay, canonical publication can
+            // continue at the recovered tick without changing ownership.
             std::array<std::uint8_t, 4> state{5U, 0U, 0U, 0U};
             CHECK(recovered.begin_tick(4U));
             CHECK(recovered.finish_tick(4U, state));
@@ -622,6 +627,44 @@ int main() {
         btga::TranslatedAuthority recovered{0U, 30U, 0U};
         CHECK(!recovered.open_persistent_journal(corrupt_path, 2U));
         std::filesystem::remove(corrupt_path);
+    }
+    {
+        const auto missing_origin_path = std::filesystem::temp_directory_path() /
+            "btga-translated-authority-missing-origin-test.journal";
+        std::filesystem::remove(missing_origin_path);
+        std::filesystem::remove(missing_origin_path.string() + ".snapshot.0");
+        std::filesystem::remove(missing_origin_path.string() + ".snapshot.1");
+        {
+            btga::TranslatedAuthority authority{0U, 1U, 0U};
+            CHECK(authority.enable_persistent_journal(missing_origin_path, 1U));
+            for (std::uint32_t tick = 0; tick < 3U; ++tick) {
+                const std::array<std::uint8_t, 4> state{
+                    static_cast<std::uint8_t>(tick + 1U), 0U, 0U, 0U};
+                CHECK(authority.begin_tick(tick));
+                CHECK(authority.finish_tick(tick, state));
+            }
+        }
+        // Simulate a bad compactor which preserves the file header and valid
+        // records but discards tick zero. The first surviving checksummed
+        // record still names tick one, so open must reject the non-origin
+        // history instead of silently treating it as a complete journal.
+        {
+            std::ifstream input{missing_origin_path, std::ios::binary};
+            const std::vector<char> bytes{
+                std::istreambuf_iterator<char>{input},
+                std::istreambuf_iterator<char>{}};
+            CHECK(bytes.size() == 16U + 3U * 40U);
+            std::ofstream output{missing_origin_path,
+                std::ios::binary | std::ios::trunc};
+            output.write(bytes.data(), 16U);
+            output.write(bytes.data() + 16U + 40U,
+                         static_cast<std::streamsize>(2U * 40U));
+        }
+        btga::TranslatedAuthority recovered{0U, 1U, 0U};
+        CHECK(!recovered.open_persistent_journal(missing_origin_path, 1U));
+        std::filesystem::remove(missing_origin_path);
+        std::filesystem::remove(missing_origin_path.string() + ".snapshot.0");
+        std::filesystem::remove(missing_origin_path.string() + ".snapshot.1");
     }
     {
         class FourSeatSimulation final : public btga::AuthoritativeSimulation {

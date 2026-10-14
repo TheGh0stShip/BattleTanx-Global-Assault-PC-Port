@@ -59,16 +59,21 @@ public:
     [[nodiscard]] std::size_t journal_size() const noexcept;
     [[nodiscard]] std::size_t copy_journal_from(
         std::uint32_t first_tick, std::span<AuthoritativeFrame> destination) const;
+    // Copies and validates the complete canonical history [0, next_tick).
+    // Authority cold recovery must fail closed if tick zero or any later
+    // record is unavailable; a bounded in-memory tail is not sufficient.
+    [[nodiscard]] bool copy_complete_journal(
+        std::vector<AuthoritativeFrame>& destination) const;
     // Spool the complete canonical input history to an endian-stable file
     // while retaining only a bounded replay tail in memory. This must be
     // enabled before the first gameplay tick.
     [[nodiscard]] bool enable_disk_journal(
         const std::filesystem::path& path, std::size_t memory_frames = 4096U);
     // Persistent journals survive process shutdown. Two alternating,
-    // checksummed portable-state checkpoints sit beside the input journal so
-    // a replacement authority can restore the newest complete checkpoint and
-    // replay the remaining canonical frames. `open_persistent_journal` never
-    // trusts a partial record or checkpoint.
+    // checksummed portable-state checkpoints sit beside the complete input
+    // journal. Replacement authorities replay from tick zero; checkpoints
+    // remain the bounded bootstrap source for newly admitted clients.
+    // `open_persistent_journal` never trusts a partial record or checkpoint.
     [[nodiscard]] bool enable_persistent_journal(
         const std::filesystem::path& path, std::size_t memory_frames = 4096U);
     [[nodiscard]] bool open_persistent_journal(

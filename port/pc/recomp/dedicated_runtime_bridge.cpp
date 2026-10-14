@@ -1293,45 +1293,27 @@ extern "C" void btga_dedicated_run_loop(
                 std::fputs("BTGA_AUTHORITY persistent checkpoint unavailable\n", stderr);
                 std::abort();
             }
-            replay.resize(authority.next_tick() - checkpoint->next_tick);
-            if (!replay.empty() && authority.copy_journal_from(
-                    checkpoint->next_tick, replay) != replay.size()) {
+            // The compact portable checkpoint deliberately omits host-local
+            // state, but long matches have also shown that it does not yet
+            // contain every piece of RDRAM which can influence the very next
+            // simulation tick.  Restoring it and replaying only the tail can
+            // therefore produce a valid checkpoint digest followed by an
+            // immediate deterministic divergence.  The checksummed input
+            // journal is complete from tick zero, and this fresh process is
+            // already at the same deterministic match-entry boundary. Replay
+            // the whole journal for authority recovery; retain checkpoints as
+            // a bandwidth optimization for client admission only.
+            if (!authority.copy_complete_journal(replay)) {
                 std::fputs("BTGA_AUTHORITY persistent replay gap\n", stderr);
                 std::abort();
             }
-        }
-        if (!btga::restore_dedicated_checkpoint(
-                {rdram, rdram_size}, checkpoint->state)) {
-            std::fputs("BTGA_AUTHORITY persistent checkpoint restore failed\n", stderr);
-            std::abort();
-        }
-        std::array<std::uint8_t, btga::gameplay_snapshot_size> restored_state{};
-        if (!btga::capture_gameplay_snapshot(
-                {rdram, rdram_size}, restored_state) ||
-            checkpoint->state.size() < restored_state.size() ||
-            !std::ranges::equal(
-                restored_state,
-                std::span<const std::uint8_t>{checkpoint->state}.first(
-                    restored_state.size()))) {
-            std::size_t first_difference = restored_state.size();
-            if (checkpoint->state.size() >= restored_state.size()) {
-                for (std::size_t index = 0; index < restored_state.size(); ++index) {
-                    if (restored_state[index] != checkpoint->state[index]) {
-                        first_difference = index;
-                        break;
-                    }
-                }
-            }
-            std::fprintf(stderr,
-                         "BTGA_AUTHORITY restored checkpoint differs offset=%zu\n",
-                         first_difference);
-            std::abort();
         }
         recovery_replay_running = true;
         for (const auto& frame : replay) {
             active_inputs = frame.inputs;
             btga_advance_retail_mode_counters(rdram);
             func_80079FF0(rdram, context);
+            btga_dedicated_test_force_match_end(rdram, frame.tick);
             func_8009C524(rdram, context);
             // Bootstrap and presentation code can consume the retail RNG
             // without changing canonical gameplay. Re-anchor it to the
@@ -1358,12 +1340,16 @@ extern "C" void btga_dedicated_run_loop(
                              frame.random_seed, actual_seed);
                 std::abort();
             }
+            // Match the live dedicated outer loop exactly. Canonical state is
+            // captured before the results-screen continuation, then that
+            // continuation prepares the next tick.
+            btga_dedicated_advance_results(rdram, context);
         }
         recovery_replay_running = false;
         recovery_pending = false;
         restored_persistent_session = true;
         std::fprintf(stderr,
-                     "BTGA_AUTHORITY recovered checkpoint=%u journal_head=%u\n",
+                     "BTGA_AUTHORITY recovered from origin checkpoint=%u journal_head=%u\n",
                      checkpoint->next_tick, authority.next_tick());
         std::fflush(stderr);
     }

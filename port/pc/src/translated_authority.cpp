@@ -334,6 +334,24 @@ std::size_t TranslatedAuthority::copy_journal_from(
     return copied;
 }
 
+bool TranslatedAuthority::copy_complete_journal(
+    std::vector<AuthoritativeFrame>& destination) const
+{
+    destination.resize(next_tick_);
+    if (destination.empty()) return true;
+    if (copy_journal_from(0U, destination) != destination.size()) {
+        destination.clear();
+        return false;
+    }
+    for (std::size_t index = 0; index < destination.size(); ++index) {
+        if (destination[index].tick != index) {
+            destination.clear();
+            return false;
+        }
+    }
+    return true;
+}
+
 bool TranslatedAuthority::enable_disk_journal(
     const std::filesystem::path& path, std::size_t memory_frames)
 {

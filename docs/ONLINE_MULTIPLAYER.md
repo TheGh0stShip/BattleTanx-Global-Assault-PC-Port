@@ -216,10 +216,12 @@ before starting `--dedicated-server-public`. The authority then persists:
 - two alternating, checksummed portable gameplay checkpoints.
 
 After a process crash, the replacement process authenticates to the existing
-lobby, obtains a fresh signed authority token, reclaims relay slot zero,
-restores the newest complete portable checkpoint, and runs every later journal
-frame through the real translated update. It aborts instead of publishing if
-any replayed digest differs. Torn final journal records and incomplete
+lobby, obtains a fresh signed authority token, reclaims relay slot zero, and
+runs the complete journal from tick zero through the real translated update.
+Portable checkpoints remain the bounded bootstrap source for newly admitted
+clients, but are not trusted as a complete authority process image. Recovery
+aborts instead of publishing if tick zero or any later frame is unavailable,
+or if any replayed digest differs. Torn final journal records and incomplete
 checkpoints are ignored or rejected without inventing state.
 
 The unattended Windows gate has an authority-restart mode:
@@ -229,8 +231,9 @@ The unattended Windows gate has an authority-restart mode:
     -Rom 'C:\Games\BattleTanxGA.z64' -ReconnectAuthority
 ```
 
-This path preserves an already-running match. A replacement authority exposes
-its validated portable checkpoint before translated gameplay resumes, so a
+This path preserves an already-running match. After full origin replay, a
+replacement authority exposes its validated portable checkpoint before
+translated gameplay resumes, so a
 brand-new process with no prior acknowledgment can install that positive-tick
 checkpoint, replay the journal tail, and release the shared recovery barrier.
 It never relabels recovered live state as a tick-zero snapshot.
