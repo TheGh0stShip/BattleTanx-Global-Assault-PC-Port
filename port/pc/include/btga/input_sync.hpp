@@ -22,6 +22,42 @@ struct OnlineSyncOrigin {
     friend bool operator==(const OnlineSyncOrigin&, const OnlineSyncOrigin&) = default;
 };
 
+// Assign a newly observed controller sample to a tick that is still useful to
+// the authority. A recovering replica may intentionally render several ticks
+// behind the live head; stamping from that presentation tick would make every
+// input late even though the client remains healthy.
+[[nodiscard]] std::uint32_t choose_authority_input_tick(
+    std::uint32_t replica_tick, std::uint32_t authority_head,
+    std::uint32_t replica_lead = 2U, std::uint32_t authority_lead = 4U) noexcept;
+
+// Stores inputs that were actually sampled for a simulation tick. Re-sending
+// a batch provides loss redundancy, but never invents commands for future
+// ticks and never changes a tick after its first sample was committed locally.
+class TickInputHistory {
+public:
+    static constexpr std::size_t capacity = 64;
+    static constexpr std::size_t max_batch = 8;
+
+    struct Batch {
+        std::uint32_t first_tick = 0;
+        std::array<OnlineControllerInput, max_batch> inputs{};
+        std::size_t count = 0;
+    };
+
+    void reset() noexcept;
+    [[nodiscard]] bool record(std::uint32_t tick,
+                              OnlineControllerInput input) noexcept;
+    [[nodiscard]] Batch batch_ending_at(std::uint32_t tick) const noexcept;
+
+private:
+    struct Sample {
+        OnlineControllerInput input{};
+        std::uint32_t tick = 0;
+        bool valid = false;
+    };
+    std::array<Sample, capacity> samples_{};
+};
+
 // Encodes and validates the portable gameplay datagrams carried by the relay.
 // This class deliberately contains no sockets, clocks, host pointers, or native
 // struct serialization so the same bytes can be used by every target platform.

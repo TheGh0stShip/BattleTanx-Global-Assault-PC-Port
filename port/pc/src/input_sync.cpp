@@ -11,6 +11,49 @@ extern "C" {
 
 namespace btga {
 
+std::uint32_t choose_authority_input_tick(
+    std::uint32_t replica_tick, std::uint32_t authority_head,
+    std::uint32_t replica_lead, std::uint32_t authority_lead) noexcept {
+    const std::uint32_t replica_target = replica_tick + replica_lead;
+    const std::uint32_t authority_target = authority_head + authority_lead;
+    return static_cast<std::int32_t>(authority_target - replica_target) > 0
+        ? authority_target : replica_target;
+}
+
+void TickInputHistory::reset() noexcept { samples_ = {}; }
+
+bool TickInputHistory::record(
+    std::uint32_t tick, OnlineControllerInput input) noexcept {
+    Sample& sample = samples_[tick % capacity];
+    if (sample.valid && sample.tick == tick) return sample.input == input;
+    sample = {input, tick, true};
+    return true;
+}
+
+TickInputHistory::Batch TickInputHistory::batch_ending_at(
+    std::uint32_t tick) const noexcept {
+    Batch batch{};
+    std::size_t count = 0;
+    std::uint32_t first = tick;
+    std::uint32_t candidate = tick;
+    for (;;) {
+        const Sample& sample = samples_[candidate % capacity];
+        if (!sample.valid || sample.tick != candidate) break;
+        first = candidate;
+        ++count;
+        if (count == max_batch || candidate == 0U) break;
+        --candidate;
+    }
+    if (count == 0U) return batch;
+    batch.first_tick = first;
+    batch.count = count;
+    for (std::size_t index = 0; index < count; ++index) {
+        const std::uint32_t sample_tick = first + static_cast<std::uint32_t>(index);
+        batch.inputs[index] = samples_[sample_tick % capacity].input;
+    }
+    return batch;
+}
+
 std::size_t InputSynchronizer::encode(
     std::span<std::uint8_t> packet, std::uint64_t session_id,
     std::uint16_t peer_id, std::uint32_t sequence, std::uint32_t tick,
