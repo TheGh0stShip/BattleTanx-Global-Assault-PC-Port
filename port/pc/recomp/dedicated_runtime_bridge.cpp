@@ -134,7 +134,6 @@ void poll_authority_health() {
     if (!authority_health_path || now < next_health_write) return;
     next_health_write = now + std::chrono::seconds{1};
     const auto sequence = authority_loop_sequence.load(std::memory_order_acquire);
-    if (sequence == 0U || sequence == last_health_sequence) return;
 
     btga::AuthorityHealth health;
     std::filesystem::path path;
@@ -146,6 +145,11 @@ void poll_authority_health() {
         health = {sequence, authority.next_tick(), authority.connected_mask(),
                   bootstrap_recovery.mask(), gameplay_tick_active};
     }
+    // An empty lobby parks the translated frontend after one inactive pass,
+    // while this network pump remains responsible for admission and master
+    // heartbeats. Refresh idle health from the pump, but require translated
+    // loop progress once gameplay is active so match hangs remain detectable.
+    if (health.gameplay_tick_active && sequence == last_health_sequence) return;
     if (btga::save_authority_health(path, health)) {
         last_health_sequence = sequence;
     } else {
