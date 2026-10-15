@@ -21,7 +21,7 @@
     "N64ModernRuntime",
     "RT64"
   ],
-  "approach": "Static recompilation with native platform services, RT64 rendering, and SDL2 audio and input.",
+  "approach": "Recompilation with native platform services, RT64 rendering, and SDL2 audio and input.",
   "maintainers": [
     {
       "name": "TheGh0stShip",
