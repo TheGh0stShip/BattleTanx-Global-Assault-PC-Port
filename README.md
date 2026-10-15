@@ -2,6 +2,7 @@
 
 [![PC: Windows playable](https://img.shields.io/badge/PC-Windows%20playable-brightgreen)](port/pc/README.md)
 [![Latest release](https://img.shields.io/github/v/release/TheGh0stShip/BattleTanx-Global-Assault-PC-Port?display_name=release&label=release)](https://github.com/TheGh0stShip/BattleTanx-Global-Assault-PC-Port/releases/latest)
+[![recomp.board: Playable](https://img.shields.io/badge/recomp.board-Playable-brightgreen)](https://recomp.fyi/game/battletanx-global-assault-n64)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](COPYING)
 
 This repository is the definitive native PC port of **BattleTanx: Global

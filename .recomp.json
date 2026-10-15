@@ -1,0 +1,42 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "BattleTanx: Global Assault",
+  "system": "N64",
+  "type": "recomp",
+  "original": {
+    "region": "USA",
+    "revision": "Rev 0",
+    "serial": "NBQE",
+    "sha1": "805248fb0a0ee694cad8d7dc927b631d860dd8cf"
+  },
+  "project": "BattleTanx: Global Assault native PC port",
+  "status": "playable",
+  "targets": [
+    "Windows",
+    "Linux"
+  ],
+  "toolchain": [
+    "N64recomp",
+    "RSPRecomp",
+    "N64ModernRuntime",
+    "RT64"
+  ],
+  "approach": "Static recompilation with native platform services, RT64 rendering, and SDL2 audio and input.",
+  "maintainers": [
+    {
+      "name": "TheGh0stShip",
+      "link": "https://github.com/TheGh0stShip"
+    }
+  ],
+  "links": [
+    {
+      "label": "Matching decompilation",
+      "url": "https://github.com/TheGh0stShip/BattleTanx-Global-Assault"
+    }
+  ],
+  "tags": [
+    "native",
+    "multiplayer"
+  ],
+  "notes": "The native Windows runtime reaches the original menus and campaign gameplay with rendering, audio, keyboard, and controller support. Linux has a native Vulkan build path. Multiplayer, broad hardware coverage, long-session stability, and complete game-mode validation remain in development."
+}
