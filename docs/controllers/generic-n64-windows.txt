@@ -1,0 +1,4 @@
+# Opt-in measured Windows N64 pad layout. Data supplied by MatyMeatBoy, 2026-11-11.
+03000000790000000600000000000000,Generic Chinese N64 USB Controller,a:b5,x:b4,start:b9,leftshoulder:b6,rightshoulder:b7,lefttrigger:b8,leftx:a0,lefty:a1,+rightx:b1,-rightx:b3,+righty:b2,-righty:b0,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,crc:8630,platform:Windows,
+03000000790000000600000000000000,Generic Chinese N64 USB Controller,a:b5,x:b4,start:b9,leftshoulder:b6,rightshoulder:b7,lefttrigger:b8,leftx:a0,lefty:a1,+rightx:b1,-rightx:b3,+righty:b2,-righty:b0,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,crc:79be,platform:Windows,
+03000000790000000600000000000000,Generic Chinese N64 USB Controller,a:b5,x:b4,start:b9,leftshoulder:b6,rightshoulder:b7,lefttrigger:b8,leftx:a0,lefty:a1,+rightx:b1,-rightx:b3,+righty:b2,-righty:b0,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,crc:8e4f,platform:Windows,
